@@ -22,13 +22,22 @@ def _tiny_gpt_config() -> dict[str, int | float | bool]:
         "n_layers": 0,
         "drop_rate": 0.0,
         "qkv_bias": False,
+        "positional_encoding": "gpt2",
     }
 
 
 def _tiny_transformer_gpt_config() -> dict[str, int | float | bool]:
     """Return a tiny GPT configuration with one transformer block for cache tests."""
     cfg = _tiny_gpt_config().copy()
+    cfg["emb_dim"] = 4
     cfg["n_layers"] = 1
+    return cfg
+
+
+def _tiny_rope_gpt_config() -> dict[str, int | float | bool | str]:
+    """Return a tiny GPT configuration that uses RoPE in attention."""
+    cfg = _tiny_transformer_gpt_config().copy()
+    cfg["positional_encoding"] = "rope"
     return cfg
 
 
@@ -56,6 +65,7 @@ def test_gpt_forward_matches_manual_computation_without_transformer_blocks() -> 
                 ]
             )
         )
+        assert model.pos_emb is not None
         model.pos_emb.weight.copy_(
             torch.tensor(
                 [
@@ -84,9 +94,10 @@ def test_gpt_forward_matches_manual_computation_without_transformer_blocks() -> 
 
     logits = model(in_idx)
 
-    # With zero transformer layers, the forward path is token embeddings + positional embeddings,
-    # followed by the final layer norm and output projection.
+    # GPT-2 positional encoding adds learned position embeddings before the
+    # transformer blocks.
     tok_embeds = model.tok_emb.weight[in_idx]
+    assert model.pos_emb is not None
     pos_embeds = model.pos_emb.weight[: in_idx.shape[1]]
     x = tok_embeds + pos_embeds
     x = _manual_layer_norm(x)
@@ -96,55 +107,42 @@ def test_gpt_forward_matches_manual_computation_without_transformer_blocks() -> 
     torch.testing.assert_close(logits, expected_logits)
 
 
-def test_gpt_uses_positional_embeddings_for_identical_tokens() -> None:
-    """Check positional embeddings change logits even when token ids are identical."""
-    cfg = _tiny_gpt_config()
+def test_gpt_rope_is_invariant_to_global_position_shift() -> None:
+    """Check RoPE depends on relative positions, not absolute position embeddings."""
+    cfg = _tiny_rope_gpt_config()
     model = GPTModel(cfg)
 
     with torch.no_grad():
-        # Remove token information entirely so any logit difference comes only from position.
-        model.tok_emb.weight.zero_()
-        model.pos_emb.weight.copy_(
+        model.tok_emb.weight.copy_(
             torch.tensor(
                 [
-                    [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [0.0, 0.0, 1.0],
-                    [1.0, 1.0, 1.0],
+                    [0.10, 0.20, 0.30, 0.40],
+                    [0.50, 0.60, 0.70, 0.80],
+                    [0.90, 1.00, 1.10, 1.20],
+                    [1.30, 1.40, 1.50, 1.60],
+                    [1.70, 1.80, 1.90, 2.00],
                 ]
             )
         )
         model.final_norm.scale.fill_(1.0)
         model.final_norm.shift.zero_()
-        model.out_head.weight.copy_(
-            torch.tensor(
-                [
-                    [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [0.0, 0.0, 1.0],
-                    [1.0, 1.0, 1.0],
-                    [-1.0, 0.5, 0.5],
-                ]
-            )
-        )
 
-    in_idx = torch.tensor([[0, 0, 0]])
+    in_idx = torch.tensor([[0, 1, 0]])
 
-    logits = model(in_idx)
+    logits_at_zero = model(in_idx, pos=0)
+    logits_at_one = model(in_idx, pos=1)
 
-    assert logits.shape == (1, 3, cfg["vocab_size"])
-    # Identical tokens at different positions should still produce different logits.
-    assert not torch.allclose(logits[:, 0], logits[:, 1])
-    assert not torch.allclose(logits[:, 1], logits[:, 2])
+    assert logits_at_zero.shape == (1, 3, cfg["vocab_size"])
+    torch.testing.assert_close(logits_at_zero, logits_at_one)
 
 
 def test_gpt_rejects_sequences_longer_than_context_length() -> None:
     """Ensure GPT raises IndexError for inputs longer than its context length."""
-    cfg = _tiny_gpt_config()
+    cfg = _tiny_rope_gpt_config()
     model = GPTModel(cfg)
     in_idx = torch.tensor([[0, 1, 2, 3, 4]])
 
-    with pytest.raises(IndexError):
+    with pytest.raises(AssertionError):
         model(in_idx)
 
 
@@ -214,7 +212,7 @@ def test_generate_text_simple_with_tiny_gpt_is_deterministic() -> None:
 
 
 def test_gpt_check_gpt124_size() -> None:
-    """ Check GPT_CONFIG_124M size, we see that model is 124M without output layer weight, but this
+    """Check GPT_CONFIG_124M size, we see that model is 124M without output layer weight, but this
     are valid trainable parameters. A model branded XXX size is in reality a bit bigger.
     """
     torch.manual_seed(123)
@@ -225,12 +223,11 @@ def test_gpt_check_gpt124_size() -> None:
     assert total_params == 163037184
     print("Token embedding layer shape:", model.tok_emb.weight.shape)
     print("Output layer shape:", model.out_head.weight.shape)
-    total_params_gpt2 = (
-        total_params - sum(p.numel()
-        for p in model.out_head.parameters())
+    total_params_gpt2 = total_params - sum(
+        p.numel() for p in model.out_head.parameters()
     )
-    print(f"Number of trainable parameters "
-        f"considering weight tying: {total_params_gpt2:,}"
+    print(
+        f"Number of trainable parameters considering weight tying: {total_params_gpt2:,}"
     )
     # assert total_params_gpt2 == 124412160 # without qv_bias
     assert total_params_gpt2 == 124439808

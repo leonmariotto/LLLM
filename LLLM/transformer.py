@@ -18,7 +18,7 @@ input (so N+1 input become N output + N input).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -100,13 +100,14 @@ class TransformerBlock(nn.Module):
             num_heads=cfg["n_heads"],
             dropout=cfg["drop_rate"],
             qkv_bias=cfg["qkv_bias"],
+            use_rope=cfg["positional_encoding"] == "rope",
         )
         self.ff = FeedForward(cfg["emb_dim"])
         self.norm1 = LayerNorm(cfg["emb_dim"])
         self.norm2 = LayerNorm(cfg["emb_dim"])
         self.drop_shortcut: nn.Module = nn.Dropout(cfg["drop_rate"])
 
-    def forward(self, x: torch.Tensor, pos: Optional[int] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pos: int | None = None) -> torch.Tensor:
         # Shortcut connection for attention block
         shortcut = x
         x = self.norm1(x)

@@ -9,14 +9,18 @@ import torch
 
 
 def precompute_rope_cache(
-    seq_len: torch.Tensor, head_dim: int, base: int = 10000, device: torch.Device = None
-):
+    seq_len: int,
+    head_dim: int,
+    base: int = 10000,
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Pre-compute RoPE rotations matrix.
     seq_len is the maximum dimension for interpretable context. A sliding context buffer
     using a larger position space is possible thanks to RoPE. In this case seq_len is equal
     to this larger position space length.
     """
+    assert head_dim % 2 == 0, "RoPE requires an even head_dim"
     # Number of 2D pairs
     half_dim = head_dim // 2
 
@@ -25,7 +29,7 @@ def precompute_rope_cache(
     theta = 1.0 / (base ** (2 * i / head_dim))
 
     # Positions p
-    positions: torch.Tensor = torch.arange(seq_len, device=device)
+    positions = torch.arange(seq_len, device=device)
 
     # angles[p, i] = p * θ_i
     angles = positions[:, None] * theta[None, :]
@@ -36,7 +40,7 @@ def precompute_rope_cache(
     return cos, sin
 
 
-def apply_rope(x, cos, sin):
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """
     Apply RoPE on x.
 

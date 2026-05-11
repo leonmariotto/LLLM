@@ -2,13 +2,16 @@
 Generative Pretrained Tranformer
 """
 
-from typing import TypedDict, Optional
+from typing import Literal, TypedDict
 
 import torch
 from torch import nn
 
 from .transformer import LayerNorm
 from .transformer import TransformerBlock
+
+
+PositionalEncoding = Literal["gpt2", "rope"]
 
 
 class GPTConfig(TypedDict):
@@ -19,6 +22,7 @@ class GPTConfig(TypedDict):
     n_layers: int
     drop_rate: float
     qkv_bias: bool
+    positional_encoding: PositionalEncoding
 
 
 GPT_CONFIG_124M: GPTConfig = {
@@ -29,6 +33,7 @@ GPT_CONFIG_124M: GPTConfig = {
     "n_layers": 12,  # Number of layers
     "drop_rate": 0.1,  # Dropout rate
     "qkv_bias": True,  # Query-Key-Value bias: set to true as pre-trained use it
+    "positional_encoding": "gpt2",
 }
 
 GPT_CONFIG_355M: GPTConfig = {
@@ -39,6 +44,7 @@ GPT_CONFIG_355M: GPTConfig = {
     "n_layers": 24,  # Number of layers
     "drop_rate": 0.0,  # Dropout rate
     "qkv_bias": True,  # Query-Key-Value bias: set to true as pre-trained use it
+    "positional_encoding": "gpt2",
 }
 
 
@@ -63,7 +69,11 @@ class GPTModel(nn.Module):
 
     def __init__(self, cfg: GPTConfig) -> None:
         super().__init__()
+        self.positional_encoding = cfg["positional_encoding"]
         self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
+        self.pos_emb: nn.Embedding | None = None
+        if self.positional_encoding == "gpt2":
+            self.pos_emb = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
         self.drop_emb = nn.Dropout(cfg["drop_rate"])
 
         self.trf_blocks = nn.Sequential(
@@ -73,10 +83,16 @@ class GPTModel(nn.Module):
         self.final_norm = LayerNorm(cfg["emb_dim"])
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
 
-    def forward(self, in_idx: torch.Tensor, pos: Optional[int] = None) -> torch.Tensor:
-        # _, _ = in_idx.shape  # batch_size, seq_len
+    def forward(self, in_idx: torch.Tensor, pos: int | None = None) -> torch.Tensor:
+        _, seq_len = in_idx.shape  # batch_size, seq_len
         tok_embeds = self.tok_emb(in_idx)
-        x = tok_embeds
+        if self.positional_encoding == "gpt2":
+            assert self.pos_emb is not None
+            pos_ids = torch.arange(0, seq_len, device=in_idx.device, dtype=torch.long)
+            pos_embeds = self.pos_emb(pos_ids).unsqueeze(0)
+            x = tok_embeds + pos_embeds
+        else:
+            x = tok_embeds
         x = self.drop_emb(x)
         # x is the hidden state between transformers block. Output of transformer 1
         # is the input of transformer 2 and so on.

@@ -18,7 +18,7 @@ class AddConstant(nn.Module):
         super().__init__()
         self.value = value
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pos: int | None = None) -> torch.Tensor:
         """Return the input tensor with the configured constant added."""
         return x + self.value
 
@@ -115,6 +115,7 @@ def test_transformer_block_applies_both_residual_paths() -> None:
         "n_heads": 1,
         "drop_rate": 0.0,
         "qkv_bias": False,
+        "positional_encoding": "gpt2",
     }
     block = TransformerBlock(cfg)
     # Replace submodules with deterministic operations so the residual math is easy to verify.
