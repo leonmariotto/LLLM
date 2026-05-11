@@ -7,7 +7,7 @@ build:
 	uv build
 
 pyright:
-	uv run pyright LLLM
+	PYRIGHT_PYTHON_CACHE_DIR=.pyright-python uv run pyright LLLM
 
 format:
 	uv run ruff format

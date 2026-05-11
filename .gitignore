@@ -2,3 +2,4 @@
 .coverage
 __pycache__
 */__pycache__
+.pyright-python
