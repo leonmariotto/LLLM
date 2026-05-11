@@ -16,10 +16,18 @@ too small). So we create shortcut connection that add the N layer input to N+1 l
 input (so N+1 input become N output + N input).
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 from torch import nn
-from typing import Union
+
 from .attention import MultiHeadAttention
+
+# avoids a runtime circular import, except for type checking.
+if TYPE_CHECKING:
+    from .gpt import GPTConfig
 
 
 # TODO use torch GeLu and remove this, or move some in comments.
@@ -30,10 +38,10 @@ class GELU(nn.Module):
     for illustration purpose.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return (
             0.5
             * x
@@ -52,7 +60,7 @@ class FeedForward(nn.Module):
     FeedForward: expansion -> activation (GeLu) -> contraction.
     """
 
-    def __init__(self, embedded_dimension, expansion_factor=4):
+    def __init__(self, embedded_dimension: int, expansion_factor: int = 4) -> None:
         super().__init__()
         self.layers = nn.Sequential(
             nn.Linear(embedded_dimension, expansion_factor * embedded_dimension),
@@ -60,7 +68,7 @@ class FeedForward(nn.Module):
             nn.Linear(expansion_factor * embedded_dimension, embedded_dimension),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)
 
 
@@ -69,13 +77,13 @@ class LayerNorm(nn.Module):
     LayerNorm: normalize output data to have a mean of 0 and a variance of 1.
     """
 
-    def __init__(self, emb_dim, eps=1e-5):
+    def __init__(self, emb_dim: int, eps: float = 1e-5) -> None:
         super().__init__()
         self.eps = eps
         self.scale = nn.Parameter(torch.ones(emb_dim))
         self.shift = nn.Parameter(torch.zeros(emb_dim))
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         mean = x.mean(dim=-1, keepdim=True)
         var = x.var(dim=-1, keepdim=True, unbiased=False)
         norm_x = (x - mean) / torch.sqrt(var + self.eps)
@@ -83,9 +91,9 @@ class LayerNorm(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg: GPTConfig) -> None:
         super().__init__()
-        self.att: Union[MultiHeadAttention, nn.Module] = MultiHeadAttention(
+        self.att = MultiHeadAttention(
             d_in=cfg["emb_dim"],
             d_out=cfg["emb_dim"],
             context_length=cfg["context_length"],
@@ -93,12 +101,12 @@ class TransformerBlock(nn.Module):
             dropout=cfg["drop_rate"],
             qkv_bias=cfg["qkv_bias"],
         )
-        self.ff: Union[FeedForward, nn.Module] = FeedForward(cfg["emb_dim"])
-        self.norm1: Union[LayerNorm, nn.Module] = LayerNorm(cfg["emb_dim"])
-        self.norm2: Union[LayerNorm, nn.Module] = LayerNorm(cfg["emb_dim"])
+        self.ff = FeedForward(cfg["emb_dim"])
+        self.norm1 = LayerNorm(cfg["emb_dim"])
+        self.norm2 = LayerNorm(cfg["emb_dim"])
         self.drop_shortcut: nn.Module = nn.Dropout(cfg["drop_rate"])
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Shortcut connection for attention block
         shortcut = x
         x = self.norm1(x)

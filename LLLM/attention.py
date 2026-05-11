@@ -3,8 +3,6 @@ Implement a simple self attention.
 Attention mechanism involve 3 trainable matrix : query, key, values.
 """
 
-from typing import Optional
-
 import torch
 from torch import nn
 
@@ -71,7 +69,7 @@ class MultiHeadAttention(nn.Module):
             "mask", torch.triu(torch.ones(context_length, context_length), diagonal=1)
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         forward method is called by the nn.Module __call__ method.
         x is expected to be a batch of tensor of d_in size.

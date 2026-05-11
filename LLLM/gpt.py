@@ -2,14 +2,26 @@
 Generative Pretrained Tranformer
 """
 
+from typing import TypedDict
+
 import torch
 from torch import nn
+
 from .transformer import LayerNorm
 from .transformer import TransformerBlock
 
-# TODO this should be pydantic dataclass
 
-GPT_CONFIG_124M = {
+class GPTConfig(TypedDict):
+    vocab_size: int
+    context_length: int
+    emb_dim: int
+    n_heads: int
+    n_layers: int
+    drop_rate: float
+    qkv_bias: bool
+
+
+GPT_CONFIG_124M: GPTConfig = {
     "vocab_size": 50257,  # Vocabulary size
     "context_length": 1024,  # Context length
     "emb_dim": 768,  # Embedding dimension
@@ -19,7 +31,7 @@ GPT_CONFIG_124M = {
     "qkv_bias": True,  # Query-Key-Value bias: set to true as pre-trained use it
 }
 
-GPT_CONFIG_355M = {
+GPT_CONFIG_355M: GPTConfig = {
     "vocab_size": 50257,  # Vocabulary size
     "context_length": 1024,  # Context length
     "emb_dim": 1024,  # Embedding dimension
@@ -49,7 +61,7 @@ class GPTModel(nn.Module):
     At inference only the next token matter.
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: GPTConfig) -> None:
         super().__init__()
         self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
         self.pos_emb = nn.Embedding(cfg["context_length"], cfg["emb_dim"])
@@ -62,7 +74,7 @@ class GPTModel(nn.Module):
         self.final_norm = LayerNorm(cfg["emb_dim"])
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
 
-    def forward(self, in_idx):
+    def forward(self, in_idx: torch.Tensor) -> torch.Tensor:
         _, seq_len = in_idx.shape  # batch_size, seq_len
         tok_embeds = self.tok_emb(in_idx)
         pos_ids = torch.arange(0, seq_len, device=in_idx.device, dtype=torch.long)

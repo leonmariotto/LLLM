@@ -35,6 +35,10 @@ dev =  ["pytest-cov", "pytest", "pytest-dependency"]
 [tool.pyright]
 typeCheckingMode = "strict"
 exclude = ["tests"]
+# suppresses errors for libraries that do not ship complete type stubs.
+reportMissingTypeStubs = false
+# suppresses errors where Pyright thinks public Torch APIs is not correctly exported by pytorch.
+reportPrivateImportUsage = false
 
 [tool.ruff]
 exclude = ["tests"]

@@ -1,21 +1,36 @@
+from typing import Any, Protocol, cast
+
 import torch
 from torch.utils.data import DataLoader, Dataset
 import tiktoken
+from tiktoken.core import Encoding
 import numpy as np
 
 
-def text_to_token_ids(text, tokenizer):
+class TensorModel(Protocol):
+    def eval(self) -> Any: ...
+
+    def __call__(self, idx: torch.Tensor) -> torch.Tensor: ...
+
+
+def text_to_token_ids(text: str, tokenizer: Encoding) -> torch.Tensor:
     encoded = tokenizer.encode(text, allowed_special={"<|endoftext|>"})
     encoded_tensor = torch.tensor(encoded).unsqueeze(0)  # add batch dimension
     return encoded_tensor
 
 
-def token_ids_to_text(token_ids, tokenizer):
+def token_ids_to_text(token_ids: torch.Tensor, tokenizer: Encoding) -> str:
     flat = token_ids.squeeze(0)  # remove batch dimension
-    return tokenizer.decode(flat.tolist())
+    flat_any = cast(Any, flat)
+    return tokenizer.decode(cast(list[int], flat_any.tolist()))
 
 
-def calc_accuracy_loader(data_loader, model, device, num_batches=None):
+def calc_accuracy_loader(
+    data_loader: DataLoader[tuple[torch.Tensor, torch.Tensor]],
+    model: TensorModel,
+    device: torch.device,
+    num_batches: int | None = None,
+) -> float:
     model.eval()
     correct_predictions, num_examples = 0, 0
 
@@ -38,7 +53,7 @@ def calc_accuracy_loader(data_loader, model, device, num_batches=None):
     return correct_predictions / num_examples
 
 
-def get_device():
+def get_device() -> torch.device:
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -70,7 +85,12 @@ def get_device_str() -> str:
     return device
 
 
-def generate_text_simple(model, idx, max_new_tokens, context_size):
+def generate_text_simple(
+    model: TensorModel,
+    idx: torch.Tensor,
+    max_new_tokens: int,
+    context_size: int,
+) -> torch.Tensor:
     """
     The following function implements greedy decoding, which is a simple and
     fast method to generate text.
@@ -117,8 +137,14 @@ def generate_text_simple(model, idx, max_new_tokens, context_size):
 
 
 def generate(
-    model, idx, max_new_tokens, context_size, temperature=0.0, top_k=None, eos_id=None
-):
+    model: TensorModel,
+    idx: torch.Tensor,
+    max_new_tokens: int,
+    context_size: int,
+    temperature: float = 0.0,
+    top_k: int | None = None,
+    eos_id: int | None = None,
+) -> torch.Tensor:
     """
     This generate function make use of temperature sampling and top-k sampling.
     Theses 2 functions add some randomness in the LLM generations and improve the
@@ -162,9 +188,7 @@ def generate(
         else:
             idx_next = torch.argmax(logits, dim=-1, keepdim=True)  # (batch_size, 1)
 
-        if (
-            idx_next == eos_id
-        ):  # Stop generating early if end-of-sequence token is encountered and eos_id is specified
+        if eos_id is not None and bool((idx_next == eos_id).all().item()):
             break
 
         # Same as before: append sampled index to the running sequence
@@ -172,10 +196,12 @@ def generate(
     return idx
 
 
-class GPTDatasetV1(Dataset):
-    def __init__(self, txt, tokenizer, max_length, stride):
-        self.input_ids = []
-        self.target_ids = []
+class GPTDatasetV1(Dataset[tuple[torch.Tensor, torch.Tensor]]):
+    def __init__(
+        self, txt: str, tokenizer: Encoding, max_length: int, stride: int
+    ) -> None:
+        self.input_ids: list[torch.Tensor] = []
+        self.target_ids: list[torch.Tensor] = []
 
         # Tokenize the entire text
         token_ids = tokenizer.encode(txt, allowed_special={"<|endoftext|>"})
@@ -187,23 +213,23 @@ class GPTDatasetV1(Dataset):
             self.input_ids.append(torch.tensor(input_chunk))
             self.target_ids.append(torch.tensor(target_chunk))
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.input_ids)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.input_ids[idx], self.target_ids[idx]
 
 
 def create_dataloader_v1(
-    txt,
-    batch_size=4,
-    max_length=256,
-    stride=128,
-    shuffle=True,
-    drop_last=True,
-    num_workers=0,
-    encoding="gpt2",
-):
+    txt: str,
+    batch_size: int = 4,
+    max_length: int = 256,
+    stride: int = 128,
+    shuffle: bool = True,
+    drop_last: bool = True,
+    num_workers: int = 0,
+    encoding: str = "gpt2",
+) -> DataLoader[tuple[torch.Tensor, torch.Tensor]]:
     # Initialize the tokenizer
     tokenizer = tiktoken.get_encoding(encoding)
 
@@ -222,13 +248,13 @@ def create_dataloader_v1(
     return dataloader
 
 
-def assign(left, right):
+def assign(left: torch.Tensor, right: Any) -> torch.nn.Parameter:
     if left.shape != right.shape:
         raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")
     return torch.nn.Parameter(torch.tensor(right))
 
 
-def load_weights_into_gpt(gpt, params):
+def load_weights_into_gpt(gpt: Any, params: Any) -> None:
     gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params["wpe"])
     gpt.tok_emb.weight = assign(gpt.tok_emb.weight, params["wte"])
 

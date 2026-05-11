@@ -3,7 +3,7 @@ Module YamlParser
 """
 
 import logging
-from typing import Dict
+from typing import Any, cast
 import strictyaml
 from collections.abc import Mapping
 
@@ -24,14 +24,14 @@ class YamlParser:
     Class YamlParser
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Init YamlParser
         """
         self.logger = logging.getLogger(__name__)
-        self.data: Dict = {}
+        self.data: dict[str, Any] = {}
 
-    def parse(self, path: str):
+    def parse(self, path: str) -> None:
         self.logger.debug("Parse YAML file [%s]", path)
 
         # Read file content into string
@@ -43,9 +43,11 @@ class YamlParser:
             raise YamlParserError from err
         # Validate YAML and parse it into a dict
         try:
-            yaml_data = strictyaml.load(yaml_text).data
+            strict_yaml = cast(Any, strictyaml)
+            load_yaml = strict_yaml.load
+            yaml_data = load_yaml(yaml_text).data
         except strictyaml.YAMLError as err:
             self.logger.error("Error parsing the yaml [%s]", path)
             raise YamlParserError from err
         if isinstance(yaml_data, Mapping):
-            self.data.update(yaml_data)
+            self.data.update(cast(Mapping[str, Any], yaml_data))
