@@ -33,10 +33,12 @@ build = ["pyright", "ruff"]
 dev =  ["pytest-cov", "pytest", "pytest-dependency"]
 
 [tool.pyright]
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "strict"
-# suppresses errors for libraries that do not ship complete type stubs.
-reportMissingTypeStubs = false
 # suppresses errors where Pyright thinks public Torch APIs is not correctly exported by pytorch.
+reportMissingTypeStubs = false
+# suppresses errors for libraries that do not ship complete type stubs.
 reportPrivateImportUsage = false
 
 [tool.ruff]

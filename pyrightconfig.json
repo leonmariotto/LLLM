@@ -1,6 +1,0 @@
-{
-  "include": ["LLLM"],
-  "exclude": ["tests"],
-  "venvPath": ".",
-  "venv": ".venv"
-}

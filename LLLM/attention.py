@@ -3,8 +3,12 @@ Implement a simple self attention.
 Attention mechanism involve 3 trainable matrix : query, key, values.
 """
 
+from typing import Optional
+
 import torch
 from torch import nn
+
+from LLLM.rope import precompute_rope_cache, apply_rope
 
 
 class MultiHeadAttention(nn.Module):
@@ -26,6 +30,8 @@ class MultiHeadAttention(nn.Module):
     # Need to tell pyright that the "mask" registered by register_buffer method
     # is an tensor, to avoid typing errors.
     mask: torch.Tensor
+    rope_cos: torch.Tensor
+    rope_sin: torch.Tensor
 
     def __init__(
         self,
@@ -35,6 +41,7 @@ class MultiHeadAttention(nn.Module):
         dropout: float,
         num_heads: int,
         qkv_bias: bool = False,
+        rope: bool = False,
     ):
         """
         - d_in: embedding size (size of embedded vector, 1 embedded vector per token)
@@ -68,17 +75,37 @@ class MultiHeadAttention(nn.Module):
         self.register_buffer(
             "mask", torch.triu(torch.ones(context_length, context_length), diagonal=1)
         )
+        self.rope = rope
+        if self.rope:
+            cos, sin = precompute_rope_cache(
+                seq_len=self.context_length,
+                head_dim=self.head_dim,
+            )
+            self.register_buffer("rope_cos", cos, persistent=False)
+            self.register_buffer("rope_sin", sin, persistent=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, pos: Optional[int] = None) -> torch.Tensor:
         """
         forward method is called by the nn.Module __call__ method.
         x is expected to be a batch of tensor of d_in size.
-        (number of batch, number of token per sample (context_length), embedding size)
+        (number of batch, number of token, embedding size)
         return a tensor of d_out size.
+
+        pos: contains the (context-wide relative) starting index of the sequence.
         """
         b, num_tokens, d_in = x.shape
 
         assert self.d_in == d_in, "invalid d_in (embedding size)"
+
+        # compute position_id vector.
+        if pos is None:
+            position_ids = torch.arange(num_tokens, device=x.device)
+        else:
+            position_ids = torch.arange(
+                pos,
+                pos + num_tokens,
+                device=x.device,
+            )
 
         # As in `CausalAttention`, for inputs where `num_tokens` exceeds
         # `context_length`, this will result in errors in the mask creation further
@@ -117,6 +144,14 @@ class MultiHeadAttention(nn.Module):
         keys = keys.transpose(1, 2)
         queries = queries.transpose(1, 2)
         values = values.transpose(1, 2)
+
+        # Add RoPE after Q/K projection and head reshaping, before computing attention
+        # scores.
+        if self.rope:
+            cos = self.rope_cos[position_ids]
+            sin = self.rope_sin[position_ids]
+            queries = apply_rope(queries, cos, sin)
+            keys = apply_rope(keys, cos, sin)
 
         # Compute scaled dot-product attention (aka self-attention) with a causal mask
         attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
