@@ -1,0 +1,50 @@
+[project]
+name = "LLLM"
+version = "0.1.0"
+description = "Leon's LLM."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ruff",
+    "pyright",
+    "strictyaml",
+    "torch",
+    "numpy",
+    "tiktoken",
+    "matplotlib",
+    "click",
+    "tensorflow",
+    "tqdm",
+    "pandas",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# [project.scripts]
+# LLLM = "LLLM.LLLM:main"
+# 
+# [tool.uv]
+# package = true
+
+[dependency-groups]
+build = ["pyright", "ruff"]
+dev =  ["pytest-cov", "pytest", "pytest-dependency"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+exclude = ["tests"]
+
+[tool.ruff]
+exclude = ["tests"]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--cov=LLLM",
+    "-s",
+    "--log-cli-level=DEBUG"
+]
+
+[tool.setuptools]
+packages = ["LLLM"]
