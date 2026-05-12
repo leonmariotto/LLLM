@@ -4,13 +4,16 @@ Generative Pretrained Tranformer
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast, TypeAlias
 
 import torch
 from torch import nn
 
 from .transformer import LayerNorm
 from .transformer import TransformerBlock
+
+import tiktoken
+from tiktoken.core import Encoding
 
 if TYPE_CHECKING:
     from .fetch import FetchedModel
@@ -90,7 +93,7 @@ class GPTModel(nn.Module):
         self.final_norm = LayerNorm(cfg["emb_dim"])
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
 
-    def load_fetched_model(self, fetched: FetchedModel):
+    def load_fetched_model(self, fetched: FetchedModel) -> None:
         """
         Copy Hugging Face GPT-2 tensors into this model.
 
@@ -103,26 +106,26 @@ class GPTModel(nn.Module):
             raise NotImplementedError(f"unsupported model_type: {fetched.model_type}")
         with torch.no_grad():
             self._copy_param(
-                self.tok_emb.weight, fetched.weights["transformer.wte.weight"]
+                self.tok_emb.weight, self._weight(fetched.weights, "wte.weight")
             )
             if self.pos_emb is None:
                 raise ValueError(
                     "GPT-2 fetched.weights require absolute position embeddings"
                 )
             self._copy_param(
-                self.pos_emb.weight, fetched.weights["transformer.wpe.weight"]
+                self.pos_emb.weight, self._weight(fetched.weights, "wpe.weight")
             )
 
             for layer_idx, module in enumerate(self.trf_blocks):
                 block = cast(TransformerBlock, module)
-                prefix = f"transformer.h.{layer_idx}"
+                prefix = f"h.{layer_idx}"
 
-                q_weight, k_weight, v_weight = fetched.weights[
-                    f"{prefix}.attn.c_attn.weight"
-                ].chunk(3, dim=1)
-                q_bias, k_bias, v_bias = fetched.weights[
-                    f"{prefix}.attn.c_attn.bias"
-                ].chunk(3, dim=0)
+                q_weight, k_weight, v_weight = self._weight(
+                    fetched.weights, f"{prefix}.attn.c_attn.weight"
+                ).chunk(3, dim=1)
+                q_bias, k_bias, v_bias = self._weight(
+                    fetched.weights, f"{prefix}.attn.c_attn.bias"
+                ).chunk(3, dim=0)
 
                 self._copy_param(block.att.W_query.weight, q_weight.T)
                 self._copy_param(block.att.W_key.weight, k_weight.T)
@@ -133,45 +136,53 @@ class GPTModel(nn.Module):
 
                 self._copy_param(
                     block.att.out_proj.weight,
-                    fetched.weights[f"{prefix}.attn.c_proj.weight"].T,
+                    self._weight(fetched.weights, f"{prefix}.attn.c_proj.weight").T,
                 )
                 self._copy_param(
                     block.att.out_proj.bias,
-                    fetched.weights[f"{prefix}.attn.c_proj.bias"],
+                    self._weight(fetched.weights, f"{prefix}.attn.c_proj.bias"),
                 )
 
                 self._copy_param(
-                    block.norm1.scale, fetched.weights[f"{prefix}.ln_1.weight"]
+                    block.norm1.scale,
+                    self._weight(fetched.weights, f"{prefix}.ln_1.weight"),
                 )
                 self._copy_param(
-                    block.norm1.shift, fetched.weights[f"{prefix}.ln_1.bias"]
+                    block.norm1.shift,
+                    self._weight(fetched.weights, f"{prefix}.ln_1.bias"),
                 )
                 self._copy_param(
-                    block.norm2.scale, fetched.weights[f"{prefix}.ln_2.weight"]
+                    block.norm2.scale,
+                    self._weight(fetched.weights, f"{prefix}.ln_2.weight"),
                 )
                 self._copy_param(
-                    block.norm2.shift, fetched.weights[f"{prefix}.ln_2.bias"]
+                    block.norm2.shift,
+                    self._weight(fetched.weights, f"{prefix}.ln_2.bias"),
                 )
 
                 fc = cast(nn.Linear, block.ff.layers[0])
                 proj = cast(nn.Linear, block.ff.layers[2])
                 self._copy_param(
-                    fc.weight, fetched.weights[f"{prefix}.mlp.c_fc.weight"].T
+                    fc.weight,
+                    self._weight(fetched.weights, f"{prefix}.mlp.c_fc.weight").T,
                 )
-                self._copy_param(fc.bias, fetched.weights[f"{prefix}.mlp.c_fc.bias"])
+                self._copy_param(
+                    fc.bias, self._weight(fetched.weights, f"{prefix}.mlp.c_fc.bias")
+                )
                 self._copy_param(
                     proj.weight,
-                    fetched.weights[f"{prefix}.mlp.c_proj.weight"].T,
+                    self._weight(fetched.weights, f"{prefix}.mlp.c_proj.weight").T,
                 )
                 self._copy_param(
-                    proj.bias, fetched.weights[f"{prefix}.mlp.c_proj.bias"]
+                    proj.bias,
+                    self._weight(fetched.weights, f"{prefix}.mlp.c_proj.bias"),
                 )
 
             self._copy_param(
-                self.final_norm.scale, fetched.weights["transformer.ln_f.weight"]
+                self.final_norm.scale, self._weight(fetched.weights, "ln_f.weight")
             )
             self._copy_param(
-                self.final_norm.shift, fetched.weights["transformer.ln_f.bias"]
+                self.final_norm.shift, self._weight(fetched.weights, "ln_f.bias")
             )
             self._copy_param(
                 self.out_head.weight, self._lm_head_weight(fetched.weights)
@@ -196,7 +207,16 @@ class GPTModel(nn.Module):
     def _lm_head_weight(weights: dict[str, torch.Tensor]) -> torch.Tensor:
         if "lm_head.weight" in weights:
             return weights["lm_head.weight"]
-        return weights["transformer.wte.weight"]
+        return GPTModel._weight(weights, "wte.weight")
+
+    @staticmethod
+    def _weight(weights: dict[str, torch.Tensor], name: str) -> torch.Tensor:
+        if name in weights:
+            return weights[name]
+        prefixed_name = f"transformer.{name}"
+        if prefixed_name in weights:
+            return weights[prefixed_name]
+        raise KeyError(f"missing GPT-2 weight {name!r} or {prefixed_name!r}")
 
     def forward(self, in_idx: torch.Tensor, pos: int | None = None) -> torch.Tensor:
         _, seq_len = in_idx.shape  # batch_size, seq_len
@@ -216,6 +236,41 @@ class GPTModel(nn.Module):
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
+
+
+TokenId: TypeAlias = int
+
+
+class GPT2Tokenizer:
+    def __init__(self) -> None:
+        self.tiktok: Encoding = tiktoken.get_encoding("gpt2")
+
+    @property
+    def vocabulary_size(self) -> int:
+        # Surface encoder capacity directly from tiktoken for quick inspection.
+        return self.tiktok.n_vocab
+
+    @property
+    def end_of_text_token(self) -> TokenId:
+        # Keep the canonical special token id accessible to callers and tests.
+        return self.tiktok.eot_token
+
+    @property
+    def special_tokens(self) -> set[str]:
+        return set(self.tiktok.special_tokens_set)
+
+    def encode(self, in_str: str) -> list[TokenId]:
+        return self.tiktok.encode(in_str, allowed_special={"<|endoftext|>"})
+        # TODO should return tensor here ??
+        # encoded = tokenizer.encode(text, allowed_special={"<|endoftext|>"})
+        # encoded_tensor = torch.tensor(encoded).unsqueeze(0)  # add batch dimension
+        # return encoded_tensor
+
+    def decode(self, in_tok: list[TokenId]) -> str:
+        return self.tiktok.decode(in_tok)
+
+    def token_count(self, in_str: str) -> int:
+        return len(self.encode(in_str))
 
 
 def gpt_config_from_fetched(config: dict[str, Any]) -> GPTConfig:

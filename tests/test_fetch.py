@@ -76,6 +76,14 @@ def _tiny_gpt2_weights() -> dict[str, torch.Tensor]:
     }
 
 
+def _unprefixed_gpt2_weights() -> dict[str, torch.Tensor]:
+    prefix = "transformer."
+    return {
+        key.removeprefix(prefix): value
+        for key, value in _tiny_gpt2_weights().items()
+    }
+
+
 def test_load_cached_model_reads_config_and_safetensors(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
     _save_file(
@@ -120,3 +128,25 @@ def test_gpt_model_loads_from_fetched_gpt2_artifacts() -> None:
         proj.weight,
         weights["transformer.h.0.mlp.c_proj.weight"].T,
     )
+
+
+def test_gpt_model_loads_from_openai_gpt2_unprefixed_safetensors() -> None:
+    weights = _unprefixed_gpt2_weights()
+    fetched = FetchedModel(
+        path=Path("/tmp/fake-snapshot"),
+        config=_tiny_hf_gpt2_config(),
+        weights=weights,
+    )
+
+    model = GPTModel(gpt_config_from_fetched(fetched.config))
+    model.load_fetched_model(fetched)
+    block = cast(TransformerBlock, model.trf_blocks[0])
+
+    torch.testing.assert_close(model.tok_emb.weight, weights["wte.weight"])
+    torch.testing.assert_close(model.out_head.weight, weights["wte.weight"])
+    q_weight, k_weight, v_weight = weights["h.0.attn.c_attn.weight"].chunk(
+        3, dim=1
+    )
+    torch.testing.assert_close(block.att.W_query.weight, q_weight.T)
+    torch.testing.assert_close(block.att.W_key.weight, k_weight.T)
+    torch.testing.assert_close(block.att.W_value.weight, v_weight.T)

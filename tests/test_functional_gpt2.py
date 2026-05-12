@@ -1,98 +1,47 @@
-from importlib import import_module
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, cast
 
+import pytest
 import torch
 
 from ..LLLM.fetch import fetch_hf_model
-from ..LLLM.gpt import GPTModel, gpt_config_from_fetched
+from ..LLLM.gpt import GPT2Tokenizer, GPTModel, gpt_config_from_fetched
+from ..LLLM.utils import generate_text_simple
 
 
-_safetensors_torch = cast(Any, import_module("safetensors.torch"))
-_save_file = cast(
-    Callable[[dict[str, torch.Tensor], Path], None],
-    _safetensors_torch.save_file,
-)
-
-
-def test_functional_gpt2_fetch_load_and_evaluate(
+def test_functional_gpt2_fetch_load_generate_and_decode(
     tmp_path: Path,
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot_path = tmp_path / "tiny-gpt2"
-    snapshot_path.mkdir()
-    (snapshot_path / "config.json").write_text(
-        """
-        {
-          "model_type": "gpt2",
-          "vocab_size": 5,
-          "n_positions": 4,
-          "n_embd": 4,
-          "n_head": 1,
-          "n_layer": 1,
-          "resid_pdrop": 0.0
-        }
-        """,
-        encoding="utf-8",
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
+    monkeypatch.setenv("HF_XET_CACHE", str(tmp_path / "hf-xet-cache"))
+    monkeypatch.setenv("HF_HUB_DISABLE_XET", "1")
+
+    fetched = fetch_hf_model(
+        "openai-community/gpt2",
+        cache_dir=tmp_path / "hf-cache",
     )
-    _save_file(_tiny_gpt2_weights(), snapshot_path / "model.safetensors")
-
-    def fake_snapshot_download(**_: Any) -> str:
-        return str(snapshot_path)
-
-    hf_hub = cast(Any, import_module("huggingface_hub"))
-    monkeypatch.setattr(
-        hf_hub,
-        "snapshot_download",
-        fake_snapshot_download,
-    )
-
-    fetched = fetch_hf_model("local/tiny-gpt2", local_files_only=True)
+    tokenizer = GPT2Tokenizer()
     model = GPTModel(gpt_config_from_fetched(fetched.config))
     model.load_fetched_model(fetched)
     model.eval()
 
+    prompt = "Every effort moves the project forward."
+    prompt_tokens = tokenizer.encode(prompt)
+    input_ids = torch.tensor([prompt_tokens], dtype=torch.long)
+
     with torch.no_grad():
-        logits = model(torch.tensor([[0, 1, 2]], dtype=torch.long))
+        generated_ids = generate_text_simple(
+            model=model,
+            idx=input_ids,
+            max_new_tokens=20,
+            context_size=model.pos_emb.num_embeddings if model.pos_emb else 1024,
+        )
 
-    assert logits.shape == (1, 3, 5)
-    assert torch.isfinite(logits).all()
+    generated_tokens = cast(list[int], cast(Any, generated_ids.squeeze(0)).tolist())
+    generated_text = tokenizer.decode(generated_tokens)
+    print("Generated text : [" + generated_text + "]\n")
 
-
-def _tiny_gpt2_weights() -> dict[str, torch.Tensor]:
-    emb_dim = 4
-    vocab_size = 5
-    context_length = 4
-    return {
-        "transformer.wte.weight": torch.arange(
-            vocab_size * emb_dim, dtype=torch.float32
-        ).reshape(vocab_size, emb_dim)
-        / 100,
-        "transformer.wpe.weight": torch.arange(
-            context_length * emb_dim, dtype=torch.float32
-        ).reshape(context_length, emb_dim)
-        / 100,
-        "transformer.h.0.attn.c_attn.weight": torch.arange(
-            emb_dim * emb_dim * 3, dtype=torch.float32
-        ).reshape(emb_dim, emb_dim * 3)
-        / 100,
-        "transformer.h.0.attn.c_attn.bias": torch.zeros(emb_dim * 3),
-        "transformer.h.0.attn.c_proj.weight": torch.eye(emb_dim),
-        "transformer.h.0.attn.c_proj.bias": torch.zeros(emb_dim),
-        "transformer.h.0.ln_1.weight": torch.ones(emb_dim),
-        "transformer.h.0.ln_1.bias": torch.zeros(emb_dim),
-        "transformer.h.0.ln_2.weight": torch.ones(emb_dim),
-        "transformer.h.0.ln_2.bias": torch.zeros(emb_dim),
-        "transformer.h.0.mlp.c_fc.weight": torch.arange(
-            emb_dim * emb_dim * 4, dtype=torch.float32
-        ).reshape(emb_dim, emb_dim * 4)
-        / 100,
-        "transformer.h.0.mlp.c_fc.bias": torch.zeros(emb_dim * 4),
-        "transformer.h.0.mlp.c_proj.weight": torch.arange(
-            emb_dim * 4 * emb_dim, dtype=torch.float32
-        ).reshape(emb_dim * 4, emb_dim)
-        / 100,
-        "transformer.h.0.mlp.c_proj.bias": torch.zeros(emb_dim),
-        "transformer.ln_f.weight": torch.ones(emb_dim),
-        "transformer.ln_f.bias": torch.zeros(emb_dim),
-    }
+    assert generated_ids.shape == (1, len(prompt_tokens) + 20)
+    assert generated_text.startswith(prompt)
+    assert len(generated_text) > len(prompt)

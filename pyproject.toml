@@ -50,7 +50,7 @@ exclude = ["tests"]
 addopts = [
     "--cov=LLLM",
     "-s",
-    "--log-cli-level=DEBUG"
+    "--log-cli-level=INFO"
 ]
 
 [tool.setuptools]
