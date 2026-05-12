@@ -16,6 +16,8 @@ dependencies = [
     "tensorflow",
     "tqdm",
     "pandas",
+    "huggingface-hub",
+    "safetensors",
 ]
 
 [build-system]

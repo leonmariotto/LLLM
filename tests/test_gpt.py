@@ -1,18 +1,21 @@
-import copy
-
 import pytest
-
-torch = pytest.importorskip("torch")
+import torch
 from torch import nn
+from typing import Any, Callable, cast
 
 from ..LLLM.gpt import (
-    GPTModel,
     GPT_CONFIG_124M,
+    GPTConfig,
+    GPTModel,
+    gpt_config_from_fetched,
 )
 from ..LLLM.utils import generate_text_simple
 
 
-def _tiny_gpt_config() -> dict[str, int | float | bool]:
+_manual_seed = cast(Callable[[int], torch.Generator], cast(Any, torch).manual_seed)
+
+
+def _tiny_gpt_config() -> GPTConfig:
     """Return a minimal GPT configuration used by the tests in this module."""
     return {
         "vocab_size": 5,
@@ -26,7 +29,7 @@ def _tiny_gpt_config() -> dict[str, int | float | bool]:
     }
 
 
-def _tiny_transformer_gpt_config() -> dict[str, int | float | bool]:
+def _tiny_transformer_gpt_config() -> GPTConfig:
     """Return a tiny GPT configuration with one transformer block for cache tests."""
     cfg = _tiny_gpt_config().copy()
     cfg["emb_dim"] = 4
@@ -34,18 +37,45 @@ def _tiny_transformer_gpt_config() -> dict[str, int | float | bool]:
     return cfg
 
 
-def _tiny_rope_gpt_config() -> dict[str, int | float | bool | str]:
+def _tiny_rope_gpt_config() -> GPTConfig:
     """Return a tiny GPT configuration that uses RoPE in attention."""
     cfg = _tiny_transformer_gpt_config().copy()
     cfg["positional_encoding"] = "rope"
     return cfg
 
 
-def _manual_layer_norm(x, eps: float = 1e-5):
+def _tiny_hf_gpt2_config() -> dict[str, int | str | float]:
+    return {
+        "model_type": "gpt2",
+        "vocab_size": 5,
+        "n_positions": 4,
+        "n_embd": 4,
+        "n_head": 1,
+        "n_layer": 1,
+        "resid_pdrop": 0.0,
+    }
+
+
+def _manual_layer_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     """Compute layer normalization directly for expected-value comparisons."""
     mean = x.mean(dim=-1, keepdim=True)
     var = x.var(dim=-1, keepdim=True, unbiased=False)
     return (x - mean) / torch.sqrt(var + eps)
+
+
+def test_gpt_config_from_fetched_translates_hugging_face_names() -> None:
+    cfg = gpt_config_from_fetched(_tiny_hf_gpt2_config())
+
+    assert cfg == {
+        "vocab_size": 5,
+        "context_length": 4,
+        "emb_dim": 4,
+        "n_heads": 1,
+        "n_layers": 1,
+        "drop_rate": 0.0,
+        "qkv_bias": True,
+        "positional_encoding": "gpt2",
+    }
 
 
 def test_gpt_forward_matches_manual_computation_without_transformer_blocks() -> None:
@@ -177,7 +207,9 @@ def test_generate_text_simple_appends_greedy_tokens_and_crops_context() -> None:
     expected = torch.tensor([[4, 5, 6, 7, 8, 9]])
     torch.testing.assert_close(generated, expected)
 
-    seen_contexts = [ctx.tolist() for ctx in model.seen_contexts]
+    seen_contexts = [
+        cast(list[list[int]], cast(Any, ctx).tolist()) for ctx in model.seen_contexts
+    ]
     assert seen_contexts == [[[5, 6]], [[6, 7]], [[7, 8]]]
 
 
@@ -186,7 +218,7 @@ def test_generate_text_simple_with_tiny_gpt_is_deterministic() -> None:
     cfg = _tiny_gpt_config()
     start_tokens = torch.tensor([[0, 1]])
 
-    torch.manual_seed(123)
+    _manual_seed(123)
     model_a = GPTModel(cfg)
     model_a.eval()
     generated_a = generate_text_simple(
@@ -196,7 +228,7 @@ def test_generate_text_simple_with_tiny_gpt_is_deterministic() -> None:
         context_size=cfg["context_length"],
     )
 
-    torch.manual_seed(123)
+    _manual_seed(123)
     model_b = GPTModel(cfg)
     model_b.eval()
     generated_b = generate_text_simple(
@@ -215,7 +247,7 @@ def test_gpt_check_gpt124_size() -> None:
     """Check GPT_CONFIG_124M size, we see that model is 124M without output layer weight, but this
     are valid trainable parameters. A model branded XXX size is in reality a bit bigger.
     """
-    torch.manual_seed(123)
+    _manual_seed(123)
     model = GPTModel(GPT_CONFIG_124M)
     total_params = sum(p.numel() for p in model.parameters())
     print(f"GPT_CONFIG_124M: Total number of parameters: {total_params:,}")

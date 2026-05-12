@@ -36,3 +36,6 @@ weight. Use **safetensors** for saving/loading weight?
 - Add an optional cache to detect specialized neural regions activated for tasks.
 - bitsandbytes for memory pressure ?
 - !!! Use HuggingFace `datasets` to download and manipulate datasets. !!!!
+
+Tokenizer encoding scheme is part of the pre-trained base model contract.
+Some special character can be part of post-training: instructions, reasoning

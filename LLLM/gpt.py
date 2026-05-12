@@ -2,13 +2,18 @@
 Generative Pretrained Tranformer
 """
 
-from typing import Literal, TypedDict
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 import torch
 from torch import nn
 
 from .transformer import LayerNorm
 from .transformer import TransformerBlock
+
+if TYPE_CHECKING:
+    from .fetch import FetchedModel
 
 
 PositionalEncoding = Literal["gpt2", "rope"]
@@ -25,6 +30,8 @@ class GPTConfig(TypedDict):
     positional_encoding: PositionalEncoding
 
 
+# TODO becasue we fetch models, and parameters are present in models, we don't need
+# the following dict. This can be removed.
 GPT_CONFIG_124M: GPTConfig = {
     "vocab_size": 50257,  # Vocabulary size
     "context_length": 1024,  # Context length
@@ -83,6 +90,114 @@ class GPTModel(nn.Module):
         self.final_norm = LayerNorm(cfg["emb_dim"])
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
 
+    def load_fetched_model(self, fetched: FetchedModel):
+        """
+        Copy Hugging Face GPT-2 tensors into this model.
+
+        Hugging Face GPT-2 stores linear projection weights in Conv1D layout
+        ``[input_dim, output_dim]``. PyTorch Linear expects
+        ``[output_dim, input_dim]``, so projection weights are transposed while
+        biases are copied as-is.
+        """
+        if fetched.model_type != "gpt2":
+            raise NotImplementedError(f"unsupported model_type: {fetched.model_type}")
+        with torch.no_grad():
+            self._copy_param(
+                self.tok_emb.weight, fetched.weights["transformer.wte.weight"]
+            )
+            if self.pos_emb is None:
+                raise ValueError(
+                    "GPT-2 fetched.weights require absolute position embeddings"
+                )
+            self._copy_param(
+                self.pos_emb.weight, fetched.weights["transformer.wpe.weight"]
+            )
+
+            for layer_idx, module in enumerate(self.trf_blocks):
+                block = cast(TransformerBlock, module)
+                prefix = f"transformer.h.{layer_idx}"
+
+                q_weight, k_weight, v_weight = fetched.weights[
+                    f"{prefix}.attn.c_attn.weight"
+                ].chunk(3, dim=1)
+                q_bias, k_bias, v_bias = fetched.weights[
+                    f"{prefix}.attn.c_attn.bias"
+                ].chunk(3, dim=0)
+
+                self._copy_param(block.att.W_query.weight, q_weight.T)
+                self._copy_param(block.att.W_key.weight, k_weight.T)
+                self._copy_param(block.att.W_value.weight, v_weight.T)
+                self._copy_param(block.att.W_query.bias, q_bias)
+                self._copy_param(block.att.W_key.bias, k_bias)
+                self._copy_param(block.att.W_value.bias, v_bias)
+
+                self._copy_param(
+                    block.att.out_proj.weight,
+                    fetched.weights[f"{prefix}.attn.c_proj.weight"].T,
+                )
+                self._copy_param(
+                    block.att.out_proj.bias,
+                    fetched.weights[f"{prefix}.attn.c_proj.bias"],
+                )
+
+                self._copy_param(
+                    block.norm1.scale, fetched.weights[f"{prefix}.ln_1.weight"]
+                )
+                self._copy_param(
+                    block.norm1.shift, fetched.weights[f"{prefix}.ln_1.bias"]
+                )
+                self._copy_param(
+                    block.norm2.scale, fetched.weights[f"{prefix}.ln_2.weight"]
+                )
+                self._copy_param(
+                    block.norm2.shift, fetched.weights[f"{prefix}.ln_2.bias"]
+                )
+
+                fc = cast(nn.Linear, block.ff.layers[0])
+                proj = cast(nn.Linear, block.ff.layers[2])
+                self._copy_param(
+                    fc.weight, fetched.weights[f"{prefix}.mlp.c_fc.weight"].T
+                )
+                self._copy_param(fc.bias, fetched.weights[f"{prefix}.mlp.c_fc.bias"])
+                self._copy_param(
+                    proj.weight,
+                    fetched.weights[f"{prefix}.mlp.c_proj.weight"].T,
+                )
+                self._copy_param(
+                    proj.bias, fetched.weights[f"{prefix}.mlp.c_proj.bias"]
+                )
+
+            self._copy_param(
+                self.final_norm.scale, fetched.weights["transformer.ln_f.weight"]
+            )
+            self._copy_param(
+                self.final_norm.shift, fetched.weights["transformer.ln_f.bias"]
+            )
+            self._copy_param(
+                self.out_head.weight, self._lm_head_weight(fetched.weights)
+            )
+
+        self.eval()
+
+    @staticmethod
+    def _copy_param(
+        param: nn.Parameter | torch.Tensor | None, value: torch.Tensor
+    ) -> None:
+        if param is None:
+            raise ValueError("cannot copy into missing parameter")
+        if tuple(param.shape) != tuple(value.shape):
+            raise ValueError(
+                f"shape mismatch for parameter: expected {tuple(param.shape)}, "
+                f"got {tuple(value.shape)}"
+            )
+        param.copy_(value)
+
+    @staticmethod
+    def _lm_head_weight(weights: dict[str, torch.Tensor]) -> torch.Tensor:
+        if "lm_head.weight" in weights:
+            return weights["lm_head.weight"]
+        return weights["transformer.wte.weight"]
+
     def forward(self, in_idx: torch.Tensor, pos: int | None = None) -> torch.Tensor:
         _, seq_len = in_idx.shape  # batch_size, seq_len
         tok_embeds = self.tok_emb(in_idx)
@@ -101,3 +216,28 @@ class GPTModel(nn.Module):
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
+
+
+def gpt_config_from_fetched(config: dict[str, Any]) -> GPTConfig:
+    """Translate a Hugging Face GPT-2 config into LLLM GPTConfig."""
+
+    def _int_config(
+        config: dict[str, Any], key: str, *, fallback_key: str | None = None
+    ) -> int:
+        value = config.get(key)
+        if value is None and fallback_key is not None:
+            value = config.get(fallback_key)
+        if not isinstance(value, int):
+            raise ValueError(f"config value {key!r} must be an int")
+        return value
+
+    return {
+        "vocab_size": _int_config(config, "vocab_size"),
+        "context_length": _int_config(config, "n_ctx", fallback_key="n_positions"),
+        "emb_dim": _int_config(config, "n_embd"),
+        "n_heads": _int_config(config, "n_head"),
+        "n_layers": _int_config(config, "n_layer"),
+        "drop_rate": float(config.get("resid_pdrop", 0.0)),
+        "qkv_bias": True,
+        "positional_encoding": "gpt2",  # No RoPE
+    }
