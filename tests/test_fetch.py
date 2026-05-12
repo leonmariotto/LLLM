@@ -7,6 +7,7 @@ from torch import nn
 
 from ..LLLM.fetch import (
     FetchedModel,
+    fetch_hf_model,
     load_cached_model,
 )
 from ..LLLM.gpt import GPTModel, gpt_config_from_fetched
@@ -96,6 +97,17 @@ def test_load_cached_model_reads_config_and_safetensors(tmp_path: Path) -> None:
 
     assert fetched.model_type == "gpt2"
     assert set(fetched.weights) == {"a", "b", "c"}
+
+
+def test_fetch_hf_model_loads_local_snapshot_path(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
+    _save_file({"a": torch.tensor([1.0])}, tmp_path / "model.safetensors")
+
+    fetched = fetch_hf_model(str(tmp_path))
+
+    assert fetched.path == tmp_path
+    assert fetched.model_type == "gpt2"
+    assert set(fetched.weights) == {"a"}
 
 
 def test_gpt_model_loads_from_fetched_gpt2_artifacts() -> None:

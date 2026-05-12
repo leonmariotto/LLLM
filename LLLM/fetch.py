@@ -40,6 +40,10 @@ def fetch_hf_model(
     The cache is managed by huggingface_hub. Passing the same repo_id, revision,
     and cache_dir reuses previously downloaded files.
     """
+    local_path = Path(repo_id).expanduser()
+    if local_path.is_dir():
+        return load_cached_model(local_path)
+
     path = _download_snapshot(
         repo_id,
         revision=revision,
