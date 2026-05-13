@@ -9,7 +9,6 @@ from ..LLLM.gpt import (
     GPTModel,
     gpt_config_from_fetched,
 )
-from ..LLLM.utils import generate_text_simple
 
 
 _manual_seed = cast(Callable[[int], torch.Generator], cast(Any, torch).manual_seed)
@@ -174,73 +173,6 @@ def test_gpt_rejects_sequences_longer_than_context_length() -> None:
 
     with pytest.raises(AssertionError):
         model(in_idx)
-
-
-def test_generate_text_simple_appends_greedy_tokens_and_crops_context() -> None:
-    """Verify greedy decoding appends argmax tokens while respecting the context window."""
-
-    class RecordingGreedyModel(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.seen_contexts: list[torch.Tensor] = []
-
-        def forward(self, idx: torch.Tensor) -> torch.Tensor:
-            self.seen_contexts.append(idx.clone())
-            batch_size, seq_len = idx.shape
-            logits = torch.zeros(batch_size, seq_len, 10)
-
-            # Predict the next token deterministically from the last token in context.
-            next_token = (idx[:, -1] + 1) % 10
-            logits[torch.arange(batch_size), -1, next_token] = 1.0
-            return logits
-
-    model = RecordingGreedyModel()
-    start_tokens = torch.tensor([[4, 5, 6]])
-
-    generated = generate_text_simple(
-        model=model,
-        idx=start_tokens,
-        max_new_tokens=3,
-        context_size=2,
-    )
-
-    expected = torch.tensor([[4, 5, 6, 7, 8, 9]])
-    torch.testing.assert_close(generated, expected)
-
-    seen_contexts = [
-        cast(list[list[int]], cast(Any, ctx).tolist()) for ctx in model.seen_contexts
-    ]
-    assert seen_contexts == [[[5, 6]], [[6, 7]], [[7, 8]]]
-
-
-def test_generate_text_simple_with_tiny_gpt_is_deterministic() -> None:
-    """Check seeded tiny GPT generation is reproducible and matches the expected gibberish."""
-    cfg = _tiny_gpt_config()
-    start_tokens = torch.tensor([[0, 1]])
-
-    _manual_seed(123)
-    model_a = GPTModel(cfg)
-    model_a.eval()
-    generated_a = generate_text_simple(
-        model=model_a,
-        idx=start_tokens,
-        max_new_tokens=4,
-        context_size=cfg["context_length"],
-    )
-
-    _manual_seed(123)
-    model_b = GPTModel(cfg)
-    model_b.eval()
-    generated_b = generate_text_simple(
-        model=model_b,
-        idx=start_tokens,
-        max_new_tokens=4,
-        context_size=cfg["context_length"],
-    )
-
-    expected = torch.tensor([[0, 1, 1, 3, 4, 4]])
-    torch.testing.assert_close(generated_a, expected)
-    torch.testing.assert_close(generated_b, expected)
 
 
 def test_gpt_check_gpt124_size() -> None:

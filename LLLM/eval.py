@@ -5,7 +5,7 @@ from typing import Any, Callable, Protocol, TypeVar, cast
 import re
 import torch
 
-from .utils import generate_text_simple
+from .generator import Generator
 
 # Make pyright happy
 load_dataset = cast(
@@ -15,12 +15,16 @@ load_dataset = cast(
 
 # Typing class
 class TensorModel(Protocol):
+    """Model contract used by evaluation and text generation."""
+
     def eval(self) -> Any: ...
 
     def __call__(self, idx: torch.Tensor) -> torch.Tensor: ...
 
 
 class Tokenizer(Protocol):
+    """Tokenizer contract for converting between text and token ids."""
+
     def encode(self, input: str) -> list[int]: ...
 
     def decode(self, tok: list[int]) -> str: ...
@@ -33,6 +37,19 @@ TPrediction = TypeVar("TPrediction")
 
 @dataclass
 class DatasetAdapter[TExpected, TPrediction]:
+    """
+    Dataset-specific evaluation hooks.
+
+    Args:
+        dataset_id: Hugging Face dataset identifier.
+        config: Optional dataset configuration name.
+        split: Dataset split to evaluate.
+        build_prompt: Converts a dataset row into a model prompt.
+        extract_expected: Extracts the expected answer from a dataset row.
+        extract_prediction: Parses model completion text into a scoreable value.
+        score: Returns whether prediction matches the expected value.
+    """
+
     dataset_id: str
     config: str | None
     split: str
@@ -43,21 +60,17 @@ class DatasetAdapter[TExpected, TPrediction]:
     score: Callable[[TPrediction, TExpected], bool]
 
 
-def _model_device(model: TensorModel) -> torch.device:
-    if not isinstance(model, torch.nn.Module):
-        return torch.device("cpu")
-
-    try:
-        return next(model.parameters()).device
-    except StopIteration:
-        return torch.device("cpu")
-
-
 def normalize_text(text: str) -> str:
+    """Strip surrounding whitespace and lowercase text for loose matching."""
     return text.strip().lower()
 
 
 def extract_last_number(text: str) -> str:
+    """
+    Extract the final integer or decimal number from text.
+
+    Returns an empty string when no number is present.
+    """
     text = text.replace(",", "")
     numbers = re.findall(r"-?\d+(?:\.\d+)?", text)
     return numbers[-1] if numbers else ""
@@ -68,9 +81,24 @@ def evaluate_instructions_model(
     tokenizer: Tokenizer,
     adapter: DatasetAdapter[TExpected, TPrediction],
     limit: int = 20,
-    max_new_tokens: int = 20,
+    max_generated_token: int = 20,
     context_size: int = 1024,
 ) -> float:
+    """
+    Evaluate an instruction-style model on a Hugging Face dataset.
+
+    Args:
+        model: Autoregressive model returning logits for token ids.
+        tokenizer: Tokenizer paired with the model.
+        adapter: Dataset adapter defining prompt construction and scoring.
+        limit: Maximum number of dataset rows to evaluate.
+        max_generated_token: Maximum number of completion tokens per row.
+        context_size: Context window passed to the generator.
+
+    Returns:
+        Accuracy as ``correct / total``. The evaluator prints each prompt,
+        expected value, parsed prediction, raw completion, and final accuracy.
+    """
     dataset_args = [adapter.dataset_id]
     if adapter.config is not None:
         dataset_args.append(adapter.config)
@@ -79,7 +107,7 @@ def evaluate_instructions_model(
     dataset = dataset.select(range(min(limit, len(dataset))))
 
     model.eval()
-    device = _model_device(model)
+    generator = Generator(model, tokenizer, context_size=context_size)
 
     correct = 0
     total = 0
@@ -87,14 +115,11 @@ def evaluate_instructions_model(
     for raw_row in dataset:
         row = cast(DatasetRow, raw_row)
         prompt = adapter.build_prompt(row)
-        prompt_tokens = tokenizer.encode(prompt)
-        input_idx = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
-        generated_idx = generate_text_simple(
-            model, input_idx, max_new_tokens=max_new_tokens, context_size=context_size
+        raw_prediction_text = generator.generate(
+            prompt,
+            max_generated_token=max_generated_token,
+            include_prompt=False,
         )
-        generated_tokens = cast(list[int], cast(Any, generated_idx.squeeze(0)).tolist())
-        prediction_tokens = generated_tokens[len(prompt_tokens) :]
-        raw_prediction_text = tokenizer.decode(prediction_tokens)
 
         prediction = adapter.extract_prediction(raw_prediction_text)
         expected = adapter.extract_expected(row)
@@ -136,6 +161,11 @@ gsm8k_adapter = DatasetAdapter(
 
 
 def boolq_prediction(text: str) -> bool | None:
+    """
+    Parse yes/no completion text for BoolQ.
+
+    Returns ``True`` for yes, ``False`` for no, and ``None`` when unclear.
+    """
     text = normalize_text(text)
 
     if text.startswith("yes") or "answer: yes" in text:
@@ -164,6 +194,9 @@ boolq_adapter = DatasetAdapter(
 
 
 def squad_score(prediction: str, expected_answers: list[str]) -> bool:
+    """
+    Score SQuAD by checking whether any expected answer appears in prediction.
+    """
     prediction = normalize_text(prediction)
 
     return any(normalize_text(answer) in prediction for answer in expected_answers)

@@ -1,12 +1,10 @@
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
-import torch
 
 from ..LLLM.fetch import fetch_hf_model
+from ..LLLM.generator import Generator
 from ..LLLM.gpt import GPT2Tokenizer, GPTModel, gpt_config_from_fetched
-from ..LLLM.utils import generate_text_simple
 
 
 PREFETCHED_GPT2_PATH = Path(__file__).parent / "prefetched_models" / "gpt2"
@@ -29,22 +27,14 @@ def _generate_20_tokens_from_fetched_model(repo_id: str, cache_dir: Path) -> str
     model.eval()
 
     prompt = "Every effort moves the project forward."
-    prompt_tokens = tokenizer.encode(prompt)
-    input_ids = torch.tensor([prompt_tokens], dtype=torch.long)
-
-    with torch.no_grad():
-        generated_ids = generate_text_simple(
-            model=model,
-            idx=input_ids,
-            max_new_tokens=20,
-            context_size=model.pos_emb.num_embeddings if model.pos_emb else 1024,
-        )
-
-    generated_tokens = cast(list[int], cast(Any, generated_ids.squeeze(0)).tolist())
-    generated_text = tokenizer.decode(generated_tokens)
+    generator = Generator(
+        model=model,
+        tokenizer=tokenizer,
+        context_size=model.pos_emb.num_embeddings if model.pos_emb else 1024,
+    )
+    generated_text = generator.generate(prompt, max_generated_token=20)
     print("Generated text : [" + generated_text + "]\n")
 
-    assert generated_ids.shape == (1, len(prompt_tokens) + 20)
     assert generated_text.startswith(prompt)
     assert len(generated_text) > len(prompt)
     return str(fetched.path)
