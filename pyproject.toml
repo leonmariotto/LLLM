@@ -18,6 +18,7 @@ dependencies = [
     "pandas",
     "huggingface-hub",
     "safetensors",
+    "datasets",
 ]
 
 [build-system]

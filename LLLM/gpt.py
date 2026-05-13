@@ -251,7 +251,7 @@ class GPT2Tokenizer:
         return self.tiktok.n_vocab
 
     @property
-    def end_of_text_token(self) -> TokenId:
+    def eos_token_id(self) -> TokenId:
         # Keep the canonical special token id accessible to callers and tests.
         return self.tiktok.eot_token
 
