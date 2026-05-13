@@ -2,7 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from ..LLLM.eval import evaluate_instructions_model, gsm8k_adapter
+from ..LLLM.eval import (
+    DatasetAdapter,
+    boolq_adapter,
+    evaluate_instructions_model,
+    gsm8k_adapter,
+    squad_adapter,
+)
 from ..LLLM.fetch import fetch_hf_model
 from ..LLLM.gpt import GPT2Tokenizer, GPTModel, gpt_config_from_fetched
 
@@ -52,12 +58,7 @@ def _configure_hf_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     )
 
 
-def test_functional_gpt_eval_runs_gsm8k_against_local_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _configure_hf_cache(tmp_path, monkeypatch)
-
+def _load_local_gpt2(tmp_path: Path) -> tuple[GPTModel, GPT2Tokenizer]:
     fetched = fetch_hf_model(
         str(PREFETCHED_GPT2_PATH),
         cache_dir=tmp_path / "unused-cache",
@@ -65,11 +66,28 @@ def test_functional_gpt_eval_runs_gsm8k_against_local_model(
     tokenizer = GPT2Tokenizer()
     model = GPTModel(gpt_config_from_fetched(fetched.config))
     model.load_fetched_model(fetched)
+    return model, tokenizer
 
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        pytest.param(gsm8k_adapter, id="gsm8k"),
+        pytest.param(boolq_adapter, id="boolq"),
+        pytest.param(squad_adapter, id="squad"),
+    ],
+)
+def test_functional_gpt_eval_runs_dataset_adapter_against_local_model(
+    adapter: DatasetAdapter[object, object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_hf_cache(tmp_path, monkeypatch)
+    model, tokenizer = _load_local_gpt2(tmp_path)
     accuracy = evaluate_instructions_model(
         model=model,
         tokenizer=tokenizer,
-        adapter=gsm8k_adapter,
+        adapter=adapter,
         limit=1,
         max_generated_token=1,
         context_size=model.pos_emb.num_embeddings if model.pos_emb else 1024,
