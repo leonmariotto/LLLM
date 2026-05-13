@@ -1,10 +1,12 @@
 from pathlib import Path
+import math
 
 import pytest
 
 from ..LLLM.eval import (
     DatasetAdapter,
     boolq_adapter,
+    evaluate_base_model_perplexity,
     evaluate_instructions_model,
     gsm8k_adapter,
     squad_adapter,
@@ -94,3 +96,21 @@ def test_functional_gpt_eval_runs_dataset_adapter_against_local_model(
     )
 
     assert 0.0 <= accuracy <= 1.0
+
+
+def test_functional_gpt_eval_runs_wikitext_perplexity_against_local_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_hf_cache(tmp_path, monkeypatch)
+    model, tokenizer = _load_local_gpt2(tmp_path)
+
+    perplexity = evaluate_base_model_perplexity(
+        model=model,
+        tokenizer=tokenizer,
+        limit=10,
+        context_size=64,
+    )
+
+    assert math.isfinite(perplexity)
+    assert perplexity > 0.0
