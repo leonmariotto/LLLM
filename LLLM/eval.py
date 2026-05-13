@@ -1,7 +1,8 @@
+import math
 from dataclasses import dataclass
 from collections.abc import Mapping
 import importlib
-from typing import Any, Callable, Protocol, TypeVar, cast
+from typing import Any, Callable, Protocol, TypeVar, cast, List
 import re
 import torch
 
@@ -216,3 +217,45 @@ squad_adapter = DatasetAdapter(
     extract_prediction=lambda text: text.strip(),
     score=squad_score,
 )
+
+
+def evaluate_base_model_perplexity(
+    model: TensorModel,
+    tokenizer: Tokenizer,
+    limit: int = 100,
+) -> float:
+    losses: List[float] = []
+    ds = load_dataset(
+        "wikitext",
+        "wikitext-2-raw-v1",
+        # Can use percentage slicing at load time : split="train[:5%]",
+        split="validation",
+    )
+    ds = ds.shuffle(seed=42)  # TODO remove the seed
+    ds = ds.select(range(min(limit, len(ds))))
+
+    model.eval()
+
+    # 4. Eval loop
+    for row in ds:
+        text = row["text"]
+
+        inputs = tokenizer.encode(text)
+        input_idx = torch.tensor(
+            [inputs],
+            dtype=torch.long,
+            # device=TODO
+        )
+
+        with torch.no_grad():
+            logits = model(input_idx)
+
+        losses.append(logits.loss.item())
+
+    # 5. Compute perplexity
+    avg_loss = sum(losses) / len(losses)
+    perplexity = math.exp(avg_loss)
+
+    print(f"Loss: {avg_loss:.4f}")
+    print(f"Perplexity: {perplexity:.2f}")
+    return perplexity
