@@ -1,10 +1,16 @@
 from dataclasses import dataclass
-from typing import Protocol, Callable, Any, List, cast
+from collections.abc import Mapping
+import importlib
+from typing import Any, Callable, Protocol, TypeVar, cast
 import re
 import torch
 
-from utils import generate_text_simple
-from datasets import load_dataset
+from .utils import generate_text_simple
+
+# Make pyright happy
+load_dataset = cast(
+    Callable[..., Any], importlib.import_module("datasets").load_dataset
+)
 
 
 # Typing class
@@ -15,21 +21,36 @@ class TensorModel(Protocol):
 
 
 class Tokenizer(Protocol):
-    def encode(self, input: str) -> List[int]: ...
+    def encode(self, input: str) -> list[int]: ...
 
-    def decode(self, tok: List[int]) -> str: ...
+    def decode(self, tok: list[int]) -> str: ...
+
+
+DatasetRow = Mapping[str, Any]
+TExpected = TypeVar("TExpected")
+TPrediction = TypeVar("TPrediction")
 
 
 @dataclass
-class DatasetAdapter:
+class DatasetAdapter[TExpected, TPrediction]:
     dataset_id: str
     config: str | None
     split: str
 
-    build_prompt: Callable[[dict], str]
-    extract_expected: Callable[[dict], Any]
-    extract_prediction: Callable[[str], Any]
-    score: Callable[[Any, Any], bool]
+    build_prompt: Callable[[DatasetRow], str]
+    extract_expected: Callable[[DatasetRow], TExpected]
+    extract_prediction: Callable[[str], TPrediction]
+    score: Callable[[TPrediction, TExpected], bool]
+
+
+def _model_device(model: TensorModel) -> torch.device:
+    if not isinstance(model, torch.nn.Module):
+        return torch.device("cpu")
+
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
 
 
 def normalize_text(text: str) -> str:
@@ -45,9 +66,11 @@ def extract_last_number(text: str) -> str:
 def evaluate_instructions_model(
     model: TensorModel,
     tokenizer: Tokenizer,
-    adapter: DatasetAdapter,
+    adapter: DatasetAdapter[TExpected, TPrediction],
     limit: int = 20,
-):
+    max_new_tokens: int = 20,
+    context_size: int = 1024,
+) -> float:
     dataset_args = [adapter.dataset_id]
     if adapter.config is not None:
         dataset_args.append(adapter.config)
@@ -55,20 +78,23 @@ def evaluate_instructions_model(
     dataset = load_dataset(*dataset_args, split=adapter.split)
     dataset = dataset.select(range(min(limit, len(dataset))))
 
+    model.eval()
+    device = _model_device(model)
+
     correct = 0
     total = 0
 
-    for row in dataset:
+    for raw_row in dataset:
+        row = cast(DatasetRow, raw_row)
         prompt = adapter.build_prompt(row)
         prompt_tokens = tokenizer.encode(prompt)
-        input_idx = torch.tensor([prompt_tokens], dtype=torch.long)
-        raw_prediction_idx = generate_text_simple(
-            model, input_idx, max_new_tokens=20, context_size=1024
+        input_idx = torch.tensor([prompt_tokens], dtype=torch.long, device=device)
+        generated_idx = generate_text_simple(
+            model, input_idx, max_new_tokens=max_new_tokens, context_size=context_size
         )
-        raw_prediction_tokens = cast(
-            list[int], cast(Any, raw_prediction_idx.squeeze(0)).tolist()
-        )
-        raw_prediction_text = tokenizer.decode(raw_prediction_tokens)
+        generated_tokens = cast(list[int], cast(Any, generated_idx.squeeze(0)).tolist())
+        prediction_tokens = generated_tokens[len(prompt_tokens) :]
+        raw_prediction_text = tokenizer.decode(prediction_tokens)
 
         prediction = adapter.extract_prediction(raw_prediction_text)
         expected = adapter.extract_expected(row)
