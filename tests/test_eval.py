@@ -1,9 +1,14 @@
 from collections.abc import Iterator
 
+import pytest
 import torch
 
 from ..LLLM import eval as gpt_eval
-from ..LLLM.eval import DatasetAdapter, evaluate_instructions_model
+from ..LLLM.eval import (
+    DatasetAdapter,
+    evaluate_base_model_perplexity,
+    evaluate_instructions_model,
+)
 
 
 class TinyDataset:
@@ -15,6 +20,9 @@ class TinyDataset:
 
     def __iter__(self) -> Iterator[dict[str, str]]:
         return iter(self.rows)
+
+    def shuffle(self, seed: int) -> "TinyDataset":
+        return self
 
     def select(self, selected: range) -> "TinyDataset":
         return TinyDataset([self.rows[index] for index in selected])
@@ -41,6 +49,24 @@ class MockModel(torch.nn.Module):
         logits = torch.zeros((*idx.shape, 3), device=idx.device)
         logits[:, -1, 1] = 1.0
         return logits
+
+
+class DigitTokenizer:
+    def encode(self, input: str) -> list[int]:
+        return [int(char) for char in input]
+
+    def decode(self, tok: list[int]) -> str:
+        return "".join(str(token) for token in tok)
+
+
+class UniformLogitModel(torch.nn.Module):
+    def __init__(self, vocab_size: int) -> None:
+        super().__init__()
+        self.param = torch.nn.Parameter(torch.zeros(1))
+        self.vocab_size = vocab_size
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        return torch.zeros((*idx.shape, self.vocab_size), device=idx.device)
 
 
 def test_evaluate_instructions_model_scores_generated_completion_only(
@@ -78,3 +104,24 @@ def test_evaluate_instructions_model_scores_generated_completion_only(
     )
 
     assert accuracy == 1.0
+
+
+def test_evaluate_base_model_perplexity_uses_next_token_cross_entropy(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        gpt_eval,
+        "load_dataset",
+        lambda *args, **kwargs: TinyDataset(
+            [{"text": ""}, {"text": "0"}, {"text": "0123"}]
+        ),
+    )
+
+    perplexity = evaluate_base_model_perplexity(
+        model=UniformLogitModel(vocab_size=4),
+        tokenizer=DigitTokenizer(),
+        limit=3,
+        context_size=8,
+    )
+
+    assert perplexity == pytest.approx(4.0)

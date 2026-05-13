@@ -2,9 +2,10 @@ import math
 from dataclasses import dataclass
 from collections.abc import Mapping
 import importlib
-from typing import Any, Callable, Protocol, TypeVar, cast, List
+from typing import Any, Callable, Protocol, TypeVar, cast
 import re
 import torch
+import torch.nn.functional as F
 
 from .generator import Generator
 
@@ -219,12 +220,38 @@ squad_adapter = DatasetAdapter(
 )
 
 
+def _model_device(model: TensorModel) -> torch.device:
+    """
+    Return the device used by the model in parameters.
+    """
+    if not isinstance(model, torch.nn.Module):
+        return torch.device("cpu")
+
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 def evaluate_base_model_perplexity(
     model: TensorModel,
     tokenizer: Tokenizer,
     limit: int = 100,
+    context_size: int = 1024,
 ) -> float:
-    losses: List[float] = []
+    """
+    Evaluate next-token perplexity on WikiText-2 validation text.
+
+    Args:
+        model: Autoregressive model returning logits for token ids.
+        tokenizer: Tokenizer paired with the model.
+        limit: Maximum number of non-empty dataset rows to evaluate.
+        context_size: Maximum token window evaluated from each row.
+
+    Returns:
+        Perplexity, computed as ``exp(mean_cross_entropy_loss)`` over target
+        tokens. Rows with fewer than two tokens are skipped.
+    """
     ds = load_dataset(
         "wikitext",
         "wikitext-2-raw-v1",
@@ -235,25 +262,44 @@ def evaluate_base_model_perplexity(
     ds = ds.select(range(min(limit, len(ds))))
 
     model.eval()
+    device = _model_device(model)
+    total_loss = 0.0
+    total_tokens = 0
 
-    # 4. Eval loop
-    for row in ds:
+    for raw_row in ds:
+        row = cast(DatasetRow, raw_row)
         text = row["text"]
+        if not isinstance(text, str):
+            continue
 
-        inputs = tokenizer.encode(text)
+        inputs = tokenizer.encode(text.strip())
+        if len(inputs) < 2:
+            continue
+        inputs = inputs[-context_size:]
         input_idx = torch.tensor(
             [inputs],
             dtype=torch.long,
-            # device=TODO
+            device=device,
         )
 
         with torch.no_grad():
             logits = model(input_idx)
 
-        losses.append(logits.loss.item())
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_targets = input_idx[:, 1:].contiguous()
+        loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_targets.view(-1),
+            reduction="sum",
+        )
+        target_token_count = shift_targets.numel()
+        total_loss += float(loss.item())
+        total_tokens += target_token_count
 
-    # 5. Compute perplexity
-    avg_loss = sum(losses) / len(losses)
+    if total_tokens == 0:
+        raise ValueError("no rows with at least two tokens were available")
+
+    avg_loss = total_loss / total_tokens
     perplexity = math.exp(avg_loss)
 
     print(f"Loss: {avg_loss:.4f}")
