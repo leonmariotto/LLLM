@@ -1,4 +1,6 @@
-from typing import Any, Protocol, cast
+import logging
+import time
+from typing import Any, Protocol, cast, List
 
 import torch
 
@@ -38,6 +40,10 @@ class Generator:
         self.model = model
         self.tokenizer = tokenizer
         self.context_size = context_size
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self.generated_token_count: List[int] = []
+        self.generation_seconds: List[float] = []
+        self.mean_token_per_second = 0.0
 
     def generate(
         self,
@@ -74,10 +80,13 @@ class Generator:
         Returns:
             Decoded text from the selected output tokens. The returned string is
             full prompt plus completion when ``include_prompt`` is true, otherwise
-            completion text only.
+            completion text only. After each call, ``last_token_per_second``,
+            ``last_generated_token_count``, and ``last_generation_seconds`` expose
+            generation throughput metrics for that call.
         """
         prompt_tokens = self.tokenizer.encode(prompt)
-        generated_tokens = self._generate_tokens(
+        start_time = time.perf_counter()
+        generated_tokens, generated_token_count = self._generate_tokens(
             prompt_tokens,
             stop_at_eos=stop_at_eos,
             max_generated_token=max_generated_token,
@@ -86,6 +95,7 @@ class Generator:
             temperature=temperature,
             top_k=top_k,
         )
+        self._record_metrics(generated_token_count, time.perf_counter() - start_time)
 
         output_tokens = (
             generated_tokens
@@ -104,13 +114,14 @@ class Generator:
         context_size: int,
         temperature: float,
         top_k: int | None,
-    ) -> list[int]:
+    ) -> tuple[list[int], int]:
         self.model.eval()
         idx = torch.tensor(
             [input_tokens],
             dtype=torch.long,
             device=self._model_device(),
         )
+        generated_token_count = 0
 
         for _ in range(max_generated_token):
             idx_cond = idx[:, -context_size:]
@@ -123,8 +134,28 @@ class Generator:
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 break
             idx = torch.cat((idx, idx_next), dim=1)
+            generated_token_count += int(idx_next.shape[0])
 
-        return cast(list[int], cast(Any, idx.squeeze(0)).tolist())
+        return cast(
+            list[int], cast(Any, idx.squeeze(0)).tolist()
+        ), generated_token_count
+
+    def _record_metrics(self, generated_token_count: int, elapsed: float) -> None:
+        self.generated_token_count += [generated_token_count]
+        self.generation_seconds += [elapsed]
+        c_count: int = 0
+        c_seconds: float = 0.0
+        for c, s in zip(self.generated_token_count, self.generation_seconds):
+            c_count += c
+            c_seconds += s
+        if c_count != 0:
+            self.mean_token_per_second = float(c_count) / c_seconds
+        self.logger.info(
+            "Generated %s tokens in %.4fs (mean: %.2f tokens/s)",
+            generated_token_count,
+            elapsed,
+            self.mean_token_per_second,
+        )
 
     def _filter_logits(self, logits: torch.Tensor, top_k: int | None) -> torch.Tensor:
         if top_k is None:
