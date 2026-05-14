@@ -6,6 +6,13 @@ Based on *Build a Large Language Model from scratch* book by Sebastian Raschka.
 
 As of now, top priority is RoPe, with it I could create a efficient KV cache. Then, SWA and GQA.
 
+TODO: RoPe is in place, but somewhat messy, it can be improved. 
+TODO: a repo reorganization is needed. LComponents usually belong to a model. So GPT attention class should
+live in gpt.py, as well as transformer.
+Some components still are shared: norm.py , rope.py , generate.py etc but model file should embed nearly all.
+If by chance a component can be reused its more an exception than a rule, and it can always be included, so
+its the best choice.
+
 - 1: A good positional encoding scheme : Rotary Postional Encoding (RoPE). This would be used
 to implement KV cache optimization at inference time and would stay compatible with
 incremental decoding. Designed for, musch cleaner and standard approach.
