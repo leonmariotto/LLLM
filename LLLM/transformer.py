@@ -18,7 +18,7 @@ input (so N+1 input become N output + N input).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 from torch import nn
@@ -55,7 +55,40 @@ class GELU(nn.Module):
         )
 
 
-class FeedForward(nn.Module):
+class RMSNorm(nn.Module):
+    """
+    Root Mean Square Layer Normalization.
+    Replace LayerNorm in LLama2.
+    RMSNorm uses only the root mean square, which improves computational efficiency
+    (over LayerNorm which use mean and variance).
+    See https://arxiv.org/abs/1910.07467.
+    """
+
+    def __init__(self, emb_dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.emb_dim = emb_dim
+        self.weight = nn.Parameter(torch.ones(emb_dim)).float()
+
+    def forward(self, x: torch.Tensor):
+        means = x.pow(2).mean(dim=-1, keepdim=True)
+        x_normed = x * torch.rsqrt(means + self.eps)
+        return (x_normed * self.weight).to(dtype=x.dtype)
+
+
+class SiLU(nn.Module):
+    """
+    Implement SiLu activation function (aka Swish function).
+    """
+
+    def __init__(self):
+        super(SiLU, self).__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
+
+
+class FeedForwardGPT(nn.Module):
     """
     FeedForward: expansion -> activation (GeLu) -> contraction.
     """
@@ -70,6 +103,21 @@ class FeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.layers(x)
+
+
+class FeedForwardLLama(nn.Module):
+    def __init__(self, emb_dim: int, hidden_dim: int, dtype: Optional[torch.dtype]):
+        super().__init__()
+        self.fc1 = nn.Linear(emb_dim, hidden_dim, dtype=dtype, bias=False)
+        self.fc2 = nn.Linear(emb_dim, hidden_dim, dtype=dtype, bias=False)
+        self.fc3 = nn.Linear(hidden_dim, emb_dim, dtype=dtype, bias=False)
+        self.silu = SiLU()
+
+    def forward(self, x: torch.Tensor):
+        x_fc1 = self.fc1(x)
+        x_fc2 = self.fc2(x)
+        x = self.silu(x_fc1) * x_fc2
+        return self.fc3(x)
 
 
 class LayerNorm(nn.Module):
@@ -102,7 +150,7 @@ class TransformerBlock(nn.Module):
             qkv_bias=cfg["qkv_bias"],
             use_rope=cfg["positional_encoding"] == "rope",
         )
-        self.ff = FeedForward(cfg["emb_dim"])
+        self.ff = FeedForwardGPT(cfg["emb_dim"])
         self.norm1 = LayerNorm(cfg["emb_dim"])
         self.norm2 = LayerNorm(cfg["emb_dim"])
         self.drop_shortcut: nn.Module = nn.Dropout(cfg["drop_rate"])

@@ -4,6 +4,7 @@ Attention mechanism involve 3 trainable matrix : query, key, values.
 """
 
 import torch
+from typing import Optional
 from torch import nn
 
 from .rope import apply_rope, precompute_rope_cache
@@ -36,10 +37,11 @@ class MultiHeadAttention(nn.Module):
         d_in: int,
         d_out: int,
         context_length: int,
-        dropout: float,
         num_heads: int,
+        dropout: float = 0.0,
         qkv_bias: bool = False,
         use_rope: bool = False,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         """
         - d_in: embedding size (size of embedded vector, 1 embedded vector per token)
@@ -66,9 +68,9 @@ class MultiHeadAttention(nn.Module):
         self.context_length = context_length
         self.use_rope = use_rope
 
-        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
-        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias, dtype=dtype)
+        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias, dtype=dtype)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias, dtype=dtype)
         self.out_proj = nn.Linear(d_out, d_out)  # Linear layer to combine head outputs
         self.dropout = nn.Dropout(dropout)
         self.register_buffer(
@@ -136,6 +138,7 @@ class MultiHeadAttention(nn.Module):
         if self.use_rope:
             # Add RoPE after Q/K projection and head reshaping and before computing
             # attention scores.
+            # TODO somewhat messy, clean it up.
             if pos is None:
                 position_ids = torch.arange(num_tokens, device=x.device)
             else:

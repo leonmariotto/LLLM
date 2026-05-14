@@ -5,7 +5,7 @@ torch = pytest.importorskip("torch")
 from torch import nn
 
 from ..LLLM.transformer import (
-    FeedForward,
+    FeedForwardGPT,
     GELU,
     LayerNorm,
     TransformerBlock,
@@ -47,7 +47,7 @@ def test_gelu_matches_torch_tanh_approximation() -> None:
 
 def test_feed_forward_matches_manual_two_layer_computation() -> None:
     """Check FeedForward matches an explicit two-linear-layer GELU computation."""
-    feed_forward = FeedForward(embedded_dimension=2, expansion_factor=2)
+    feed_forward = FeedForwardGPT(embedded_dimension=2, expansion_factor=2)
 
     # Pull out the internal linear layers so the expected result can be computed step by step.
     first_linear = feed_forward.layers[0]
