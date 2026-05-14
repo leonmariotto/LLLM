@@ -13,6 +13,6 @@ format:
 	uv run ruff format
 
 pytest:
-	uv run pytest -vv
+	uv run pytest -vv -m "not slow"
 
 .PHONY: all ruff format pyright build pytest

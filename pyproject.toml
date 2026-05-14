@@ -53,6 +53,9 @@ addopts = [
     "-s",
     "--log-cli-level=INFO"
 ]
+markers = [
+    "slow: tests that download remote models or run long evaluations",
+]
 
 [tool.setuptools]
 packages = ["LLLM"]

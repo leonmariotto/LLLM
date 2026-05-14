@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import json
 from dataclasses import dataclass
 from importlib import import_module
@@ -31,14 +33,12 @@ def fetch_hf_model(
     repo_id: str,
     *,
     revision: str | None = None,
-    cache_dir: str | Path | None = None,
     local_files_only: bool = False,
 ) -> FetchedModel:
     """
     Download or reuse a Hugging Face model snapshot and load common artifacts.
 
-    The cache is managed by huggingface_hub. Passing the same repo_id, revision,
-    and cache_dir reuses previously downloaded files.
+    The cache is managed by huggingface_hub. Use default system cache dir.
     """
     local_path = Path(repo_id).expanduser()
     if local_path.is_dir():
@@ -47,7 +47,6 @@ def fetch_hf_model(
     path = _download_snapshot(
         repo_id,
         revision=revision,
-        cache_dir=cache_dir,
         local_files_only=local_files_only,
     )
     return load_cached_model(path)
@@ -73,15 +72,14 @@ def _download_snapshot(
     repo_id: str,
     *,
     revision: str | None,
-    cache_dir: str | Path | None,
     local_files_only: bool,
 ) -> Path:
     hf_hub = cast(Any, import_module("huggingface_hub"))
     download = cast(Callable[..., str], hf_hub.snapshot_download)
+    logging.debug("repo_id=%s revision=%s", repo_id, revision)
     path = download(
         repo_id=repo_id,
         revision=revision,
-        cache_dir=None if cache_dir is None else str(cache_dir),
         local_files_only=local_files_only,
         allow_patterns=[
             "config.json",

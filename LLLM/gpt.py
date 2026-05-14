@@ -4,7 +4,7 @@ Generative Pretrained Tranformer
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast, TypeAlias, Dict
 
 import torch
 from torch import nn
@@ -14,6 +14,7 @@ from .transformer import TransformerBlock
 
 import tiktoken
 from tiktoken.core import Encoding
+from tiktoken_ext.openai_public import gpt2 as gpt2_tiktoken_base_args
 
 if TYPE_CHECKING:
     from .fetch import FetchedModel
@@ -242,8 +243,25 @@ TokenId: TypeAlias = int
 
 
 class GPT2Tokenizer:
-    def __init__(self) -> None:
-        self.tiktok: Encoding = tiktoken.get_encoding("gpt2")
+    def __init__(
+        self, name: str = "custom", extra_special_tokens: Dict[str, int] = {}
+    ) -> None:
+        base_args = gpt2_tiktoken_base_args()
+        base_special_tokens: dict[str, int] = cast(
+            dict[str, int], base_args.get("special_tokens")
+        )
+        base_mergeable_ranks: dict[bytes, int] = cast(
+            dict[bytes, int], base_args.get("mergeable_ranks")
+        )
+        special_tokens: Dict[str, int] = base_special_tokens | extra_special_tokens
+        self.tiktok: Encoding = tiktoken.Encoding(
+            name=f"gpt2_{name}",
+            pat_str=str(base_args["pat_str"]),
+            mergeable_ranks=base_mergeable_ranks,
+            special_tokens={
+                **special_tokens,
+            },
+        )
 
     @property
     def vocabulary_size(self) -> int:
@@ -260,7 +278,7 @@ class GPT2Tokenizer:
         return set(self.tiktok.special_tokens_set)
 
     def encode(self, in_str: str) -> list[TokenId]:
-        return self.tiktok.encode(in_str, allowed_special={"<|endoftext|>"})
+        return self.tiktok.encode(in_str, allowed_special="all")
         # TODO should return tensor here ??
         # encoded = tokenizer.encode(text, allowed_special={"<|endoftext|>"})
         # encoded_tensor = torch.tensor(encoded).unsqueeze(0)  # add batch dimension
