@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from ..LLLM.generator import Generator
-from ..LLLM.gpt import GPTConfig, GPTModel
+from ..LLLM.gpt2 import GPT2Config, GPT2Model
 
 
 _manual_seed = cast(Callable[[int], torch.Generator], cast(Any, torch).manual_seed)
@@ -34,7 +34,7 @@ class RecordingGreedyModel(nn.Module):
         return logits
 
 
-def _tiny_gpt_config() -> GPTConfig:
+def _tiny_gpt_config() -> GPT2Config:
     return {
         "vocab_size": 5,
         "context_length": 4,
@@ -133,12 +133,12 @@ def test_generator_with_tiny_gpt_is_deterministic() -> None:
     cfg = _tiny_gpt_config()
 
     _manual_seed(123)
-    model_a = GPTModel(cfg)
+    model_a = GPT2Model(cfg)
     generator_a = Generator(model_a, DigitTokenizer(), context_size=cfg["context_length"])
     generated_a = generator_a.generate("01", max_generated_token=4)
 
     _manual_seed(123)
-    model_b = GPTModel(cfg)
+    model_b = GPT2Model(cfg)
     generator_b = Generator(model_b, DigitTokenizer(), context_size=cfg["context_length"])
     generated_b = generator_b.generate("01", max_generated_token=4)
 

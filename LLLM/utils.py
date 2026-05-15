@@ -6,6 +6,8 @@ import tiktoken
 from tiktoken.core import Encoding
 import numpy as np
 
+# TODO surely some of theses need to be deleted
+
 
 class TensorModel(Protocol):
     def eval(self) -> Any: ...
@@ -143,6 +145,7 @@ def assign(left: torch.Tensor, right: Any) -> torch.nn.Parameter:
     return torch.nn.Parameter(torch.tensor(right))
 
 
+# TODO to delete.
 def load_weights_into_gpt(gpt: Any, params: Any) -> None:
     gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params["wpe"])
     gpt.tok_emb.weight = assign(gpt.tok_emb.weight, params["wte"])

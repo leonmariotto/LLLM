@@ -4,7 +4,7 @@ import pytest
 
 from ..LLLM.fetch import fetch_hf_model
 from ..LLLM.generator import Generator
-from ..LLLM.gpt import GPT2Tokenizer, GPTModel, gpt_config_from_fetched
+from ..LLLM.gpt2 import GPT2Tokenizer, GPT2Model, gpt2_config_from_fetched
 
 
 PREFETCHED_GPT2_PATH = Path(__file__).parent / "prefetched_models" / "gpt2"
@@ -15,7 +15,7 @@ def _generate_20_tokens_from_fetched_model(repo_id: str) -> str:
         repo_id,
     )
     tokenizer = GPT2Tokenizer()
-    model = GPTModel(gpt_config_from_fetched(fetched.config))
+    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
     model.load_fetched_model(fetched)
     model.eval()
 

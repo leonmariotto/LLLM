@@ -10,8 +10,8 @@ from ..LLLM.fetch import (
     fetch_hf_model,
     load_cached_model,
 )
-from ..LLLM.gpt import GPTModel, gpt_config_from_fetched
-from ..LLLM.transformer import TransformerBlock
+from ..LLLM.gpt2 import GPT2Model, gpt2_config_from_fetched
+from ..LLLM.gpt2 import GPT2TransformerBlock
 
 
 _safetensors_torch = cast(Any, import_module("safetensors.torch"))
@@ -118,9 +118,9 @@ def test_gpt_model_loads_from_fetched_gpt2_artifacts() -> None:
         weights=weights,
     )
 
-    model = GPTModel(gpt_config_from_fetched(fetched.config))
+    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
     model.load_fetched_model(fetched)
-    block = cast(TransformerBlock, model.trf_blocks[0])
+    block = cast(GPT2TransformerBlock, model.trf_blocks[0])
 
     torch.testing.assert_close(model.tok_emb.weight, weights["transformer.wte.weight"])
     torch.testing.assert_close(model.out_head.weight, weights["transformer.wte.weight"])
@@ -150,9 +150,9 @@ def test_gpt_model_loads_from_openai_gpt2_unprefixed_safetensors() -> None:
         weights=weights,
     )
 
-    model = GPTModel(gpt_config_from_fetched(fetched.config))
+    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
     model.load_fetched_model(fetched)
-    block = cast(TransformerBlock, model.trf_blocks[0])
+    block = cast(GPT2TransformerBlock, model.trf_blocks[0])
 
     torch.testing.assert_close(model.tok_emb.weight, weights["wte.weight"])
     torch.testing.assert_close(model.out_head.weight, weights["wte.weight"])

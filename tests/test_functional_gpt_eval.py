@@ -2,7 +2,6 @@ from pathlib import Path
 import math
 
 import pytest
-import tiktoken
 
 from ..LLLM.eval import (
     DatasetAdapter,
@@ -13,23 +12,23 @@ from ..LLLM.eval import (
     squad_adapter,
 )
 from ..LLLM.fetch import fetch_hf_model
-from ..LLLM.gpt import GPT2Tokenizer, GPTModel, gpt_config_from_fetched
+from ..LLLM.gpt2 import GPT2Tokenizer, GPT2Model, gpt2_config_from_fetched
 
 PREFETCHED_GPT2_PATH = Path(__file__).parent / "prefetched_models" / "gpt2"
 
-def _load_local_gpt2(tmp_path: Path) -> tuple[GPTModel, GPT2Tokenizer]:
+def _load_local_gpt2(tmp_path: Path) -> tuple[GPT2Model, GPT2Tokenizer]:
     fetched = fetch_hf_model(
         str(PREFETCHED_GPT2_PATH),
     )
     tokenizer = GPT2Tokenizer()
-    model = GPTModel(gpt_config_from_fetched(fetched.config))
+    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
     model.load_fetched_model(fetched)
     return model, tokenizer
 
 
 def _load_remote_gpt2_instruct(
     tmp_path: Path,
-) -> tuple[GPTModel, GPT2Tokenizer]:
+) -> tuple[GPT2Model, GPT2Tokenizer]:
     GPT2_INSTRUCT_REPO_ID = "Sanjarbek1024/gpt2-instruct"
     fetched = fetch_hf_model(
         GPT2_INSTRUCT_REPO_ID,
@@ -40,7 +39,7 @@ def _load_remote_gpt2_instruct(
                 "<|assistant|>": 50258,
         }
     )
-    model = GPTModel(gpt_config_from_fetched(fetched.config))
+    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
     model.load_fetched_model(fetched)
     return model, tokenizer
 
