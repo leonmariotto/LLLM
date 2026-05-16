@@ -13,7 +13,7 @@ import torch
 def precompute_rope_cache(
     seq_len: int,
     head_dim: int,
-    base: int = 10000,
+    base: float = 10000.0,
     device: torch.device | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
