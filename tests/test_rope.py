@@ -28,6 +28,30 @@ def test_precompute_rope_cache_returns_expected_shape_and_values() -> None:
     torch.testing.assert_close(sin, torch.sin(expected_angles))
 
 
+def test_precompute_rope_cache_applies_frequency_config() -> None:
+    freq_config = {
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_context_len": 32,
+    }
+
+    cos, sin = precompute_rope_cache(
+        seq_len=3,
+        head_dim=8,
+        base=10000.0,
+        freq_config=freq_config,
+    )
+
+    expected_theta = torch.tensor([1.0, 0.1 / 8.0, 0.01 / 8.0, 0.001 / 8.0])
+    expected_angles = torch.arange(3).unsqueeze(1) * expected_theta.unsqueeze(0)
+
+    assert cos.shape == (3, 4)
+    assert sin.shape == (3, 4)
+    torch.testing.assert_close(cos, torch.cos(expected_angles))
+    torch.testing.assert_close(sin, torch.sin(expected_angles))
+
+
 def test_apply_rope_interleaved_rotates_adjacent_pairs() -> None:
     x = torch.tensor([[[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]]])
     cos, sin = precompute_rope_cache(seq_len=2, head_dim=4)
@@ -130,4 +154,3 @@ def test_apply_rope_rejects_mismatched_cache_shape() -> None:
 
     with pytest.raises(RuntimeError):
         apply_rope_interleaved(x, cos, sin)
-
