@@ -3,6 +3,8 @@ Primitive for RoPE (Rotary Positional Encoding)
 See :
 - https://huggingface.co/blog/designing-positional-encoding
 - https://arxiv.org/pdf/2104.09864
+
+Support adjacent-pair (interleaved) layout and split-half layout.
 """
 
 import torch
@@ -17,8 +19,8 @@ def precompute_rope_cache(
     """
     Pre-compute RoPE rotations matrix.
     seq_len is the maximum dimension for interpretable context. A sliding context buffer
-    using a larger position space is possible thanks to RoPE. In this case seq_len is equal
-    to this larger position space length.
+    using a larger position space is possible thanks to RoPE. In this case seq_len is
+    equal to this larger position space length.
     """
     assert head_dim % 2 == 0, "RoPE requires an even head_dim"
     # Number of 2D pairs
@@ -40,9 +42,30 @@ def precompute_rope_cache(
     return cos, sin
 
 
-def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+def apply_rope(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, use_interleaved: bool = True
+) -> torch.Tensor:
     """
     Apply RoPE on x.
+
+    Support interleaved and split-half layout.
+
+    x shape: [batch, heads, seq_len, head_dim]
+    cos/sin shape: [seq_len, head_dim // 2]
+
+    return rotated x.
+    """
+    if use_interleaved:
+        return apply_rope_interleaved(x, cos, sin)
+    else:
+        return apply_rope_split_half(x, cos, sin)
+
+
+def apply_rope_interleaved(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
+    """
+    Apply RoPE on x usign interleaved pairing.
 
     x shape: [batch, heads, seq_len, head_dim]
     cos/sin shape: [seq_len, head_dim // 2]
@@ -65,3 +88,30 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     x_rot[..., 1::2] = x_odd_rot
 
     return x_rot
+
+
+def apply_rope_split_half(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
+    """
+    Apply RoPE on x using split-half pairing.
+
+    x shape: [batch, heads, seq_len, head_dim]
+    cos/sin shape: [seq_len, head_dim // 2]
+
+    return rotated x.
+    """
+    head_dim = x.shape[-1]
+    assert head_dim % 2 == 0, "RoPE requires an even head_dim"
+
+    x1 = x[..., : head_dim // 2]
+    x2 = x[..., head_dim // 2 :]
+
+    # Broadcast cos/sin over batch and heads.
+    cos = cos[None, None, :, :]
+    sin = sin[None, None, :, :]
+
+    x1_rot = x1 * cos - x2 * sin
+    x2_rot = x1 * sin + x2 * cos
+
+    return torch.cat((x1_rot, x2_rot), dim=-1)
