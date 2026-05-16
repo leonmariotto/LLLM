@@ -19,6 +19,7 @@ dependencies = [
     "huggingface-hub",
     "safetensors",
     "datasets",
+    "sentencepiece", # LLama2 tokenizer
 ]
 
 [build-system]
