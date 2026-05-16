@@ -85,6 +85,7 @@ def _download_snapshot(
             "config.json",
             "*.safetensors",
             "tokenizer.json",
+            "tokenizer.model",
             "tokenizer_config.json",
             "vocab.json",
             "merges.txt",
