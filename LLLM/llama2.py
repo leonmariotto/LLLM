@@ -1,4 +1,10 @@
-"""LLama2."""
+"""
+LLama2.
+This implementation use good old MHA (Multi-Head Attention) so it is
+NOT COMPATIBLE as is with largest Llama2 model which already used GQA.
+A GQA implementation is present in Llama3 and a patch to support them
+here could be done. This concern: Llama2 43B and 70B.
+"""
 
 from __future__ import annotations
 
