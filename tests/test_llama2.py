@@ -203,7 +203,7 @@ def test_multi_head_attention_with_kv_cache_matches_full_attention_last_token() 
         num_heads=1,
         dropout=0.0,
         qkv_bias=False,
-        use_rope=False,
+        use_rope=True,
     )
 
     with torch.no_grad():
