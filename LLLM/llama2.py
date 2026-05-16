@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 from torch import nn
 import sentencepiece as spm
-from typing import Any, TypedDict
+from typing import Any, Callable, Sequence, TypedDict, cast
 
 from .rope import precompute_rope_cache, apply_rope
 from .norm import RMSNorm
@@ -291,16 +291,25 @@ class Llama2TransformerBlock(nn.Module):
 
 
 class Llama2Tokenizer:
-    def __init__(self, tokenizer_file):
+    def __init__(self, tokenizer_file: str) -> None:
         sp = spm.SentencePieceProcessor()
-        sp.load(tokenizer_file)
+        load = cast(Callable[[str], bool], getattr(sp, "load"))
+        load(tokenizer_file)
         self.tokenizer = sp
 
-    def encode(self, text):
-        return self.tokenizer.encode(text, out_type=int)
+    def encode(self, text: str) -> list[int]:
+        encode = cast(
+            Callable[..., list[int]],
+            getattr(self.tokenizer, "encode"),
+        )
+        return encode(text, out_type=int)
 
-    def decode(self, ids):
-        return self.tokenizer.decode(ids)
+    def decode(self, ids: Sequence[int]) -> str:
+        decode = cast(
+            Callable[[Sequence[int]], str],
+            getattr(self.tokenizer, "decode"),
+        )
+        return decode(ids)
 
 
 class Llama2Model(nn.Module):
