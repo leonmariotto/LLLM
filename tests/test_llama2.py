@@ -16,6 +16,7 @@ from ..LLLM.llama2 import (
     SiLU,
     llama2_config_from_fetched,
 )
+from ..LLLM.kv_cache import KVCache
 from ..LLLM.norm import RMSNorm
 
 
@@ -194,6 +195,35 @@ def test_multi_head_attention_without_rope_matches_manual_causal_attention() -> 
     torch.testing.assert_close(outputs, expected_outputs)
 
 
+def test_multi_head_attention_with_kv_cache_matches_full_attention_last_token() -> None:
+    attention = Llama2MultiHeadAttention(
+        d_in=2,
+        d_out=2,
+        context_length=4,
+        num_heads=1,
+        dropout=0.0,
+        qkv_bias=False,
+        use_rope=False,
+    )
+
+    with torch.no_grad():
+        identity = torch.eye(2)
+        attention.W_query.weight.copy_(identity)
+        attention.W_key.weight.copy_(identity)
+        attention.W_value.weight.copy_(identity)
+        attention.out_proj.weight.copy_(identity)
+
+    inputs = torch.tensor([[[1.0, 0.0], [0.0, 2.0], [1.0, 1.0]]])
+
+    full_outputs = attention(inputs)
+    cache = KVCache()
+    attention(inputs[:, :2, :], kv_cache=cache, layer_idx=0)
+    cached_outputs = attention(inputs[:, 2:, :], kv_cache=cache, layer_idx=0)
+
+    assert cache.layer_seq_len(0) == 3
+    torch.testing.assert_close(cached_outputs, full_outputs[:, 2:, :])
+
+
 def test_multi_head_attention_scaled_shape() -> None:
     d_in = 16
     d_out = 16
@@ -356,6 +386,21 @@ def test_llama_model_with_transformer_blocks_returns_expected_shape() -> None:
 
     assert logits.shape == (2, 3, cfg["vocab_size"])
 
+
+def test_llama_model_with_kv_cache_matches_full_forward() -> None:
+    cfg = _tiny_transformer_llama_config()
+    model = Llama2Model(cfg)
+    model.eval()
+    in_idx = torch.tensor([[0, 1, 2]])
+
+    with torch.no_grad():
+        full_logits = model(in_idx)
+
+        cache = KVCache()
+        model(in_idx[:, :2], kv_cache=cache)
+        cached_logits = model(in_idx[:, 2:], kv_cache=cache)
+
+    torch.testing.assert_close(cached_logits, full_logits[:, 2:, :])
 
 def test_llama_tokenizer_wraps_sentencepiece_processor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(

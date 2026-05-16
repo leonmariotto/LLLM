@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, TypedDict, 
 
 from .rope import precompute_rope_cache, apply_rope
 from .norm import RMSNorm
+from .kv_cache import KVCache
 
 if TYPE_CHECKING:
     from .fetch import FetchedModel
@@ -188,7 +189,14 @@ class Llama2MultiHeadAttention(nn.Module):
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
 
-    def forward(self, x: torch.Tensor, pos: int | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        pos: int | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+        layer_idx: int | None = None,
+    ) -> torch.Tensor:
         """
         forward method is called by the nn.Module __call__ method.
         x is expected to be a batch of tensor of d_in size.
@@ -220,26 +228,35 @@ class Llama2MultiHeadAttention(nn.Module):
         values_new = values_new.view(b, num_tokens, self.num_heads, self.head_dim)
         queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
 
-        keys, values = keys_new, values_new
-
         # Transpose: (b, num_tokens, num_heads, head_dim) -> (b, num_heads, num_tokens, head_dim)
-        keys = keys.transpose(1, 2)
+        keys_new = keys_new.transpose(1, 2)
         queries = queries.transpose(1, 2)
-        values = values.transpose(1, 2)
+        values_new = values_new.transpose(1, 2)
+
+        # Get the cache length for the current layer.
+        past_tokens = 0
+        if kv_cache is not None:
+            if self.use_rope is False:
+                raise ValueError("RoPE must be enabled for using KVCache")
+            if layer_idx is None:
+                raise ValueError("layer_idx is required when kv_cache is provided")
+            past_tokens = kv_cache.layer_seq_len(layer_idx)
 
         if self.use_rope:
             # Add RoPE after Q/K projection and head reshaping and before computing
             # attention scores.
             # We pass to apply_rope only sin/cos for the current position. Compute each index
-            # position from a pos offset, if exist.
+            # position from a pos offset.
+            # If pos is None we infer from cache length.
             if pos is None:
-                position_ids = torch.arange(num_tokens, device=x.device)
+                start_pos = past_tokens
             else:
-                position_ids = torch.arange(
-                    pos,
-                    pos + num_tokens,
-                    device=x.device,
-                )
+                start_pos = pos
+            position_ids = torch.arange(
+                start_pos,
+                start_pos + num_tokens,
+                device=x.device,
+            )
             # TODO rope can support positional information exceeding context lenght, remove the
             # following when in place.
             assert int(position_ids[-1]) < self.context_length, (
@@ -248,7 +265,13 @@ class Llama2MultiHeadAttention(nn.Module):
             cos = self.rope_cos[position_ids]
             sin = self.rope_sin[position_ids]
             queries = apply_rope(queries, cos, sin)
-            keys = apply_rope(keys, cos, sin)
+            keys_new = apply_rope(keys_new, cos, sin)
+
+        if kv_cache is None:
+            keys, values = keys_new, values_new
+        else:
+            assert layer_idx is not None
+            keys, values = kv_cache.update(layer_idx, keys_new, values_new)
 
         # Compute scaled dot-product attention (aka self-attention) with a causal mask
         attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
@@ -257,8 +280,13 @@ class Llama2MultiHeadAttention(nn.Module):
         # So shape[-2] is the query-token dimension.
         num_tokens_Q = queries.shape[-2]
         num_tokens_K = keys.shape[-2]
-        # Original mask truncated to the number of tokens and converted to boolean.
-        mask_bool = self.mask.bool()[:num_tokens_Q, :num_tokens_K]
+        key_positions = torch.arange(num_tokens_K, device=x.device)
+        query_positions = torch.arange(
+            num_tokens_K - num_tokens_Q,
+            num_tokens_K,
+            device=x.device,
+        )
+        mask_bool = key_positions[None, :] > query_positions[:, None]
 
         # Use the mask to fill attention scores
         attn_scores.masked_fill_(mask_bool, -torch.inf)
@@ -294,11 +322,21 @@ class Llama2TransformerBlock(nn.Module):
 
         # self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
 
-    def forward(self, x: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        pos: int | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+        layer_idx: int | None = None,
+    ):
         # Shortcut connection for attention block
         shortcut = x
         x = self.norm1(x)
-        x = self.att(x)  # Shape [batch_size, num_tokens, emb_size]
+        if kv_cache is None:
+            x = self.att(x, pos)  # Shape [batch_size, num_tokens, emb_size]
+        else:
+            x = self.att(x, pos, kv_cache=kv_cache, layer_idx=layer_idx)
         # x = self.drop_shortcut(x)
         x = x + shortcut  # Add the original input back
 
@@ -351,12 +389,20 @@ class Llama2Model(nn.Module):
             cfg["emb_dim"], cfg["vocab_size"], bias=False, dtype=cfg["dtype"]
         )
 
-    def forward(self, in_idx: torch.Tensor):
+    def forward(
+        self,
+        in_idx: torch.Tensor,
+        pos: int | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+    ):
         # batch_size, seq_len = in_idx.shape
         tok_embeds = self.tok_emb(in_idx)
         x = tok_embeds
         # x = self.drop_emb(x)
-        x = self.trf_blocks(x)
+        for layer_idx, module in enumerate(self.trf_blocks):
+            block = cast(Llama2TransformerBlock, module)
+            x = block(x, pos=pos, kv_cache=kv_cache, layer_idx=layer_idx)
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
