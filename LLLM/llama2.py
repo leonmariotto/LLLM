@@ -1,16 +1,17 @@
-"""
-LLama2
-"""
+"""LLama2."""
 
-from typing import Optional
+from __future__ import annotations
 
 import torch
 from torch import nn
 import sentencepiece as spm
-from typing import Any, Callable, Sequence, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, TypedDict, cast
 
 from .rope import precompute_rope_cache, apply_rope
 from .norm import RMSNorm
+
+if TYPE_CHECKING:
+    from .fetch import FetchedModel
 
 
 class Llama2Config(TypedDict):
@@ -25,14 +26,20 @@ class Llama2Config(TypedDict):
 
 
 def llama2_config_from_fetched(config: dict[str, Any]) -> Llama2Config:
-    """Translate a Hugging Face GPT2 config into LLLM Llama2Config."""
+    """Translate a Hugging Face Llama config into LLLM Llama2Config."""
 
     def _float_config(
-        config: dict[str, Any], key: str, *, fallback_key: str | None = None
+        config: dict[str, Any],
+        key: str,
+        *,
+        fallback_key: str | None = None,
+        default: float | None = None,
     ) -> float:
         value = config.get(key)
         if value is None and fallback_key is not None:
             value = config.get(fallback_key)
+        if value is None and default is not None:
+            return default
         if not isinstance(value, float):
             raise ValueError(f"config value {key!r} must be an float")
         return value
@@ -47,17 +54,27 @@ def llama2_config_from_fetched(config: dict[str, Any]) -> Llama2Config:
             raise ValueError(f"config value {key!r} must be an int")
         return value
 
+    def _hidden_dim_config(config: dict[str, Any]) -> int:
+        intermediate_size = config.get("intermediate_size")
+        if isinstance(intermediate_size, int):
+            return intermediate_size
+
+        dim = _int_config(config, "dim")
+        multiple_of = _int_config(config, "multiple_of")
+        hidden_dim = int(2 * (4 * dim) / 3)
+        return multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
     return {
         "vocab_size": _int_config(config, "vocab_size"),
-        "context_length": _int_config(config, "n_ctx", fallback_key="n_positions"),
-        "emb_dim": _int_config(config, "n_embd"),
-        "n_heads": _int_config(config, "n_head"),
-        "n_layers": _int_config(config, "n_layer"),
-        "hidden_dim": _int_config(
-            config, "intermediate_size"
-        ),  # Size of the intermediate dimension in FeedForward
-        "rope_theta": _float_config(config, "rope_theta"),  # Rope base
-        "dtype": torch.bfloat16,  # Lower-precision dtype to reduce memory usage
+        "context_length": _int_config(
+            config, "max_position_embeddings", fallback_key="max_seq_len"
+        ),
+        "emb_dim": _int_config(config, "hidden_size", fallback_key="dim"),
+        "n_heads": _int_config(config, "num_attention_heads", fallback_key="n_heads"),
+        "n_layers": _int_config(config, "num_hidden_layers", fallback_key="n_layers"),
+        "hidden_dim": _hidden_dim_config(config),
+        "rope_theta": _float_config(config, "rope_theta", default=10000.0),
+        "dtype": torch.float32,
     }
 
 
@@ -124,6 +141,7 @@ class Llama2MultiHeadAttention(nn.Module):
         dropout: float = 0.0,  # No dropout by default.
         qkv_bias: bool = False,  # No bias.
         use_rope: bool = True,  # Use RoPe by default.
+        rope_base: float = 10000.0,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
         """
@@ -154,7 +172,9 @@ class Llama2MultiHeadAttention(nn.Module):
         self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias, dtype=dtype)
         self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias, dtype=dtype)
         self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias, dtype=dtype)
-        self.out_proj = nn.Linear(d_out, d_out)  # Linear layer to combine head outputs
+        self.out_proj = nn.Linear(
+            d_out, d_out, bias=qkv_bias
+        )  # Linear layer to combine head outputs
         self.dropout = nn.Dropout(dropout)
         self.register_buffer(
             "mask", torch.triu(torch.ones(context_length, context_length), diagonal=1)
@@ -163,6 +183,7 @@ class Llama2MultiHeadAttention(nn.Module):
             cos, sin = precompute_rope_cache(
                 seq_len=self.context_length,
                 head_dim=self.head_dim,
+                base=rope_base,
             )
             self.register_buffer("rope_cos", cos, persistent=False)
             self.register_buffer("rope_sin", sin, persistent=False)
@@ -263,6 +284,7 @@ class Llama2TransformerBlock(nn.Module):
             d_out=cfg["emb_dim"],
             context_length=cfg["context_length"],
             num_heads=cfg["n_heads"],
+            rope_base=cfg["rope_theta"],
             dtype=cfg["dtype"],
         )
         self.ff = Llama2FeedForward(cfg["emb_dim"], cfg["hidden_dim"], cfg["dtype"])
@@ -297,24 +319,25 @@ class Llama2Tokenizer:
         load(tokenizer_file)
         self.tokenizer = sp
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, input: str) -> list[int]:
         encode = cast(
             Callable[..., list[int]],
             getattr(self.tokenizer, "encode"),
         )
-        return encode(text, out_type=int)
+        return encode(input, out_type=int)
 
-    def decode(self, ids: Sequence[int]) -> str:
+    def decode(self, tok: list[int]) -> str:
         decode = cast(
             Callable[[Sequence[int]], str],
             getattr(self.tokenizer, "decode"),
         )
-        return decode(ids)
+        return decode(tok)
 
 
 class Llama2Model(nn.Module):
     def __init__(self, cfg: Llama2Config):
         super().__init__()
+        self.context_length = cfg["context_length"]
         self.tok_emb = nn.Embedding(
             cfg["vocab_size"], cfg["emb_dim"], dtype=cfg["dtype"]
         )
@@ -337,3 +360,92 @@ class Llama2Model(nn.Module):
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits
+
+    def load_fetched_model(self, fetched: FetchedModel) -> None:
+        """Copy Llama tensors from a fetched safetensors checkpoint."""
+        with torch.no_grad():
+            embedding_weight = self._optional_weight(
+                fetched.weights, "tok_embeddings.weight"
+            )
+            if embedding_weight is None:
+                embedding_weight = self._weight(fetched.weights, "output.weight")
+            self._copy_param(self.tok_emb.weight, embedding_weight)
+
+            for layer_idx, module in enumerate(self.trf_blocks):
+                block = cast(Llama2TransformerBlock, module)
+                prefix = f"layers.{layer_idx}"
+
+                self._copy_param(
+                    block.att.W_query.weight,
+                    self._weight(fetched.weights, f"{prefix}.attention.wq.weight"),
+                )
+                self._copy_param(
+                    block.att.W_key.weight,
+                    self._weight(fetched.weights, f"{prefix}.attention.wk.weight"),
+                )
+                self._copy_param(
+                    block.att.W_value.weight,
+                    self._weight(fetched.weights, f"{prefix}.attention.wv.weight"),
+                )
+                self._copy_param(
+                    block.att.out_proj.weight,
+                    self._weight(fetched.weights, f"{prefix}.attention.wo.weight"),
+                )
+
+                self._copy_param(
+                    block.norm1.weight,
+                    self._weight(fetched.weights, f"{prefix}.attention_norm.weight"),
+                )
+                self._copy_param(
+                    block.norm2.weight,
+                    self._weight(fetched.weights, f"{prefix}.ffn_norm.weight"),
+                )
+
+                self._copy_param(
+                    block.ff.fc1.weight,
+                    self._weight(fetched.weights, f"{prefix}.feed_forward.w1.weight"),
+                )
+                self._copy_param(
+                    block.ff.fc2.weight,
+                    self._weight(fetched.weights, f"{prefix}.feed_forward.w3.weight"),
+                )
+                self._copy_param(
+                    block.ff.fc3.weight,
+                    self._weight(fetched.weights, f"{prefix}.feed_forward.w2.weight"),
+                )
+
+            self._copy_param(
+                self.final_norm.weight, self._weight(fetched.weights, "norm.weight")
+            )
+            self._copy_param(
+                self.out_head.weight, self._weight(fetched.weights, "output.weight")
+            )
+
+        self.eval()
+
+    @staticmethod
+    def _copy_param(
+        param: nn.Parameter | torch.Tensor | None, value: torch.Tensor
+    ) -> None:
+        if param is None:
+            raise ValueError("cannot copy into missing parameter")
+        if tuple(param.shape) != tuple(value.shape):
+            raise ValueError(
+                f"shape mismatch for parameter: expected {tuple(param.shape)}, "
+                f"got {tuple(value.shape)}"
+            )
+        param.copy_(value)
+
+    @staticmethod
+    def _optional_weight(
+        weights: dict[str, torch.Tensor], name: str
+    ) -> torch.Tensor | None:
+        if name in weights:
+            return weights[name]
+        return None
+
+    @staticmethod
+    def _weight(weights: dict[str, torch.Tensor], name: str) -> torch.Tensor:
+        if name in weights:
+            return weights[name]
+        raise KeyError(f"missing Llama weight {name!r}")
