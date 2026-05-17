@@ -37,7 +37,7 @@ class Llama3Config(TypedDict):
 
 
 def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
-    """Translate a Hugging Face Llama config into LLLM Llama2Config."""
+    """Translate a Hugging Face Llama config into LLLM Llama3Config."""
 
     def _float_config(
         config: dict[str, Any],
@@ -75,6 +75,26 @@ def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
         hidden_dim = int(2 * (4 * dim) / 3)
         return multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+    def _rope_frequency_config(config: dict[str, Any]) -> RopeFrequencyConfig | None:
+        rope_scaling = config.get("rope_scaling")
+        if rope_scaling is None:
+            return None
+        if not isinstance(rope_scaling, dict):
+            raise ValueError("config value 'rope_scaling' must be a dict")
+
+        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
+        if rope_type != "llama3":
+            raise ValueError(f"unsupported rope_scaling rope_type: {rope_type!r}")
+
+        return {
+            "factor": _float_config(rope_scaling, "factor"),
+            "low_freq_factor": _float_config(rope_scaling, "low_freq_factor"),
+            "high_freq_factor": _float_config(rope_scaling, "high_freq_factor"),
+            "original_context_len": _int_config(
+                rope_scaling, "original_max_position_embeddings"
+            ),
+        }
+
     return {
         "vocab_size": _int_config(config, "vocab_size"),
         "context_length": _int_config(
@@ -88,7 +108,7 @@ def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
         "n_layers": _int_config(config, "num_hidden_layers", fallback_key="n_layers"),
         "hidden_dim": _hidden_dim_config(config),
         "rope_theta": _float_config(config, "rope_theta", default=10000.0),
-        "freq_config": None,
+        "freq_config": _rope_frequency_config(config),
         "dtype": torch.float32,
     }
 
@@ -248,8 +268,8 @@ class Llama3GroupedQueryAttention(nn.Module):
         )
         current_cos = cos[position_ids]
         current_sin = sin[position_ids]
-        queries = apply_rope(queries, current_cos, current_sin)
-        keys_new = apply_rope(keys_new, current_cos, current_sin)
+        queries = apply_rope(queries, current_cos, current_sin, use_interleaved=False)
+        keys_new = apply_rope(keys_new, current_cos, current_sin, use_interleaved=False)
 
         if kv_cache is None:
             keys, values = keys_new, values_new
@@ -472,15 +492,62 @@ class Llama3Model(nn.Module):
     def _optional_weight(
         weights: dict[str, torch.Tensor], name: str
     ) -> torch.Tensor | None:
-        if name in weights:
-            return weights[name]
+        for candidate in Llama3Model._weight_names(name):
+            if candidate in weights:
+                return weights[candidate]
         return None
 
     @staticmethod
     def _weight(weights: dict[str, torch.Tensor], name: str) -> torch.Tensor:
-        if name in weights:
-            return weights[name]
-        raise KeyError(f"missing Llama weight {name!r}")
+        for candidate in Llama3Model._weight_names(name):
+            if candidate in weights:
+                return weights[candidate]
+        names = ", ".join(Llama3Model._weight_names(name))
+        raise KeyError(f"missing Llama weight {name!r}; tried {names}")
+
+    @staticmethod
+    def _weight_names(name: str) -> list[str]:
+        names = [name]
+        exact_aliases = {
+            "tok_embeddings.weight": "model.embed_tokens.weight",
+            "output.weight": "lm_head.weight",
+            "norm.weight": "model.norm.weight",
+        }
+        if name in exact_aliases:
+            names.append(exact_aliases[name])
+        if name == "output.weight":
+            names.append("model.embed_tokens.weight")
+
+        prefix = "layers."
+        if name.startswith(prefix):
+            parts = name.split(".")
+            if len(parts) == 5:
+                _, layer_idx, group, weight_name, suffix = parts
+                if suffix == "weight":
+                    layer_aliases = {
+                        ("attention", "wq"): "self_attn.q_proj",
+                        ("attention", "wk"): "self_attn.k_proj",
+                        ("attention", "wv"): "self_attn.v_proj",
+                        ("attention", "wo"): "self_attn.o_proj",
+                        ("feed_forward", "w1"): "mlp.gate_proj",
+                        ("feed_forward", "w2"): "mlp.down_proj",
+                        ("feed_forward", "w3"): "mlp.up_proj",
+                    }
+                    hf_name = layer_aliases.get((group, weight_name))
+                    if hf_name is not None:
+                        names.append(f"model.layers.{layer_idx}.{hf_name}.weight")
+            elif len(parts) == 4:
+                _, layer_idx, weight_name, suffix = parts
+                if suffix == "weight":
+                    layer_norm_aliases = {
+                        "attention_norm": "input_layernorm",
+                        "ffn_norm": "post_attention_layernorm",
+                    }
+                    hf_name = layer_norm_aliases.get(weight_name)
+                    if hf_name is not None:
+                        names.append(f"model.layers.{layer_idx}.{hf_name}.weight")
+
+        return names
 
 
 class Llama3Tokenizer:
@@ -493,7 +560,8 @@ class Llama3Tokenizer:
         if not os.path.isfile(model_path):
             raise FileNotFoundError(model_path)
 
-        mergeable = load_tiktoken_bpe(model_path)
+        self.hf_tokenizer: Any | None = None
+        self.tiktok: tiktoken.Encoding | None = None
 
         # hard-coded from Meta's tokenizer.json
         self.special = {
@@ -511,26 +579,45 @@ class Llama3Tokenizer:
             }
         )
 
-        self.tiktok = tiktoken.Encoding(
-            name=Path(model_path).name,
-            pat_str=r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
-            r"|[^\r\n\p{L}\p{N}]?\p{L}+"
-            r"|\p{N}{1,3}"
-            r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
-            r"|\s*[\r\n]+"
-            r"|\s+(?!\S)"
-            r"|\s+",
-            mergeable_ranks=mergeable,
-            special_tokens=self.special,
-        )
+        try:
+            mergeable = load_tiktoken_bpe(model_path)
+        except ValueError:
+            tokenizer_json_path = Path(model_path).with_name("tokenizer.json")
+            if not tokenizer_json_path.is_file():
+                raise
+
+            tokenizers = cast(Any, __import__("tokenizers"))
+            self.hf_tokenizer = tokenizers.Tokenizer.from_file(str(tokenizer_json_path))
+        else:
+            self.tiktok = tiktoken.Encoding(
+                name=Path(model_path).name,
+                pat_str=r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+                r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+                r"|\p{N}{1,3}"
+                r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+                r"|\s*[\r\n]+"
+                r"|\s+(?!\S)"
+                r"|\s+",
+                mergeable_ranks=mergeable,
+                special_tokens=self.special,
+            )
 
     def encode(self, text: str, bos: bool = False, eos: bool = False) -> list[int]:
-        ids = ([self.special["<|begin_of_text|>"]] if bos else []) + self.tiktok.encode(
-            text
-        )
+        if self.hf_tokenizer is not None:
+            ids = cast(list[int], self.hf_tokenizer.encode(text).ids)
+        elif self.tiktok is not None:
+            ids = cast(list[int], self.tiktok.encode(text))
+        else:
+            raise RuntimeError("Llama3Tokenizer is not initialized")
+
+        ids = ([self.special["<|begin_of_text|>"]] if bos else []) + ids
         if eos:
             ids.append(self.special["<|end_of_text|>"])
         return ids
 
     def decode(self, tok: list[int]) -> str:
-        return self.tiktok.decode(tok)
+        if self.hf_tokenizer is not None:
+            return cast(str, self.hf_tokenizer.decode(tok, skip_special_tokens=False))
+        if self.tiktok is not None:
+            return self.tiktok.decode(tok)
+        raise RuntimeError("Llama3Tokenizer is not initialized")

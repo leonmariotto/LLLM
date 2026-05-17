@@ -18,6 +18,8 @@ dependencies = [
     "pandas",
     "huggingface-hub",
     "safetensors",
+    "tokenizers",
+    "transformers",
     "datasets",
     "sentencepiece", # LLama2 tokenizer
 ]

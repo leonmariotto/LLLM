@@ -599,6 +599,8 @@ huggingface-hub==1.14.0 \
     # via
     #   datasets
     #   lllm
+    #   tokenizers
+    #   transformers
 idna==3.14 \
     --hash=sha256:466d810d7a2cc1022bea9b037c39728d51ae7dad40d480fc9b7d7ecf98ba8ee3 \
     --hash=sha256:e677eaf072e290f7b725f9acf0b3a2bd55f9fd6f7c70abe5f0e34823d0accf69
@@ -1032,6 +1034,7 @@ numpy==2.4.4 \
     #   ml-dtypes
     #   pandas
     #   tensorflow
+    #   transformers
 nvidia-cublas==13.1.0.3 ; sys_platform == 'linux' \
     --hash=sha256:c86fc7f7ae36d7528288c5d88098edcb7b02c633d262e7ddbb86b0ad91be5df2 \
     --hash=sha256:ee8722c1f0145ab246bccb9e452153b5e0515fd094c3678df50b2a0888b8b171
@@ -1179,6 +1182,7 @@ packaging==26.2 \
     #   matplotlib
     #   pytest
     #   tensorflow
+    #   transformers
     #   wheel
 pandas==3.0.2 \
     --hash=sha256:01f31a546acd5574ef77fe199bc90b55527c225c20ccda6601cf6b0fd5ed597c \
@@ -1508,6 +1512,7 @@ pyyaml==6.0.3 \
     # via
     #   datasets
     #   huggingface-hub
+    #   transformers
 regex==2026.5.9 \
     --hash=sha256:002205cafd2a9e78c6290c7d1df277bf3277b3b7a30e0b4bb0dac2e2e3f7cb2d \
     --hash=sha256:01f28d868834624c934b8d2e0aa1c8341337e37831f4a012f18a5afcba4cbaf3 \
@@ -1590,7 +1595,9 @@ regex==2026.5.9 \
     --hash=sha256:fd03c4f0e33280d15cae17159b899245d6b7c53d21def19b263b39655061f5ce \
     --hash=sha256:fd190e88a895a8901325fad284a3f74ea52b1da8525b76cc811fa9b1edf0ce2b \
     --hash=sha256:ff8d372ac2acdc048d1c19916f27ee61bc5722728458ba6ca5052f2c72d51763
-    # via tiktoken
+    # via
+    #   tiktoken
+    #   transformers
 requests==2.33.1 \
     --hash=sha256:18817f8c57c6263968bc123d237e3b8b08ac046f5456bd1e307ee8f4250d3517 \
     --hash=sha256:4e6d1ef462f3626a1f0a0a9c42dd93c63bad33f9f1c1937509b8c5c8718ab56a
@@ -1640,7 +1647,9 @@ safetensors==0.7.0 \
     --hash=sha256:d1239932053f56f3456f32eb9625590cc7582e905021f94636202a864d470755 \
     --hash=sha256:dac7252938f0696ddea46f5e855dd3138444e82236e3be475f54929f0c510d48 \
     --hash=sha256:e07d91d0c92a31200f25351f4acb2bc6aff7f48094e13ebb1d0fb995b54b6542
-    # via lllm
+    # via
+    #   lllm
+    #   transformers
 sentencepiece==0.2.1 \
     --hash=sha256:010f025a544ef770bb395091d57cb94deb9652d8972e0d09f71d85d5a0816c8c \
     --hash=sha256:01e6912125cb45d3792f530a4d38f8e21bf884d6b4d4ade1b2de5cf7a8d2a52b \
@@ -1763,6 +1772,26 @@ tiktoken==0.12.0 \
     --hash=sha256:fc530a28591a2d74bce821d10b418b26a094bf33839e69042a6e86ddb7a7fb27 \
     --hash=sha256:ffc5288f34a8bc02e1ea7047b8d041104791d2ddbf42d1e5fa07822cbffe16bd
     # via lllm
+tokenizers==0.22.2 \
+    --hash=sha256:1c774b1276f71e1ef716e5486f21e76333464f47bece56bbd554485982a9e03e \
+    --hash=sha256:1e418a55456beedca4621dbab65a318981467a2b188e982a23e117f115ce5001 \
+    --hash=sha256:2249487018adec45d6e3554c71d46eb39fa8ea67156c640f7513eb26f318cec7 \
+    --hash=sha256:25b85325d0815e86e0bac263506dd114578953b7b53d7de09a6485e4a160a7dd \
+    --hash=sha256:29c30b83d8dcd061078b05ae0cb94d3c710555fbb44861139f9f83dcca3dc3e4 \
+    --hash=sha256:369cc9fc8cc10cb24143873a0d95438bb8ee257bb80c71989e3ee290e8d72c67 \
+    --hash=sha256:37ae80a28c1d3265bb1f22464c856bd23c02a05bb211e56d0c5301a435be6c1a \
+    --hash=sha256:38337540fbbddff8e999d59970f3c6f35a82de10053206a7562f1ea02d046fa5 \
+    --hash=sha256:473b83b915e547aa366d1eee11806deaf419e17be16310ac0a14077f1e28f917 \
+    --hash=sha256:544dd704ae7238755d790de45ba8da072e9af3eea688f698b137915ae959281c \
+    --hash=sha256:791135ee325f2336f498590eb2f11dc5c295232f288e75c99a36c5dbce63088a \
+    --hash=sha256:9ce725d22864a1e965217204946f830c37876eee3b2ba6fc6255e8e903d5fcbc \
+    --hash=sha256:a6bf3f88c554a2b653af81f3204491c818ae2ac6fbc09e76ef4773351292bc92 \
+    --hash=sha256:bfb88f22a209ff7b40a576d5324bf8286b519d7358663db21d6246fb17eea2d5 \
+    --hash=sha256:c9ea31edff2968b44a88f97d784c2f16dc0729b8b143ed004699ebca91f05c48 \
+    --hash=sha256:df6c4265b289083bf710dff49bc51ef252f9d5be33a45ee2bed151114a56207b
+    # via
+    #   lllm
+    #   transformers
 torch==2.11.0 \
     --hash=sha256:01018087326984a33b64e04c8cb5c2795f9120e0d775ada1f6638840227b04d7 \
     --hash=sha256:0f68f4ac6d95d12e896c3b7a912b5871619542ec54d3649cf48cc1edd4dd2756 \
@@ -1792,6 +1821,11 @@ tqdm==4.67.3 \
     #   datasets
     #   huggingface-hub
     #   lllm
+    #   transformers
+transformers==5.8.1 \
+    --hash=sha256:4dd5b6de4105725104d84fd6abd74b305f4debfc251b38c648ee5dd087cf543b \
+    --hash=sha256:5340fb95962162cdfdae5cc91d7f8fedd92ed75216c1154c5e1f590fcf56dd0e
+    # via lllm
 triton==3.6.0 ; sys_platform == 'linux' \
     --hash=sha256:0b3a97e8ed304dfa9bd23bb41ca04cdf6b2e617d5e782a8653d616037a5d537d \
     --hash=sha256:10c7f76c6e72d2ef08df639e3d0d30729112f47a56b0c81672edc05ee5116ac9 \
@@ -1807,7 +1841,9 @@ triton==3.6.0 ; sys_platform == 'linux' \
 typer==0.25.1 \
     --hash=sha256:75caa44ed46a03fb2dab8808753ffacdbfea88495e74c85a28c5eefcf5f39c89 \
     --hash=sha256:9616eb8853a09ffeabab1698952f33c6f29ffdbceb4eaeecf571880e8d7664cc
-    # via huggingface-hub
+    # via
+    #   huggingface-hub
+    #   transformers
 typing-extensions==4.15.0 \
     --hash=sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466 \
     --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548

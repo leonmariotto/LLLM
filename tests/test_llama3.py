@@ -10,8 +10,22 @@ from ..LLLM.llama3 import (
     Llama3GroupedQueryAttention,
     Llama3Model,
     Llama3TransformerBlock,
+    llama3_config_from_fetched,
 )
 from ..LLLM.rope import precompute_rope_cache
+
+
+def _tiny_hf_llama3_config() -> dict[str, object]:
+    return {
+        "vocab_size": 5,
+        "max_position_embeddings": 4,
+        "hidden_size": 4,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 1,
+        "intermediate_size": 8,
+        "rope_theta": 10000.0,
+    }
 
 
 def _tiny_llama3_config() -> Llama3Config:
@@ -33,6 +47,94 @@ def _tiny_transformer_llama3_config() -> Llama3Config:
     cfg = _tiny_llama3_config().copy()
     cfg["n_layers"] = 1
     return cfg
+
+
+def test_llama3_config_from_fetched_translates_hugging_face_names() -> None:
+    cfg = llama3_config_from_fetched(_tiny_hf_llama3_config())
+
+    assert cfg == {
+        "vocab_size": 5,
+        "context_length": 4,
+        "emb_dim": 4,
+        "n_heads": 2,
+        "n_kv_groups": 1,
+        "n_layers": 1,
+        "hidden_dim": 8,
+        "rope_theta": 10000.0,
+        "freq_config": None,
+        "dtype": torch.float32,
+    }
+
+
+def test_llama3_config_from_fetched_translates_hugging_face_rope_scaling() -> None:
+    hf_config = _tiny_hf_llama3_config()
+    hf_config["rope_scaling"] = {
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3",
+    }
+
+    cfg = llama3_config_from_fetched(hf_config)
+
+    assert cfg["freq_config"] == {
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_context_len": 8192,
+    }
+
+
+def test_llama3_config_from_fetched_accepts_legacy_rope_scaling_type() -> None:
+    hf_config = _tiny_hf_llama3_config()
+    hf_config["rope_scaling"] = {
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+        "type": "llama3",
+    }
+
+    cfg = llama3_config_from_fetched(hf_config)
+
+    assert cfg["freq_config"] == {
+        "factor": 8.0,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_context_len": 8192,
+    }
+
+
+def test_llama3_config_from_fetched_rejects_unsupported_rope_scaling() -> None:
+    hf_config = _tiny_hf_llama3_config()
+    hf_config["rope_scaling"] = {
+        "factor": 2.0,
+        "type": "linear",
+    }
+
+    with pytest.raises(ValueError, match="unsupported rope_scaling"):
+        llama3_config_from_fetched(hf_config)
+
+
+def test_llama3_config_from_fetched_rejects_bad_rope_scaling_types() -> None:
+    hf_config = _tiny_hf_llama3_config()
+    hf_config["rope_scaling"] = "llama3"
+
+    with pytest.raises(ValueError, match="rope_scaling"):
+        llama3_config_from_fetched(hf_config)
+
+    hf_config = _tiny_hf_llama3_config()
+    hf_config["rope_scaling"] = {
+        "factor": 8,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192,
+        "rope_type": "llama3",
+    }
+
+    with pytest.raises(ValueError, match="factor"):
+        llama3_config_from_fetched(hf_config)
 
 
 def _manual_rms_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
