@@ -5,7 +5,7 @@ Support 3.1 and 3.2.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, TypedDict, cast
+from typing import TYPE_CHECKING, Optional, TypedDict, cast, Any
 import os
 from pathlib import Path
 
@@ -34,6 +34,63 @@ class Llama3Config(TypedDict):
     rope_theta: float
     freq_config: RopeFrequencyConfig | None
     dtype: torch.dtype
+
+
+def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
+    """Translate a Hugging Face Llama config into LLLM Llama2Config."""
+
+    def _float_config(
+        config: dict[str, Any],
+        key: str,
+        *,
+        fallback_key: str | None = None,
+        default: float | None = None,
+    ) -> float:
+        value = config.get(key)
+        if value is None and fallback_key is not None:
+            value = config.get(fallback_key)
+        if value is None and default is not None:
+            return default
+        if not isinstance(value, float):
+            raise ValueError(f"config value {key!r} must be an float")
+        return value
+
+    def _int_config(
+        config: dict[str, Any], key: str, *, fallback_key: str | None = None
+    ) -> int:
+        value = config.get(key)
+        if value is None and fallback_key is not None:
+            value = config.get(fallback_key)
+        if not isinstance(value, int):
+            raise ValueError(f"config value {key!r} must be an int")
+        return value
+
+    def _hidden_dim_config(config: dict[str, Any]) -> int:
+        intermediate_size = config.get("intermediate_size")
+        if isinstance(intermediate_size, int):
+            return intermediate_size
+
+        dim = _int_config(config, "dim")
+        multiple_of = _int_config(config, "multiple_of")
+        hidden_dim = int(2 * (4 * dim) / 3)
+        return multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+    return {
+        "vocab_size": _int_config(config, "vocab_size"),
+        "context_length": _int_config(
+            config, "max_position_embeddings", fallback_key="max_seq_len"
+        ),
+        "emb_dim": _int_config(config, "hidden_size", fallback_key="dim"),
+        "n_heads": _int_config(config, "num_attention_heads", fallback_key="n_heads"),
+        "n_kv_groups": _int_config(
+            config, "num_key_value_heads", fallback_key="n_heads"
+        ),
+        "n_layers": _int_config(config, "num_hidden_layers", fallback_key="n_layers"),
+        "hidden_dim": _hidden_dim_config(config),
+        "rope_theta": _float_config(config, "rope_theta", default=10000.0),
+        "freq_config": None,
+        "dtype": torch.float32,
+    }
 
 
 class Llama3GroupedQueryAttention(nn.Module):
