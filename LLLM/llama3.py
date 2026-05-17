@@ -6,6 +6,7 @@ Support 3.1 and 3.2.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional, TypedDict, cast, Any
+from importlib import import_module
 import os
 from pathlib import Path
 
@@ -32,6 +33,7 @@ class Llama3Config(TypedDict):
     n_layers: int
     hidden_dim: int
     rope_theta: float
+    rope_interleaved: bool
     freq_config: RopeFrequencyConfig | None
     dtype: torch.dtype
 
@@ -45,12 +47,15 @@ def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
         *,
         fallback_key: str | None = None,
         default: float | None = None,
+        allow_int: bool = False,
     ) -> float:
         value = config.get(key)
         if value is None and fallback_key is not None:
             value = config.get(fallback_key)
         if value is None and default is not None:
             return default
+        if allow_int and isinstance(value, int):
+            return float(value)
         if not isinstance(value, float):
             raise ValueError(f"config value {key!r} must be an float")
         return value
@@ -63,6 +68,12 @@ def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
             value = config.get(fallback_key)
         if not isinstance(value, int):
             raise ValueError(f"config value {key!r} must be an int")
+        return value
+
+    def _bool_config(config: dict[str, Any], key: str, *, default: bool) -> bool:
+        value = config.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"config value {key!r} must be a bool")
         return value
 
     def _hidden_dim_config(config: dict[str, Any]) -> int:
@@ -81,6 +92,7 @@ def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
             return None
         if not isinstance(rope_scaling, dict):
             raise ValueError("config value 'rope_scaling' must be a dict")
+        rope_scaling = cast(dict[str, Any], rope_scaling)
 
         rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
         if rope_type != "llama3":
@@ -107,7 +119,10 @@ def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
         ),
         "n_layers": _int_config(config, "num_hidden_layers", fallback_key="n_layers"),
         "hidden_dim": _hidden_dim_config(config),
-        "rope_theta": _float_config(config, "rope_theta", default=10000.0),
+        "rope_theta": _float_config(
+            config, "rope_theta", default=10000.0, allow_int=True
+        ),
+        "rope_interleaved": _bool_config(config, "rope_interleaved", default=False),
         "freq_config": _rope_frequency_config(config),
         "dtype": torch.float32,
     }
@@ -148,6 +163,7 @@ class Llama3GroupedQueryAttention(nn.Module):
         num_kv_groups: int,
         dropout: float = 0.0,  # No dropout by default.
         qkv_bias: bool = False,  # No bias.
+        rope_interleaved: bool = False,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
         """
@@ -180,6 +196,7 @@ class Llama3GroupedQueryAttention(nn.Module):
         self.context_length = context_length
         self.num_kv_groups = num_kv_groups
         self.kv_group_size = num_heads // num_kv_groups
+        self.rope_interleaved = rope_interleaved
 
         self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias, dtype=dtype)
         self.W_key = nn.Linear(
@@ -268,8 +285,18 @@ class Llama3GroupedQueryAttention(nn.Module):
         )
         current_cos = cos[position_ids]
         current_sin = sin[position_ids]
-        queries = apply_rope(queries, current_cos, current_sin, use_interleaved=False)
-        keys_new = apply_rope(keys_new, current_cos, current_sin, use_interleaved=False)
+        queries = apply_rope(
+            queries,
+            current_cos,
+            current_sin,
+            use_interleaved=self.rope_interleaved,
+        )
+        keys_new = apply_rope(
+            keys_new,
+            current_cos,
+            current_sin,
+            use_interleaved=self.rope_interleaved,
+        )
 
         if kv_cache is None:
             keys, values = keys_new, values_new
@@ -326,6 +353,7 @@ class Llama3TransformerBlock(nn.Module):
             context_length=cfg["context_length"],
             num_heads=cfg["n_heads"],
             num_kv_groups=cfg["n_kv_groups"],
+            rope_interleaved=cfg["rope_interleaved"],
             dtype=cfg["dtype"],
         )
         self.ff = Llama2FeedForward(cfg["emb_dim"], cfg["hidden_dim"], cfg["dtype"])
@@ -586,7 +614,7 @@ class Llama3Tokenizer:
             if not tokenizer_json_path.is_file():
                 raise
 
-            tokenizers = cast(Any, __import__("tokenizers"))
+            tokenizers = cast(Any, import_module("tokenizers"))
             self.hf_tokenizer = tokenizers.Tokenizer.from_file(str(tokenizer_json_path))
         else:
             self.tiktok = tiktoken.Encoding(
@@ -606,7 +634,7 @@ class Llama3Tokenizer:
         if self.hf_tokenizer is not None:
             ids = cast(list[int], self.hf_tokenizer.encode(text).ids)
         elif self.tiktok is not None:
-            ids = cast(list[int], self.tiktok.encode(text))
+            ids = self.tiktok.encode(text)
         else:
             raise RuntimeError("Llama3Tokenizer is not initialized")
 

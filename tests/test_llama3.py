@@ -38,6 +38,7 @@ def _tiny_llama3_config() -> Llama3Config:
         "n_layers": 0,
         "hidden_dim": 8,
         "rope_theta": 10000.0,
+        "rope_interleaved": False,
         "freq_config": None,
         "dtype": torch.float32,
     }
@@ -61,9 +62,19 @@ def test_llama3_config_from_fetched_translates_hugging_face_names() -> None:
         "n_layers": 1,
         "hidden_dim": 8,
         "rope_theta": 10000.0,
+        "rope_interleaved": False,
         "freq_config": None,
         "dtype": torch.float32,
     }
+
+
+def test_llama3_config_from_fetched_uses_remote_rope_interleaved() -> None:
+    hf_config = _tiny_hf_llama3_config()
+    hf_config["rope_interleaved"] = True
+
+    cfg = llama3_config_from_fetched(hf_config)
+
+    assert cfg["rope_interleaved"] is True
 
 
 def test_llama3_config_from_fetched_translates_hugging_face_rope_scaling() -> None:
