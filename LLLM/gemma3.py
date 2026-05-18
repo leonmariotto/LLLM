@@ -4,12 +4,14 @@ Gemma3
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, TypedDict, cast, Any
+from typing import TYPE_CHECKING, Optional, TypedDict, cast, Any, Callable
+from pathlib import Path
 
 import torch
 import torch.nn as nn
+from tokenizers import Tokenizer
 
-from .rope import precompute_rope_cache, apply_rope, RopeFrequencyConfig
+from .rope import precompute_rope_cache, apply_rope
 from .kv_cache import KVCache
 
 if TYPE_CHECKING:
@@ -30,13 +32,87 @@ class Gemma3Config(TypedDict):
     rope_local_base: float
     rope_interleaved: bool
     layer_types: list[str]
-    freq_config: RopeFrequencyConfig | None
     dtype: torch.dtype
 
 
 def gemma3_config_from_fetched(config: dict[str, Any]) -> Gemma3Config:
     """Translate a Hugging Face Llama config into LLLM Gemma3Config."""
-    # TODO
+
+    def _float_config(
+        config: dict[str, Any],
+        key: str,
+        *,
+        fallback_key: str | None = None,
+        default: float | None = None,
+        allow_int: bool = False,
+    ) -> float:
+        value = config.get(key)
+        if value is None and fallback_key is not None:
+            value = config.get(fallback_key)
+        if value is None and default is not None:
+            return default
+        if allow_int and isinstance(value, int):
+            return float(value)
+        if not isinstance(value, float):
+            raise ValueError(f"config value {key!r} must be an float")
+        return value
+
+    def _hidden_dim_config(config: dict[str, Any]) -> int:
+        intermediate_size = config.get("intermediate_size")
+        if isinstance(intermediate_size, int):
+            return intermediate_size
+
+        dim = _int_config(config, "dim")
+        multiple_of = _int_config(config, "multiple_of")
+        hidden_dim = int(2 * (4 * dim) / 3)
+        return multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+    def _int_config(
+        config: dict[str, Any], key: str, *, fallback_key: str | None = None
+    ) -> int:
+        value = config.get(key)
+        if value is None and fallback_key is not None:
+            value = config.get(fallback_key)
+        if not isinstance(value, int):
+            raise ValueError(f"config value {key!r} must be an int")
+        return value
+
+    def _layer_types_config(config: dict[str, Any], key: str) -> list[str]:
+        value = config.get(key)
+        if not isinstance(value, list):
+            raise ValueError(f"config value {key!r} must be an int")
+        return cast(list[str], value)
+
+    def _bool_config(config: dict[str, Any], key: str, *, default: bool) -> bool:
+        value = config.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"config value {key!r} must be a bool")
+        return value
+
+    return {
+        "vocab_size": _int_config(config, "vocab_size"),
+        "context_length": _int_config(
+            config, "max_position_embeddings", fallback_key="max_seq_len"
+        ),
+        "emb_dim": _int_config(config, "hidden_size", fallback_key="dim"),
+        "n_heads": _int_config(config, "num_attention_heads", fallback_key="n_heads"),
+        "n_kv_groups": _int_config(
+            config, "num_key_value_heads", fallback_key="n_heads"
+        ),
+        "sliding_window": _int_config(config, "sliding_window"),
+        "n_layers": _int_config(config, "num_hidden_layers", fallback_key="n_layers"),
+        "hidden_dim": _hidden_dim_config(config),
+        "head_dim": _int_config(config, "head_dim"),
+        "rope_base": _float_config(
+            config, "rope_theta", default=1000000.0, allow_int=True
+        ),
+        "rope_local_base": _float_config(
+            config, "rope_local_base_freq", default=10000.0, allow_int=True
+        ),
+        "rope_interleaved": _bool_config(config, "rope_interleaved", default=False),
+        "layer_types": _layer_types_config(config, "layer_types"),
+        "dtype": torch.float32,
+    }
 
 
 class Gemma3FeedForward(nn.Module):
@@ -307,6 +383,8 @@ class Gemma3GroupedQueryAttention(nn.Module):
         # [Q, 1] broadcasts to [Q, K]
         # So < returns a boolean tensor of shape: [Q, K]
         causal_mask = key_positions[None, :] > query_positions[:, None]
+        # TODO, it make no sens to do a sliding window mechanism without a sliding KVCache.
+        # Need to implement a sliding KVCache here.
         sliding_window_mask = key_positions[None, :] < (
             query_positions[:, None] - self.sliding_window + 1
         )
@@ -425,7 +503,6 @@ class Gemma3Model(nn.Module):
             head_dim=cfg["head_dim"],
             base=cfg["rope_base"],
             seq_len=cfg["context_length"],
-            freq_config=cfg["freq_config"],
         )
         self.register_buffer("rope_cos_global", cos_global, persistent=False)
         self.register_buffer("rope_sin_global", sin_global, persistent=False)
@@ -433,7 +510,6 @@ class Gemma3Model(nn.Module):
             head_dim=cfg["head_dim"],
             base=cfg["rope_local_base"],
             seq_len=cfg["context_length"],
-            freq_config=cfg["freq_config"],
         )
         self.register_buffer("rope_cos_local", cos_local, persistent=False)
         self.register_buffer("rope_sin_local", sin_local, persistent=False)
@@ -475,4 +551,20 @@ class Gemma3Tokenizer:
     Need to be init with a tokenizer file.
     """
 
-    # TODO
+    def __init__(self, tokenizer_file_path: str):
+        tok_file = Path(tokenizer_file_path)
+        from_file = cast(Callable[[str], Tokenizer], cast(Any, Tokenizer).from_file)
+        self.tok = from_file(str(tok_file))
+        # Attempt to identify EOS and padding tokens
+        eos_token = "<end_of_turn>"
+        self.pad_token_id = eos_token
+        self.eos_token_id = eos_token
+
+    def encode(self, text: str) -> list[int]:
+        encode = cast(Callable[[str], Any], cast(Any, self.tok).encode)
+        encoded = encode(text)
+        return cast(list[int], encoded.ids)
+
+    def decode(self, ids: list[int]) -> str:
+        decode = cast(Any, self.tok).decode
+        return cast(str, decode(ids, skip_special_tokens=False))
