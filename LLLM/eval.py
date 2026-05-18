@@ -50,6 +50,9 @@ class DatasetAdapter[TExpected, TPrediction]:
         extract_expected: Extracts the expected answer from a dataset row.
         extract_prediction: Parses model completion text into a scoreable value.
         score: Returns whether prediction matches the expected value.
+        encode_prompt: Optional tokenizer-aware prompt encoder. Use this for
+            chat/instruct formats that require special token ids around the text.
+        eos_token: Optional tokenizer-aware end-of-completion token id.
     """
 
     dataset_id: str
@@ -60,6 +63,8 @@ class DatasetAdapter[TExpected, TPrediction]:
     extract_expected: Callable[[DatasetRow], TExpected]
     extract_prediction: Callable[[str], TPrediction]
     score: Callable[[TPrediction, TExpected], bool]
+    encode_prompt: Callable[[Tokenizer, str], list[int]] | None = None
+    eos_token: Callable[[Tokenizer], int | None] | None = None
 
 
 def normalize_text(text: str) -> str:
@@ -117,11 +122,22 @@ def evaluate_instructions_model(
     for raw_row in dataset:
         row = cast(DatasetRow, raw_row)
         prompt = adapter.build_prompt(row)
-        raw_prediction_text = generator.generate(
-            prompt,
-            max_generated_token=max_generated_token,
-            include_prompt=False,
-        )
+        eos = adapter.eos_token(tokenizer) if adapter.eos_token is not None else None
+        if adapter.encode_prompt is None:
+            raw_prediction_text = generator.generate(
+                prompt,
+                max_generated_token=max_generated_token,
+                eos=eos,
+                include_prompt=False,
+            )
+        else:
+            prompt_tokens = adapter.encode_prompt(tokenizer, prompt)
+            raw_prediction_text = generator.generate_from_tokens(
+                prompt_tokens,
+                max_generated_token=max_generated_token,
+                eos=eos,
+                include_prompt=False,
+            )
 
         prediction = adapter.extract_prediction(raw_prediction_text)
         expected = adapter.extract_expected(row)

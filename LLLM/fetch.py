@@ -15,7 +15,7 @@ import torch
 
 @dataclass(frozen=True)
 class FetchedModel:
-    """A cached Hugging Face snapshot plus its decoded config and weights."""
+    """A cached model snapshot plus its decoded config and dense Torch weights."""
 
     path: Path
     config: dict[str, Any]
@@ -34,6 +34,7 @@ def fetch_hf_model(
     *,
     revision: str | None = None,
     local_files_only: bool = False,
+    gguf_filename: str | None = None,
 ) -> FetchedModel:
     """
     Download or reuse a Hugging Face model snapshot and load common artifacts.
@@ -42,20 +43,38 @@ def fetch_hf_model(
     """
     local_path = Path(repo_id).expanduser()
     if local_path.is_dir():
+        return load_cached_model(local_path, gguf_filename=gguf_filename)
+    if local_path.is_file() and local_path.suffix.lower() == ".gguf":
         return load_cached_model(local_path)
 
     path = _download_snapshot(
         repo_id,
         revision=revision,
         local_files_only=local_files_only,
+        gguf_filename=gguf_filename,
     )
-    return load_cached_model(path)
+    return load_cached_model(path, gguf_filename=gguf_filename)
 
 
-def load_cached_model(path: str | Path) -> FetchedModel:
-    """Load config and safetensors weights from an already cached snapshot path."""
+def load_cached_model(
+    path: str | Path, *, gguf_filename: str | None = None
+) -> FetchedModel:
+    """Load config and weights from an already cached snapshot path."""
     snapshot_path = Path(path)
+    if snapshot_path.is_file() and snapshot_path.suffix.lower() == ".gguf":
+        from .gguf import load_gguf
+
+        config, weights = load_gguf(snapshot_path)
+        return FetchedModel(path=snapshot_path, config=config, weights=weights)
+
     config_path = snapshot_path / "config.json"
+    gguf_files = sorted(snapshot_path.glob("*.gguf"))
+    if gguf_filename is not None or (gguf_files and not config_path.is_file()):
+        from .gguf import load_gguf
+
+        config, weights = load_gguf(snapshot_path, gguf_filename)
+        return FetchedModel(path=snapshot_path, config=config, weights=weights)
+
     if not config_path.is_file():
         raise FileNotFoundError(f"missing config.json in {snapshot_path}")
 
@@ -73,24 +92,31 @@ def _download_snapshot(
     *,
     revision: str | None,
     local_files_only: bool,
+    gguf_filename: str | None,
 ) -> Path:
     hf_hub = cast(Any, import_module("huggingface_hub"))
     download = cast(Callable[..., str], hf_hub.snapshot_download)
     logging.debug("repo_id=%s revision=%s", repo_id, revision)
+    allow_patterns = [
+        "config.json",
+        "*.safetensors",
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "vocab.json",
+        "merges.txt",
+        "special_tokens_map.json",
+    ]
+    if gguf_filename is not None:
+        allow_patterns = [gguf_filename]
+    else:
+        allow_patterns.append("*.gguf")
+
     path = download(
         repo_id=repo_id,
         revision=revision,
         local_files_only=local_files_only,
-        allow_patterns=[
-            "config.json",
-            "*.safetensors",
-            "tokenizer.json",
-            "tokenizer.model",
-            "tokenizer_config.json",
-            "vocab.json",
-            "merges.txt",
-            "special_tokens_map.json",
-        ],
+        allow_patterns=allow_patterns,
     )
     return Path(path)
 

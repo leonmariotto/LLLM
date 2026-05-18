@@ -106,6 +106,38 @@ def test_evaluate_instructions_model_scores_generated_completion_only(
     assert accuracy == 1.0
 
 
+def test_evaluate_instructions_model_uses_adapter_prompt_encoder(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        gpt_eval,
+        "load_dataset",
+        lambda *args, **kwargs: TinyDataset([{"prompt": "plain", "expected": "ok"}]),
+    )
+
+    adapter = DatasetAdapter(
+        dataset_id="local-eval-dataset",
+        config=None,
+        split="test",
+        build_prompt=lambda row: row["prompt"],
+        extract_expected=lambda row: row["expected"],
+        extract_prediction=lambda text: text,
+        score=lambda prediction, expected: prediction == expected,
+        encode_prompt=lambda tokenizer, prompt: [2, *tokenizer.encode(prompt)],
+    )
+
+    accuracy = evaluate_instructions_model(
+        model=MockModel(),
+        tokenizer=MockTokenizer(),
+        adapter=adapter,
+        limit=1,
+        max_generated_token=1,
+        context_size=8,
+    )
+
+    assert accuracy == 1.0
+
+
 def test_evaluate_base_model_perplexity_uses_next_token_cross_entropy(
     monkeypatch,
 ) -> None:

@@ -85,6 +85,35 @@ class Generator:
             generation throughput metrics for that call.
         """
         prompt_tokens = self.tokenizer.encode(prompt)
+        return self.generate_from_tokens(
+            prompt_tokens,
+            stop_at_eos=stop_at_eos,
+            max_generated_token=max_generated_token,
+            eos=eos,
+            context_size=context_size,
+            temperature=temperature,
+            top_k=top_k,
+            include_prompt=include_prompt,
+        )
+
+    def generate_from_tokens(
+        self,
+        prompt_tokens: list[int],
+        *,
+        stop_at_eos: bool = True,
+        max_generated_token: int = 20,
+        eos: int | None = None,
+        context_size: int | None = None,
+        temperature: float = 0.0,
+        top_k: int | None = None,
+        include_prompt: bool = True,
+    ) -> str:
+        """
+        Generate text from already-encoded prompt tokens.
+
+        This is useful for instruct/chat models where the prompt includes
+        structural token ids that should not be represented as ordinary text.
+        """
         start_time = time.perf_counter()
         generated_tokens, generated_token_count = self._generate_tokens(
             prompt_tokens,

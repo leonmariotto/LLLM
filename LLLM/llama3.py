@@ -10,6 +10,8 @@ from importlib import import_module
 import os
 from pathlib import Path
 
+from loguru import logger
+
 import torch
 import torch.nn as nn
 import tiktoken
@@ -591,21 +593,7 @@ class Llama3Tokenizer:
         self.hf_tokenizer: Any | None = None
         self.tiktok: tiktoken.Encoding | None = None
 
-        # hard-coded from Meta's tokenizer.json
-        self.special = {
-            "<|begin_of_text|>": 128000,
-            "<|end_of_text|>": 128001,
-            "<|start_header_id|>": 128006,
-            "<|end_header_id|>": 128007,
-            "<|eot_id|>": 128009,
-        }
-        self.special.update(
-            {
-                f"<|reserved_{i}|>": 128002 + i
-                for i in range(256)
-                if 128002 + i not in self.special.values()
-            }
-        )
+        self.special = self._llama3_special_tokens()
 
         try:
             mergeable = load_tiktoken_bpe(model_path)
@@ -630,17 +618,107 @@ class Llama3Tokenizer:
                 special_tokens=self.special,
             )
 
-    def encode(self, text: str, bos: bool = False, eos: bool = False) -> list[int]:
+    @classmethod
+    def from_gguf(cls, gguf_path: str) -> "Llama3Tokenizer":
+        """
+        Build a Llama 3 tokenizer from tokenizer data embedded in a GGUF file.
+
+        Many GGUF files store a full Hugging Face ``tokenizer.json`` payload in
+        metadata.  When present, that is the most faithful source because it
+        preserves normal tokens, special tokens, and decoder behavior.
+        """
+        logger.info("Load tokenizer info from file %s" % gguf_path)
+        tokenizer = cls.__new__(cls)
+        tokenizer.hf_tokenizer = None
+        tokenizer.tiktok = None
+        tokenizer.special = cls._llama3_special_tokens()
+
+        from .gguf import tokenizer_json_from_gguf, tokenizer_mergeable_ranks_from_gguf
+
+        tokenizer_json = tokenizer_json_from_gguf(gguf_path)
+        if tokenizer_json is not None:
+            tokenizers = cast(Any, import_module("tokenizers"))
+            tokenizer.hf_tokenizer = tokenizers.Tokenizer.from_str(tokenizer_json)
+            return tokenizer
+
+        try:
+            mergeable = tokenizer_mergeable_ranks_from_gguf(gguf_path)
+        except ValueError:
+            mergeable = None
+        if mergeable is not None:
+            tokenizer.tiktok = tiktoken.Encoding(
+                name=Path(gguf_path).name,
+                pat_str=r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+                r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+                r"|\p{N}{1,3}"
+                r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+                r"|\s*[\r\n]+"
+                r"|\s+(?!\S)"
+                r"|\s+",
+                mergeable_ranks=mergeable,
+                special_tokens=tokenizer.special,
+            )
+            return tokenizer
+
+        gguf_file = Path(gguf_path)
+        for sidecar_name in ("tokenizer.model", "tokenizer.json"):
+            sidecar = gguf_file.with_name(sidecar_name)
+            if sidecar.is_file():
+                return cls(str(sidecar))
+
+        raise ValueError(
+            f"{gguf_path} does not contain tokenizer.huggingface.json and no "
+            "tokenizer.model/tokenizer.json sidecar was found"
+        )
+
+    @staticmethod
+    def _llama3_special_tokens() -> dict[str, int]:
+        """Return Meta's fixed Llama 3 special-token id map."""
+        special = {
+            "<|begin_of_text|>": 128000,
+            "<|end_of_text|>": 128001,
+            "<|start_header_id|>": 128006,
+            "<|end_header_id|>": 128007,
+            "<|eot_id|>": 128009,
+        }
+        special.update(
+            {
+                f"<|reserved_{i}|>": 128002 + i
+                for i in range(256)
+                if 128002 + i not in special.values()
+            }
+        )
+        return special
+
+    def encode(self, input: str, bos: bool = False, eos: bool = False) -> list[int]:
         if self.hf_tokenizer is not None:
-            ids = cast(list[int], self.hf_tokenizer.encode(text).ids)
+            ids = cast(list[int], self.hf_tokenizer.encode(input).ids)
         elif self.tiktok is not None:
-            ids = self.tiktok.encode(text)
+            ids = self.tiktok.encode(input)
         else:
             raise RuntimeError("Llama3Tokenizer is not initialized")
 
         ids = ([self.special["<|begin_of_text|>"]] if bos else []) + ids
         if eos:
             ids.append(self.special["<|end_of_text|>"])
+        return ids
+
+    def encode_instruct_prompt(self, user_text: str) -> list[int]:
+        """
+        Encode a minimal Llama 3 user -> assistant chat prompt.
+
+        Instruct checkpoints are trained on this wire format.  We insert special
+        token ids directly instead of writing special-token strings into the
+        text, which avoids tokenizer-specific escaping behavior.
+        """
+        ids = [self.special["<|begin_of_text|>"], self.special["<|start_header_id|>"]]
+        ids += self.encode("user")
+        ids += [self.special["<|end_header_id|>"]]
+        ids += self.encode("\n\n" + user_text)
+        ids += [self.special["<|eot_id|>"], self.special["<|start_header_id|>"]]
+        ids += self.encode("assistant")
+        ids += [self.special["<|end_header_id|>"]]
+        ids += self.encode("\n\n")
         return ids
 
     def decode(self, tok: list[int]) -> str:

@@ -22,6 +22,8 @@ dependencies = [
     "transformers",
     "datasets",
     "sentencepiece", # LLama2 tokenizer
+    "gguf",
+    "loguru",
 ]
 
 [build-system]
