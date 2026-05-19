@@ -1,10 +1,13 @@
+from pathlib import Path
+
+import gguf
+import numpy as np
 import pytest
 import torch
 from torch import nn
 
-torch = pytest.importorskip("torch")
-
 from ..LLLM.kv_cache import KVCache
+from ..LLLM.fetch import FetchedModel
 from ..LLLM.llama3 import (
     Llama3Config,
     Llama3GroupedQueryAttention,
@@ -12,6 +15,7 @@ from ..LLLM.llama3 import (
     Llama3TransformerBlock,
     llama3_config_from_fetched,
 )
+from ..LLLM.quantization import QuantizedLinear, QuantizedWeight
 from ..LLLM.rope import precompute_rope_cache
 
 
@@ -414,6 +418,38 @@ def test_llama3_model_with_transformer_blocks_returns_expected_shape() -> None:
     logits = model(in_idx)
 
     assert logits.shape == (2, 3, cfg["vocab_size"])
+
+
+def test_llama3_quantized_loader_installs_quantized_output_head() -> None:
+    cfg = _tiny_llama3_config()
+    cfg["emb_dim"] = 32
+    cfg["n_heads"] = 1
+    cfg["hidden_dim"] = 32
+    source = np.linspace(-1.0, 1.0, 160, dtype=np.float32).reshape(5, 32)
+    quantized = gguf.quantize(source, gguf.GGMLQuantizationType.Q4_0)
+    fetched = FetchedModel(
+        path=Path("."),
+        config={"model_type": "llama"},
+        weights={
+            "model.embed_tokens.weight": torch.randn(5, 32),
+            "model.norm.weight": torch.ones(32),
+            "lm_head.weight": QuantizedWeight(
+                name="lm_head.weight",
+                tensor_type=gguf.GGMLQuantizationType.Q4_0,
+                data=quantized,
+                shape=source.shape,
+                dtype=torch.float32,
+            ),
+        },
+    )
+    model = Llama3Model(cfg, weight_mode="quantized")
+
+    model.load_quantized_fetched_model(fetched)
+    logits = model(torch.tensor([[0, 1, 2]]))
+
+    assert isinstance(model.out_head, QuantizedLinear)
+    assert logits.shape == (1, 3, 5)
+    assert torch.isfinite(logits).all()
 
 
 def test_llama3_model_with_kv_cache_matches_full_forward() -> None:

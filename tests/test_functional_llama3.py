@@ -1,4 +1,5 @@
 import math
+import gc
 
 import pytest
 import torch
@@ -139,3 +140,65 @@ def test_functional_llama3_gguf_q4_k_m_runs_instruction_eval() -> None:
 
     assert math.isfinite(accuracy)
     assert 0.0 <= accuracy <= 1.0
+
+
+@pytest.mark.slow
+def test_functional_llama3_gguf_q4_k_m_quantized_runs_instruction_eval() -> None:
+    fetched = fetch_hf_model(
+        LLAMA32_1B_INSTRUCT_GGUF_REPO_ID,
+        gguf_filename=LLAMA32_1B_INSTRUCT_Q4_K_M_FILE,
+        weight_mode="quantized",
+    )
+    cfg = llama3_config_from_fetched(fetched.config)
+
+    tokenizer = Llama3Tokenizer.from_gguf(str(fetched.path))
+    model = Llama3Model(cfg, weight_mode="quantized")
+    model.load_quantized_fetched_model(fetched)
+    del fetched
+
+    accuracy = evaluate_instructions_model(
+        model=model,
+        tokenizer=tokenizer,
+        adapter=llama3_boolq_adapter,
+        limit=2,
+        max_generated_token=2,
+        context_size=1024,
+    )
+
+    assert math.isfinite(accuracy)
+    assert 0.0 <= accuracy <= 1.0
+
+
+@pytest.mark.slow
+def test_functional_llama3_gguf_q4_k_m_quantized_matches_eager_dequantized() -> None:
+    dense_fetched = fetch_hf_model(
+        LLAMA32_1B_INSTRUCT_GGUF_REPO_ID,
+        gguf_filename=LLAMA32_1B_INSTRUCT_Q4_K_M_FILE,
+    )
+    cfg = llama3_config_from_fetched(dense_fetched.config)
+    tokenizer = Llama3Tokenizer.from_gguf(str(dense_fetched.path))
+    input_ids = torch.tensor(
+        [tokenizer.encode_instruct_prompt("Answer yes or no: is water wet?")],
+        dtype=torch.long,
+    )
+
+    dense_model = Llama3Model(cfg)
+    dense_model.load_fetched_model(dense_fetched)
+    with torch.no_grad():
+        dense_logits = dense_model(input_ids)
+    del dense_model
+    del dense_fetched
+    gc.collect()
+
+    quantized_fetched = fetch_hf_model(
+        LLAMA32_1B_INSTRUCT_GGUF_REPO_ID,
+        gguf_filename=LLAMA32_1B_INSTRUCT_Q4_K_M_FILE,
+        weight_mode="quantized",
+    )
+    quantized_model = Llama3Model(cfg, weight_mode="quantized")
+    quantized_model.load_quantized_fetched_model(quantized_fetched)
+    with torch.no_grad():
+        quantized_logits = quantized_model(input_ids)
+
+    assert quantized_logits.shape == dense_logits.shape
+    torch.testing.assert_close(quantized_logits, dense_logits, rtol=1e-5, atol=1e-5)

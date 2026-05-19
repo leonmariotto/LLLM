@@ -1,4 +1,5 @@
-"""GGUF loading helpers.
+"""
+GGUF loading helpers.
 
 GGUF files are single binary files containing metadata, tokenizer data, and possibly
 quantized tensors.
@@ -16,6 +17,10 @@ import numpy as np
 import torch
 from gguf import GGMLQuantizationType, GGUFReader
 from gguf.gguf_reader import ReaderField, ReaderTensor
+
+from loguru import logger
+
+from .quantization import DenseOrQuantizedWeight, QuantizedWeight
 
 
 GGUF_WEIGHT_ALIASES = {
@@ -75,12 +80,38 @@ def load_gguf(
     can keep using its existing copy logic.
     """
     gguf_path = find_gguf_file(path, filename)
+    logger.info("Reading GGUF file [%s]" % gguf_path)
     reader = GGUFReader(gguf_path)
     config = config_from_gguf_reader(reader)
+    logger.info("Config extracted from GGUF file [%s]" % str(config))
     weights = tensors_from_gguf_reader(reader)
+    logger.info("Weight dequantized")
     return config, weights
 
 
+def load_gguf_quantized(
+    path: str | Path, filename: str | None = None
+) -> tuple[dict[str, Any], dict[str, DenseOrQuantizedWeight]]:
+    """
+    Load a GGUF model while preserving quantized linear tensors.
+
+    Non-linear tensors such as embeddings and norms remain dense for this
+    milestone. Linear tensors can be installed into ``QuantizedLinear`` and
+    dequantized inside their forward pass.
+    """
+    gguf_path = find_gguf_file(path, filename)
+    logger.info("Reading GGUF file [%s]" % gguf_path)
+    reader = GGUFReader(gguf_path)
+    config = config_from_gguf_reader(reader)
+    logger.info("Config extracted from GGUF file [%s]" % str(config))
+    weights = quantized_tensors_from_gguf_reader(reader)
+    logger.info("Weight extracted (with quantization)")
+    return config, weights
+
+
+# TODO I should have an intermediate representation so that
+# Any format -> Intermediate -> Any models.
+# Because here this function translate gguf config into HF (config.json) config.
 def config_from_gguf_reader(reader: GGUFReader) -> dict[str, Any]:
     """Translate GGUF Llama metadata into the keys ``llama3_config_from_fetched`` expects."""
     architecture = _string_field(reader, "general.architecture")
@@ -154,6 +185,54 @@ def tensors_from_gguf_reader(reader: GGUFReader) -> dict[str, torch.Tensor]:
     return tensors
 
 
+def quantized_tensors_from_gguf_reader(
+    reader: GGUFReader,
+) -> dict[str, DenseOrQuantizedWeight]:
+    """Expose GGUF tensors, preserving quantized linear weights when possible."""
+    n_heads = _int_field(reader, "llama.attention.head_count")
+    n_kv_heads = _int_field(reader, "llama.attention.head_count_kv", default=n_heads)
+    head_dim = _int_field(
+        reader,
+        "llama.attention.key_length",
+        default=_int_field(reader, "llama.embedding_length") // n_heads,
+    )
+
+    tensors: dict[str, DenseOrQuantizedWeight] = {}
+    for tensor in reader.tensors:
+        name = _map_tensor_name(tensor.name)
+        if name is None:
+            continue
+        if name in tensors:
+            raise GGUFLoadError(f"duplicate mapped tensor name {name!r}")
+
+        transform_heads: int | None = None
+        if tensor.name.endswith(".attn_q.weight"):
+            transform_heads = n_heads
+        elif tensor.name.endswith(".attn_k.weight"):
+            transform_heads = n_kv_heads
+
+        if _is_forward_quantized_linear(name, tensor):
+            data = cast(np.ndarray[Any, Any], np.array(tensor.data, copy=True))
+            tensors[name] = QuantizedWeight(
+                name=name,
+                tensor_type=tensor.tensor_type,
+                data=data,
+                shape=tuple(int(dim) for dim in tensor.shape[::-1]),
+                transform=(
+                    "llama_attention_unpermute" if transform_heads is not None else None
+                ),
+                n_heads=transform_heads,
+                head_dim=head_dim if transform_heads is not None else None,
+            )
+            continue
+
+        value = dequantize_gguf_tensor(tensor, dtype=torch.float16)
+        if transform_heads is not None:
+            value = _unpermute_llama_attention_weight(value, transform_heads, head_dim)
+        tensors[name] = value
+    return tensors
+
+
 def dequantize_gguf_tensor(
     tensor: ReaderTensor, *, dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
@@ -179,6 +258,24 @@ def dequantize_gguf_tensor(
     if torch_tensor.is_floating_point():
         torch_tensor = torch_tensor.to(dtype=dtype)
     return torch_tensor
+
+
+def _is_forward_quantized_linear(name: str, tensor: ReaderTensor) -> bool:
+    if not _is_quantized_tensor(tensor):
+        return False
+    if name in {"output.weight", "lm_head.weight"}:
+        return True
+    if ".self_attn." in name:
+        return True
+    return ".mlp." in name
+
+
+def _is_quantized_tensor(tensor: ReaderTensor) -> bool:
+    return tensor.tensor_type not in {
+        GGMLQuantizationType.F32,
+        GGMLQuantizationType.F16,
+        GGMLQuantizationType.BF16,
+    }
 
 
 def tokenizer_json_from_gguf(path: str | Path) -> str | None:

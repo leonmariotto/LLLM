@@ -21,6 +21,7 @@ from .llama2 import Llama2FeedForward
 from .norm import RMSNorm
 from .rope import precompute_rope_cache, apply_rope, RopeFrequencyConfig
 from .kv_cache import KVCache
+from .quantization import QuantizedLinear, QuantizedWeight, WeightMode
 
 if TYPE_CHECKING:
     from .fetch import FetchedModel
@@ -395,9 +396,10 @@ class Llama3Model(nn.Module):
     rope_cos: torch.Tensor
     rope_sin: torch.Tensor
 
-    def __init__(self, cfg: Llama3Config):
+    def __init__(self, cfg: Llama3Config, weight_mode: WeightMode = "dense"):
         super().__init__()
         self.context_length = cfg["context_length"]
+        self.weight_mode = weight_mode
         self.tok_emb = nn.Embedding(
             cfg["vocab_size"], cfg["emb_dim"], dtype=cfg["dtype"]
         )
@@ -446,11 +448,11 @@ class Llama3Model(nn.Module):
     def load_fetched_model(self, fetched: FetchedModel) -> None:
         """Copy Llama tensors from a fetched safetensors checkpoint."""
         with torch.no_grad():
-            embedding_weight = self._optional_weight(
+            embedding_weight = self._optional_dense_weight(
                 fetched.weights, "tok_embeddings.weight"
             )
             if embedding_weight is None:
-                embedding_weight = self._weight(fetched.weights, "output.weight")
+                embedding_weight = self._dense_weight(fetched.weights, "output.weight")
             self._copy_param(self.tok_emb.weight, embedding_weight)
 
             for layer_idx, module in enumerate(self.trf_blocks):
@@ -459,48 +461,144 @@ class Llama3Model(nn.Module):
 
                 self._copy_param(
                     block.att.W_query.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention.wq.weight"),
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.attention.wq.weight"
+                    ),
                 )
                 self._copy_param(
                     block.att.W_key.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention.wk.weight"),
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.attention.wk.weight"
+                    ),
                 )
                 self._copy_param(
                     block.att.W_value.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention.wv.weight"),
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.attention.wv.weight"
+                    ),
                 )
                 self._copy_param(
                     block.att.out_proj.weight,
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.attention.wo.weight"
+                    ),
+                )
+
+                self._copy_param(
+                    block.norm1.weight,
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.attention_norm.weight"
+                    ),
+                )
+                self._copy_param(
+                    block.norm2.weight,
+                    self._dense_weight(fetched.weights, f"{prefix}.ffn_norm.weight"),
+                )
+
+                self._copy_param(
+                    block.ff.fc1.weight,
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.feed_forward.w1.weight"
+                    ),
+                )
+                self._copy_param(
+                    block.ff.fc2.weight,
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.feed_forward.w3.weight"
+                    ),
+                )
+                self._copy_param(
+                    block.ff.fc3.weight,
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.feed_forward.w2.weight"
+                    ),
+                )
+
+            self._copy_param(
+                self.final_norm.weight,
+                self._dense_weight(fetched.weights, "norm.weight"),
+            )
+            self._copy_param(
+                self.out_head.weight,
+                self._dense_weight(fetched.weights, "output.weight"),
+            )
+
+        self.eval()
+
+    def load_quantized_fetched_model(self, fetched: FetchedModel) -> None:
+        """Install quantized GGUF linear weights and copy dense non-linear tensors."""
+        if self.weight_mode != "quantized":
+            raise ValueError(
+                "load_quantized_fetched_model requires weight_mode='quantized'"
+            )
+        with torch.no_grad():
+            embedding_weight = self._optional_dense_weight(
+                fetched.weights, "tok_embeddings.weight"
+            )
+            if embedding_weight is None:
+                embedding_weight = self._dense_weight(fetched.weights, "output.weight")
+            self._copy_param(self.tok_emb.weight, embedding_weight)
+
+            for layer_idx, module in enumerate(self.trf_blocks):
+                block = cast(Llama3TransformerBlock, module)
+                prefix = f"layers.{layer_idx}"
+
+                self._load_linear_weight(
+                    block.att,
+                    "W_query",
+                    self._weight(fetched.weights, f"{prefix}.attention.wq.weight"),
+                )
+                self._load_linear_weight(
+                    block.att,
+                    "W_key",
+                    self._weight(fetched.weights, f"{prefix}.attention.wk.weight"),
+                )
+                self._load_linear_weight(
+                    block.att,
+                    "W_value",
+                    self._weight(fetched.weights, f"{prefix}.attention.wv.weight"),
+                )
+                self._load_linear_weight(
+                    block.att,
+                    "out_proj",
                     self._weight(fetched.weights, f"{prefix}.attention.wo.weight"),
                 )
 
                 self._copy_param(
                     block.norm1.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention_norm.weight"),
+                    self._dense_weight(
+                        fetched.weights, f"{prefix}.attention_norm.weight"
+                    ),
                 )
                 self._copy_param(
                     block.norm2.weight,
-                    self._weight(fetched.weights, f"{prefix}.ffn_norm.weight"),
+                    self._dense_weight(fetched.weights, f"{prefix}.ffn_norm.weight"),
                 )
 
-                self._copy_param(
-                    block.ff.fc1.weight,
+                self._load_linear_weight(
+                    block.ff,
+                    "fc1",
                     self._weight(fetched.weights, f"{prefix}.feed_forward.w1.weight"),
                 )
-                self._copy_param(
-                    block.ff.fc2.weight,
+                self._load_linear_weight(
+                    block.ff,
+                    "fc2",
                     self._weight(fetched.weights, f"{prefix}.feed_forward.w3.weight"),
                 )
-                self._copy_param(
-                    block.ff.fc3.weight,
+                self._load_linear_weight(
+                    block.ff,
+                    "fc3",
                     self._weight(fetched.weights, f"{prefix}.feed_forward.w2.weight"),
                 )
 
             self._copy_param(
-                self.final_norm.weight, self._weight(fetched.weights, "norm.weight")
+                self.final_norm.weight,
+                self._dense_weight(fetched.weights, "norm.weight"),
             )
-            self._copy_param(
-                self.out_head.weight, self._weight(fetched.weights, "output.weight")
+            self._load_linear_weight(
+                self,
+                "out_head",
+                self._weight(fetched.weights, "output.weight"),
             )
 
         self.eval()
@@ -519,21 +617,78 @@ class Llama3Model(nn.Module):
         param.copy_(value)
 
     @staticmethod
-    def _optional_weight(
-        weights: dict[str, torch.Tensor], name: str
+    def _optional_weight(weights: dict[str, Any], name: str) -> torch.Tensor | None:
+        value = Llama3Model._optional_dense_weight(weights, name)
+        return value
+
+    @staticmethod
+    def _optional_dense_weight(
+        weights: dict[str, Any], name: str
     ) -> torch.Tensor | None:
+        """
+        Try to load a weight named "name".
+        If not return NULL.
+        If the weight exist and is quantized raise error.
+        If exist and is dense return it.
+        """
         for candidate in Llama3Model._weight_names(name):
-            if candidate in weights:
-                return weights[candidate]
+            value = weights.get(candidate)
+            if isinstance(value, torch.Tensor):
+                return value
+            if isinstance(value, QuantizedWeight):
+                raise TypeError(
+                    f"weight {candidate!r} is quantized; use "
+                    "load_quantized_fetched_model"
+                )
         return None
 
     @staticmethod
-    def _weight(weights: dict[str, torch.Tensor], name: str) -> torch.Tensor:
+    def _weight(weights: dict[str, Any], name: str) -> torch.Tensor | QuantizedWeight:
+        """Return a weight by this model's canonical name or known HF alias."""
         for candidate in Llama3Model._weight_names(name):
             if candidate in weights:
                 return weights[candidate]
         names = ", ".join(Llama3Model._weight_names(name))
         raise KeyError(f"missing Llama weight {name!r}; tried {names}")
+
+    @staticmethod
+    def _dense_weight(weights: dict[str, Any], name: str) -> torch.Tensor:
+        value = Llama3Model._weight(weights, name)
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"weight {name!r} is not a dense tensor")
+        return value
+
+    @staticmethod
+    def _load_linear_weight(
+        parent: nn.Module, attr: str, value: torch.Tensor | QuantizedWeight
+    ) -> None:
+        """
+        parent: nn.Module based class that we will load with weight.
+        attr: the attr name of the nn.Module class that will be loaded.
+        """
+        module = getattr(parent, attr)
+        if not isinstance(module, (nn.Linear, QuantizedLinear)):
+            raise TypeError(f"{attr!r} is not a linear module")
+        in_features = int(module.in_features)
+        out_features = int(module.out_features)
+
+        if isinstance(value, QuantizedWeight):
+            bias = None if module.bias is None else module.bias.detach()
+            setattr(
+                parent,
+                attr,
+                QuantizedLinear(
+                    value,
+                    in_features=in_features,
+                    out_features=out_features,
+                    bias=bias,
+                ),
+            )
+            return
+
+        if not isinstance(module, nn.Linear):
+            raise TypeError(f"{attr!r} cannot accept a dense weight")
+        Llama3Model._copy_param(module.weight, value)
 
     @staticmethod
     def _weight_names(name: str) -> list[str]:

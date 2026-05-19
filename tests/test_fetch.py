@@ -2,6 +2,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, cast
 
+import pytest
 import torch
 from torch import nn
 
@@ -97,6 +98,14 @@ def test_load_cached_model_reads_config_and_safetensors(tmp_path: Path) -> None:
 
     assert fetched.model_type == "gpt2"
     assert set(fetched.weights) == {"a", "b", "c"}
+
+
+def test_load_cached_model_rejects_quantized_safetensors(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
+    _save_file({"a": torch.tensor([1.0])}, tmp_path / "model.safetensors")
+
+    with pytest.raises(NotImplementedError, match="GGUF"):
+        load_cached_model(tmp_path, weight_mode="quantized")
 
 
 def test_fetch_hf_model_loads_local_snapshot_path(tmp_path: Path) -> None:

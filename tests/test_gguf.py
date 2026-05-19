@@ -8,9 +8,11 @@ from gguf.gguf_reader import ReaderField, ReaderTensor
 from ..LLLM.gguf import (
     config_from_gguf_reader,
     dequantize_gguf_tensor,
+    quantized_tensors_from_gguf_reader,
     tensors_from_gguf_reader,
     _unpermute_llama_attention_weight,
 )
+from ..LLLM.quantization import QuantizedLinear, QuantizedWeight
 
 
 def test_gguf_reader_translates_llama_metadata_and_tensor_names(tmp_path: Path) -> None:
@@ -75,6 +77,59 @@ def test_dequantize_gguf_tensor_supports_quantized_blocks() -> None:
     assert dense.shape == (1, 32)
     assert dense.dtype == torch.float32
     assert torch.isfinite(dense).all()
+
+
+def test_quantized_linear_dequantizes_weight_in_forward() -> None:
+    source = np.linspace(-1.0, 1.0, 32, dtype=np.float32).reshape(1, 32)
+    quantized = gguf.quantize(source, gguf.GGMLQuantizationType.Q4_0)
+    weight = QuantizedWeight(
+        name="linear.weight",
+        tensor_type=gguf.GGMLQuantizationType.Q4_0,
+        data=quantized,
+        shape=source.shape,
+        dtype=torch.float32,
+    )
+    layer = QuantizedLinear(weight, in_features=32, out_features=1)
+    x = torch.arange(64, dtype=torch.float32).reshape(2, 32)
+
+    output = layer(x)
+    expected = torch.nn.functional.linear(x, weight.dequantize())
+
+    torch.testing.assert_close(output, expected)
+
+
+def test_quantized_gguf_reader_preserves_linear_quantized_weight(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tiny-q4.gguf"
+    writer = gguf.GGUFWriter(path, "llama")
+    writer.add_vocab_size(4)
+    writer.add_token_list(["a", "b", "c", "d"])
+    writer.add_context_length(8)
+    writer.add_embedding_length(32)
+    writer.add_feed_forward_length(32)
+    writer.add_block_count(1)
+    writer.add_head_count(1)
+    writer.add_head_count_kv(1)
+    source = np.linspace(-1.0, 1.0, 32, dtype=np.float32).reshape(1, 32)
+    quantized = gguf.quantize(source, gguf.GGMLQuantizationType.Q4_0)
+    writer.add_tensor(
+        "blk.0.ffn_down.weight",
+        quantized,
+        raw_shape=quantized.shape,
+        raw_dtype=gguf.GGMLQuantizationType.Q4_0,
+    )
+    writer.add_tensor("output_norm.weight", np.ones(32, dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+    reader = gguf.GGUFReader(path)
+    weights = quantized_tensors_from_gguf_reader(reader)
+
+    assert isinstance(weights["model.layers.0.mlp.down_proj.weight"], QuantizedWeight)
+    assert isinstance(weights["model.norm.weight"], torch.Tensor)
 
 
 def test_unpermute_llama_attention_weight_restores_split_half_layout() -> None:

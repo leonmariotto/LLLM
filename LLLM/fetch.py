@@ -12,14 +12,16 @@ from typing import Any, Callable, cast
 
 import torch
 
+from .quantization import WeightMode
+
 
 @dataclass(frozen=True)
 class FetchedModel:
-    """A cached model snapshot plus its decoded config and dense Torch weights."""
+    """A cached model snapshot plus its decoded config and loaded weights."""
 
     path: Path
     config: dict[str, Any]
-    weights: dict[str, torch.Tensor]
+    weights: dict[str, Any]
 
     @property
     def model_type(self) -> str:
@@ -35,6 +37,7 @@ def fetch_hf_model(
     revision: str | None = None,
     local_files_only: bool = False,
     gguf_filename: str | None = None,
+    weight_mode: WeightMode = "dense",
 ) -> FetchedModel:
     """
     Download or reuse a Hugging Face model snapshot and load common artifacts.
@@ -43,9 +46,11 @@ def fetch_hf_model(
     """
     local_path = Path(repo_id).expanduser()
     if local_path.is_dir():
-        return load_cached_model(local_path, gguf_filename=gguf_filename)
+        return load_cached_model(
+            local_path, gguf_filename=gguf_filename, weight_mode=weight_mode
+        )
     if local_path.is_file() and local_path.suffix.lower() == ".gguf":
-        return load_cached_model(local_path)
+        return load_cached_model(local_path, weight_mode=weight_mode)
 
     path = _download_snapshot(
         repo_id,
@@ -53,27 +58,39 @@ def fetch_hf_model(
         local_files_only=local_files_only,
         gguf_filename=gguf_filename,
     )
-    return load_cached_model(path, gguf_filename=gguf_filename)
+    return load_cached_model(path, gguf_filename=gguf_filename, weight_mode=weight_mode)
 
 
 def load_cached_model(
-    path: str | Path, *, gguf_filename: str | None = None
+    path: str | Path,
+    *,
+    gguf_filename: str | None = None,
+    weight_mode: WeightMode = "dense",
 ) -> FetchedModel:
     """Load config and weights from an already cached snapshot path."""
     snapshot_path = Path(path)
     if snapshot_path.is_file() and snapshot_path.suffix.lower() == ".gguf":
-        from .gguf import load_gguf
+        from .gguf import load_gguf, load_gguf_quantized
 
-        config, weights = load_gguf(snapshot_path)
+        if weight_mode == "quantized":
+            config, weights = load_gguf_quantized(snapshot_path)
+        else:
+            config, weights = load_gguf(snapshot_path)
         return FetchedModel(path=snapshot_path, config=config, weights=weights)
 
     config_path = snapshot_path / "config.json"
     gguf_files = sorted(snapshot_path.glob("*.gguf"))
     if gguf_filename is not None or (gguf_files and not config_path.is_file()):
-        from .gguf import load_gguf
+        from .gguf import load_gguf, load_gguf_quantized
 
-        config, weights = load_gguf(snapshot_path, gguf_filename)
+        if weight_mode == "quantized":
+            config, weights = load_gguf_quantized(snapshot_path, gguf_filename)
+        else:
+            config, weights = load_gguf(snapshot_path, gguf_filename)
         return FetchedModel(path=snapshot_path, config=config, weights=weights)
+
+    if weight_mode == "quantized":
+        raise NotImplementedError("quantized loading is currently supported for GGUF")
 
     if not config_path.is_file():
         raise FileNotFoundError(f"missing config.json in {snapshot_path}")
