@@ -1,3 +1,8 @@
+"""
+High-Level Generator class that provide text generation function
+from a raw model.
+"""
+
 import logging
 import time
 from typing import Any, Protocol, cast, List
@@ -18,25 +23,14 @@ class Tokenizer(Protocol):
 
 
 class Generator:
+    """High level text generation class."""
+
     def __init__(
         self,
         model: TensorModel,
         tokenizer: Tokenizer,
         context_size: int = 1024,
     ) -> None:
-        """
-        Create a text generator for an autoregressive token model.
-
-        Args:
-            model: Callable model that accepts a tensor of token ids shaped
-                ``[batch, tokens]`` and returns logits shaped
-                ``[batch, tokens, vocab_size]``.
-            tokenizer: Tokenizer used to encode input text into token ids and
-                decode generated token ids back into text.
-            context_size: Default number of latest tokens to feed back into the
-                model at each generation step. Older tokens are cropped from the
-                model input but remain in the returned text.
-        """
         self.model = model
         self.tokenizer = tokenizer
         self.context_size = context_size
@@ -144,6 +138,13 @@ class Generator:
         temperature: float,
         top_k: int | None,
     ) -> tuple[list[int], int]:
+        """
+        Implement top-k sampling and temperature.
+
+        Args:
+            temperature: Sampling temperature.
+            top_k: Optional top-k sampling cutoff.
+        """
         self.model.eval()
         idx = torch.tensor(
             [input_tokens],
@@ -170,6 +171,7 @@ class Generator:
         ), generated_token_count
 
     def _record_metrics(self, generated_token_count: int, elapsed: float) -> None:
+        """Record generation performance metrics."""
         self.generated_token_count += [generated_token_count]
         self.generation_seconds += [elapsed]
         c_count: int = 0
@@ -187,6 +189,14 @@ class Generator:
         )
 
     def _filter_logits(self, logits: torch.Tensor, top_k: int | None) -> torch.Tensor:
+        """
+        Filter logits to select only top_k logits. This is done before selecting
+        the logit with temperature.
+
+        Args:
+            logits: Model logits to filter or sample from.
+            top_k: Optional top-k sampling cutoff.
+        """
         if top_k is None:
             return logits
 
@@ -201,6 +211,13 @@ class Generator:
     def _select_next_token(
         self, logits: torch.Tensor, temperature: float
     ) -> torch.Tensor:
+        """
+        Select next token from top_k selection. Depending on temperature.
+
+        Args:
+            logits: Model logits to filter or sample from.
+            temperature: Sampling temperature.
+        """
         if temperature > 0.0:
             logits = logits / temperature
             logits = logits - logits.max(dim=-1, keepdim=True).values
@@ -210,6 +227,7 @@ class Generator:
         return torch.argmax(logits, dim=-1, keepdim=True)
 
     def _model_device(self) -> torch.device:
+        """Gedt the device where the model sit."""
         if not isinstance(self.model, torch.nn.Module):
             return torch.device("cpu")
 

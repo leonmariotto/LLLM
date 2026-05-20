@@ -1,5 +1,6 @@
 import math
 import gc
+from pathlib import Path
 
 import pytest
 import torch
@@ -12,8 +13,8 @@ from ..LLLM.eval import (
     evaluate_base_model_perplexity,
     evaluate_instructions_model,
 )
-from ..LLLM.fetch import fetch_hf_model
-from ..LLLM.llama3 import Llama3Model, Llama3Tokenizer, llama3_config_from_fetched
+from ..LLLM.fetch import fetch_model_ir
+from ..LLLM.llama3 import Llama3Model, Llama3Tokenizer
 
 
 LLAMA3_TINY_INSTRUCT_REPO_ID = "AlignmentResearch/Llama-3.3-Tiny-Instruct"
@@ -45,8 +46,9 @@ llama3_boolq_adapter = DatasetAdapter(
 
 @pytest.mark.slow
 def test_functional_llama3_compatibility_with_reference_implementation() -> None:
-    fetched = fetch_hf_model(LLAMA3_TINY_INSTRUCT_REPO_ID)
-    cfg = llama3_config_from_fetched(fetched.config)
+    ir = fetch_model_ir(LLAMA3_TINY_INSTRUCT_REPO_ID)
+    cfg = Llama3Model.config_from_ir(ir)
+    path = Path(str(ir.metadata["path"]))
 
     assert cfg["context_length"] == 131072
     assert cfg["rope_theta"] == 500000.0
@@ -57,11 +59,11 @@ def test_functional_llama3_compatibility_with_reference_implementation() -> None
         "original_context_len": 8192,
     }
 
-    tokenizer = Llama3Tokenizer(str(fetched.path / "tokenizer.model"))
+    tokenizer = Llama3Tokenizer(str(path / "tokenizer.model"))
     model = Llama3Model(cfg)
-    model.load_fetched_model(fetched)
+    model.load_ir_weights(ir)
     reference_model = AutoModel.from_pretrained(
-        fetched.path,
+        path,
         local_files_only=True,
         dtype=torch.float32,
     )
@@ -81,15 +83,16 @@ def test_functional_llama3_compatibility_with_reference_implementation() -> None
 
 @pytest.mark.slow
 def test_functional_llama3_smol_lm2_wikitext_perplexity() -> None:
-    fetched = fetch_hf_model(SMOLLM2_135M_REPO_ID)
-    cfg = llama3_config_from_fetched(fetched.config)
+    ir = fetch_model_ir(SMOLLM2_135M_REPO_ID)
+    cfg = Llama3Model.config_from_ir(ir)
+    path = Path(str(ir.metadata["path"]))
 
     assert cfg["rope_theta"] == 100000.0
     assert cfg["rope_interleaved"] is False
 
-    tokenizer = Llama3Tokenizer(str(fetched.path / "tokenizer.json"))
+    tokenizer = Llama3Tokenizer(str(path / "tokenizer.json"))
     model = Llama3Model(cfg)
-    model.load_fetched_model(fetched)
+    model.load_ir_weights(ir)
 
     perplexity = evaluate_base_model_perplexity(
         model=model,
@@ -108,11 +111,11 @@ def test_functional_llama3_smol_lm2_wikitext_perplexity() -> None:
 
 @pytest.mark.slow
 def test_functional_llama3_gguf_q4_k_m_runs_instruction_eval() -> None:
-    fetched = fetch_hf_model(
+    ir = fetch_model_ir(
         LLAMA32_1B_INSTRUCT_GGUF_REPO_ID,
         gguf_filename=LLAMA32_1B_INSTRUCT_Q4_K_M_FILE,
     )
-    cfg = llama3_config_from_fetched(fetched.config)
+    cfg = Llama3Model.config_from_ir(ir)
 
     assert cfg["emb_dim"] == 2048
     assert cfg["n_layers"] == 16
@@ -124,10 +127,10 @@ def test_functional_llama3_gguf_q4_k_m_runs_instruction_eval() -> None:
         "original_context_len": 8192,
     }
 
-    tokenizer = Llama3Tokenizer.from_gguf(str(fetched.path))
+    tokenizer = Llama3Tokenizer.from_gguf(str(ir.metadata["path"]))
     model = Llama3Model(cfg)
-    model.load_fetched_model(fetched)
-    del fetched
+    model.load_ir_weights(ir)
+    del ir
 
     accuracy = evaluate_instructions_model(
         model=model,
@@ -144,17 +147,17 @@ def test_functional_llama3_gguf_q4_k_m_runs_instruction_eval() -> None:
 
 @pytest.mark.slow
 def test_functional_llama3_gguf_q4_k_m_quantized_runs_instruction_eval() -> None:
-    fetched = fetch_hf_model(
+    ir = fetch_model_ir(
         LLAMA32_1B_INSTRUCT_GGUF_REPO_ID,
         gguf_filename=LLAMA32_1B_INSTRUCT_Q4_K_M_FILE,
         weight_mode="quantized",
     )
-    cfg = llama3_config_from_fetched(fetched.config)
+    cfg = Llama3Model.config_from_ir(ir)
 
-    tokenizer = Llama3Tokenizer.from_gguf(str(fetched.path))
+    tokenizer = Llama3Tokenizer.from_gguf(str(ir.metadata["path"]))
     model = Llama3Model(cfg, weight_mode="quantized")
-    model.load_quantized_fetched_model(fetched)
-    del fetched
+    model.load_quantized_ir_weights(ir)
+    del ir
 
     accuracy = evaluate_instructions_model(
         model=model,
@@ -171,32 +174,32 @@ def test_functional_llama3_gguf_q4_k_m_quantized_runs_instruction_eval() -> None
 
 @pytest.mark.slow
 def test_functional_llama3_gguf_q4_k_m_quantized_matches_eager_dequantized() -> None:
-    dense_fetched = fetch_hf_model(
+    dense_ir = fetch_model_ir(
         LLAMA32_1B_INSTRUCT_GGUF_REPO_ID,
         gguf_filename=LLAMA32_1B_INSTRUCT_Q4_K_M_FILE,
     )
-    cfg = llama3_config_from_fetched(dense_fetched.config)
-    tokenizer = Llama3Tokenizer.from_gguf(str(dense_fetched.path))
+    cfg = Llama3Model.config_from_ir(dense_ir)
+    tokenizer = Llama3Tokenizer.from_gguf(str(dense_ir.metadata["path"]))
     input_ids = torch.tensor(
         [tokenizer.encode_instruct_prompt("Answer yes or no: is water wet?")],
         dtype=torch.long,
     )
 
     dense_model = Llama3Model(cfg)
-    dense_model.load_fetched_model(dense_fetched)
+    dense_model.load_ir_weights(dense_ir)
     with torch.no_grad():
         dense_logits = dense_model(input_ids)
     del dense_model
-    del dense_fetched
+    del dense_ir
     gc.collect()
 
-    quantized_fetched = fetch_hf_model(
+    quantized_ir = fetch_model_ir(
         LLAMA32_1B_INSTRUCT_GGUF_REPO_ID,
         gguf_filename=LLAMA32_1B_INSTRUCT_Q4_K_M_FILE,
         weight_mode="quantized",
     )
     quantized_model = Llama3Model(cfg, weight_mode="quantized")
-    quantized_model.load_quantized_fetched_model(quantized_fetched)
+    quantized_model.load_quantized_ir_weights(quantized_ir)
     with torch.no_grad():
         quantized_logits = quantized_model(input_ids)
 

@@ -15,11 +15,13 @@ from ..LLLM.eval import (
     squad_adapter,
     squad_score,
 )
-from ..LLLM.fetch import fetch_hf_model
-from ..LLLM.gemma3 import Gemma3Model, gemma3_config_from_fetched
+from ..LLLM.fetch import fetch_model_ir
+from ..LLLM.gemma3 import Gemma3Model, Gemma3Tokenizer
 
 
 GEMMA3_1B_IT_REPO_ID = "google/gemma-3-1b-it"
+GEMMA3_1B_IT_QAT_GGUF_REPO_ID = "lmstudio-community/gemma-3-1B-it-qat-GGUF"
+GEMMA3_1B_IT_QAT_Q4_FILE = "gemma-3-1B-it-QAT-Q4_0.gguf"
 
 
 def _gemma3_encode_instruction_prompt(tokenizer: Any, prompt: str) -> list[int]:
@@ -98,14 +100,14 @@ gemma3_gsm8k_adapter = DatasetAdapter(
 
 @pytest.fixture(scope="module")
 def gemma3_1b_it_model_and_tokenizer() -> tuple[Gemma3Model, Any]:
-    fetched = fetch_hf_model(GEMMA3_1B_IT_REPO_ID)
-    cfg = gemma3_config_from_fetched(fetched.config)
+    ir = fetch_model_ir(GEMMA3_1B_IT_REPO_ID)
+    cfg = Gemma3Model.config_from_ir(ir)
     tokenizer = cast(Any, AutoTokenizer).from_pretrained(
-        fetched.path, local_files_only=True
+        ir.metadata["path"], local_files_only=True
     )
     model = Gemma3Model(cfg)
-    model.load_fetched_model(fetched)
-    del fetched
+    model.load_ir_weights(ir)
+    del ir
     return model, tokenizer
 
 
@@ -154,3 +156,62 @@ def test_functional_gemma3_1b_it_runs_instruction_eval(
 
     assert math.isfinite(accuracy)
     assert 0.0 <= accuracy <= 1.0
+
+
+@pytest.mark.slow
+def test_functional_gemma3_qat_gguf_q4_quantized_loads_tokenizer_and_runs() -> None:
+    ir = fetch_model_ir(
+        GEMMA3_1B_IT_QAT_GGUF_REPO_ID,
+        gguf_filename=GEMMA3_1B_IT_QAT_Q4_FILE,
+        weight_mode="quantized",
+    )
+    cfg = Gemma3Model.config_from_ir(ir)
+
+    assert cfg["emb_dim"] == 1152
+    assert cfg["n_layers"] == 26
+    assert cfg["n_heads"] == 4
+    assert cfg["n_kv_groups"] == 1
+
+    tokenizer = Gemma3Tokenizer(str(ir.metadata["path"]))
+    input_ids = torch.tensor(
+        [tokenizer.encode_instruct_prompt("What is 2 + 2? Answer with one number.")],
+        dtype=torch.long,
+    )
+    model = Gemma3Model(cfg, weight_mode="quantized")
+    model.load_ir_weights(ir)
+    del ir
+
+    with torch.no_grad():
+        logits = model(input_ids)
+
+    assert logits.shape == (1, input_ids.shape[1], model.out_head.out_features)
+    assert torch.isfinite(logits).all()
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    ("adapter", "max_generated_token"),
+    [
+        pytest.param(gemma3_boolq_adapter, 4, id="boolq"),
+        pytest.param(gemma3_squad_adapter, 16, id="squad"),
+        pytest.param(gemma3_gsm8k_adapter, 64, id="gsm8k"),
+    ],
+)
+def test_functional_gemma3_qat_gguf_q4_quantized_it_runs_instruction_eval(
+    gemma3_1b_it_model_and_tokenizer: tuple[Gemma3Model, Any],
+    adapter: DatasetAdapter[Any, Any],
+    max_generated_token: int,
+) -> None:
+    model, tokenizer = gemma3_1b_it_model_and_tokenizer
+
+    accuracy = evaluate_instructions_model(
+        model=model,
+        tokenizer=tokenizer,
+        adapter=adapter,
+        limit=5,
+        max_generated_token=max_generated_token,
+        context_size=2048,
+    )
+
+    assert math.isfinite(accuracy)
+    assert 0.0 <= accuracy <= 1.0
+

@@ -11,19 +11,19 @@ from ..LLLM.eval import (
     gsm8k_adapter,
     squad_adapter,
 )
-from ..LLLM.fetch import fetch_hf_model
+from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
-from ..LLLM.gpt2 import GPT2Tokenizer, GPT2Model, gpt2_config_from_fetched
+from ..LLLM.gpt2 import GPT2Tokenizer, GPT2Model
 
 PREFETCHED_GPT2_PATH = Path(__file__).parent / "prefetched_models" / "gpt2"
 
 def _load_local_gpt2(tmp_path: Path) -> tuple[GPT2Model, GPT2Tokenizer]:
-    fetched = fetch_hf_model(
+    ir = fetch_model_ir(
         str(PREFETCHED_GPT2_PATH),
     )
     tokenizer = GPT2Tokenizer()
-    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
-    model.load_fetched_model(fetched)
+    model = GPT2Model(GPT2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
     return model, tokenizer
 
 
@@ -31,7 +31,7 @@ def _load_remote_gpt2_instruct(
     tmp_path: Path,
 ) -> tuple[GPT2Model, GPT2Tokenizer]:
     GPT2_INSTRUCT_REPO_ID = "Sanjarbek1024/gpt2-instruct"
-    fetched = fetch_hf_model(
+    ir = fetch_model_ir(
         GPT2_INSTRUCT_REPO_ID,
     )
     tokenizer = GPT2Tokenizer(
@@ -40,8 +40,8 @@ def _load_remote_gpt2_instruct(
                 "<|assistant|>": 50258,
         }
     )
-    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
-    model.load_fetched_model(fetched)
+    model = GPT2Model(GPT2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
     return model, tokenizer
 
 
@@ -116,12 +116,12 @@ def test_functional_gpt_eval_runs_boolq_against_remote_gpt2_instruct(
     assert 0.0 <= accuracy <= 1.0
 
 def _generate_20_tokens_from_fetched_model(repo_id: str) -> str:
-    fetched = fetch_hf_model(
+    ir = fetch_model_ir(
         repo_id,
     )
     tokenizer = GPT2Tokenizer()
-    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
-    model.load_fetched_model(fetched)
+    model = GPT2Model(GPT2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
     model.eval()
 
     prompt = "Every effort moves the project forward."
@@ -135,7 +135,7 @@ def _generate_20_tokens_from_fetched_model(repo_id: str) -> str:
 
     assert generated_text.startswith(prompt)
     assert len(generated_text) > len(prompt)
-    return str(fetched.path)
+    return str(ir.metadata.get("path", repo_id))
 
 @pytest.mark.slow
 def test_functional_gpt2_fetch_load_generate_and_decode(

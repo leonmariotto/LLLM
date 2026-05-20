@@ -37,17 +37,14 @@ def precompute_rope_cache(
     # Number of 2D pairs
     half_dim = head_dim // 2
 
-    # Frequencies θ_i
     i = torch.arange(half_dim, device=device)
     theta = 1.0 / (base ** (2 * i / head_dim))
 
     if freq_config is not None:
         theta = _apply_rope_frequency_config(theta, freq_config)
 
-    # Positions p
     positions = torch.arange(seq_len, device=device)
 
-    # angles[p, i] = p * θ_i
     angles = positions[:, None] * theta[None, :]
 
     cos = torch.cos(angles)
@@ -104,8 +101,7 @@ def apply_rope(
     """
     if use_interleaved:
         return apply_rope_interleaved(x, cos, sin)
-    else:
-        return apply_rope_split_half(x, cos, sin)
+    return apply_rope_split_half(x, cos, sin)
 
 
 def apply_rope_interleaved(

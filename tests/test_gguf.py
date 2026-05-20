@@ -6,10 +6,8 @@ import torch
 from gguf.gguf_reader import ReaderField, ReaderTensor
 
 from ..LLLM.gguf import (
-    config_from_gguf_reader,
     dequantize_gguf_tensor,
-    quantized_tensors_from_gguf_reader,
-    tensors_from_gguf_reader,
+    load_gguf_ir,
     _unpermute_llama_attention_weight,
 )
 from ..LLLM.quantization import QuantizedLinear, QuantizedWeight
@@ -38,22 +36,21 @@ def test_gguf_reader_translates_llama_metadata_and_tensor_names(tmp_path: Path) 
     writer.write_tensors_to_file()
     writer.close()
 
-    reader = gguf.GGUFReader(path)
+    ir = load_gguf_ir(path)
 
-    config = config_from_gguf_reader(reader)
-    assert config["model_type"] == "llama"
-    assert config["vocab_size"] == 4
-    assert config["max_position_embeddings"] == 8
-    assert config["num_key_value_heads"] == 1
+    assert ir.architecture == "llama3"
+    assert ir.config.get("vocab_size") == 4
+    assert ir.config.get("context_length") == 8
+    assert ir.config.get("num_key_value_heads") == 1
 
-    weights = tensors_from_gguf_reader(reader)
-    assert set(weights) == {
-        "model.embed_tokens.weight",
-        "model.layers.0.self_attn.q_proj.weight",
-        "model.norm.weight",
+    assert set(ir.weights) == {
+        "token_embedding.weight",
+        "layers.0.attention.q_proj.weight",
+        "final_norm.weight",
+        "lm_head.weight",
     }
     torch.testing.assert_close(
-        weights["model.embed_tokens.weight"],
+        ir.weights["token_embedding.weight"],
         torch.arange(16, dtype=torch.float16).reshape(4, 4),
     )
 
@@ -125,11 +122,10 @@ def test_quantized_gguf_reader_preserves_linear_quantized_weight(
     writer.write_tensors_to_file()
     writer.close()
 
-    reader = gguf.GGUFReader(path)
-    weights = quantized_tensors_from_gguf_reader(reader)
+    ir = load_gguf_ir(path, weight_mode="quantized")
 
-    assert isinstance(weights["model.layers.0.mlp.down_proj.weight"], QuantizedWeight)
-    assert isinstance(weights["model.norm.weight"], torch.Tensor)
+    assert isinstance(ir.weights["layers.0.feed_forward.down_proj.weight"], QuantizedWeight)
+    assert isinstance(ir.weights["final_norm.weight"], torch.Tensor)
 
 
 def test_unpermute_llama_attention_weight_restores_split_half_layout() -> None:

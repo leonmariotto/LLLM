@@ -1,3 +1,10 @@
+"""
+Models evaluations module.
+Support :
+    - raw model evaluation with WikiText-based test (measure perplexity).
+    - instruction-tuned models evaluation dataset : boolq, gsm8k and squad.
+"""
+
 import math
 from dataclasses import dataclass
 from collections.abc import Mapping
@@ -48,8 +55,6 @@ class DatasetAdapter[TExpected, TPrediction]:
         split: Dataset split to evaluate.
         build_prompt: Converts a dataset row into a model prompt.
         extract_expected: Extracts the expected answer from a dataset row.
-        extract_prediction: Parses model completion text into a scoreable value.
-        score: Returns whether prediction matches the expected value.
         encode_prompt: Optional tokenizer-aware prompt encoder. Use this for
             chat/instruct formats that require special token ids around the text.
         eos_token: Optional tokenizer-aware end-of-completion token id.
@@ -212,9 +217,7 @@ boolq_adapter = DatasetAdapter(
 
 
 def squad_score(prediction: str, expected_answers: list[str]) -> bool:
-    """
-    Score SQuAD by checking whether any expected answer appears in prediction.
-    """
+    """Score SQuAD by checking whether any expected answer appears in prediction."""
     prediction = normalize_text(prediction)
 
     return any(normalize_text(answer) in prediction for answer in expected_answers)
@@ -237,9 +240,7 @@ squad_adapter = DatasetAdapter(
 
 
 def _model_device(model: TensorModel) -> torch.device:
-    """
-    Return the device used by the model in parameters.
-    """
+    """Return the device used by the model in parameters."""
     if not isinstance(model, torch.nn.Module):
         return torch.device("cpu")
 
@@ -274,7 +275,7 @@ def evaluate_base_model_perplexity(
         # Can use percentage slicing at load time : split="train[:5%]",
         split="validation",
     )
-    ds = ds.shuffle(seed=42)  # TODO remove the seed
+    ds = ds.shuffle(seed=42)
     ds = ds.select(range(min(limit, len(ds))))
 
     model.eval()

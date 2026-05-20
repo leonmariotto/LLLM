@@ -1,18 +1,16 @@
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
 import torch
 from transformers import Gemma3ForCausalLM, Gemma3TextConfig
 
-from ..LLLM.fetch import FetchedModel
 from ..LLLM.gemma3 import (
     Gemma3Config,
     Gemma3GroupedQueryAttention,
     Gemma3Model,
     Gemma3TransformerBlock,
-    gemma3_config_from_fetched,
 )
+from ..LLLM.hf_loader import model_ir_from_hf
 from ..LLLM.rope import precompute_rope_cache
 
 
@@ -40,7 +38,8 @@ def _tiny_hf_gemma3_config() -> dict[str, object]:
 
 
 def _tiny_gemma3_config() -> Gemma3Config:
-    return gemma3_config_from_fetched(_tiny_hf_gemma3_config())
+    ir = model_ir_from_hf(_tiny_hf_gemma3_config(), {}, architecture="gemma3")
+    return Gemma3Model.config_from_ir(ir)
 
 
 def _tiny_transformers_gemma3_config() -> Gemma3TextConfig:
@@ -62,7 +61,7 @@ def _tiny_transformers_gemma3_config() -> Gemma3TextConfig:
     )
 
 
-def test_gemma3_config_from_fetched_translates_hugging_face_names() -> None:
+def test_gemma3_config_from_ir_translates_hugging_face_names() -> None:
     cfg = _tiny_gemma3_config()
 
     assert cfg["vocab_size"] == 13
@@ -75,7 +74,7 @@ def test_gemma3_config_from_fetched_translates_hugging_face_names() -> None:
     assert cfg["layer_types"] == ["sliding_attention", "full_attention"]
 
 
-def test_gemma3_config_from_fetched_accepts_nested_text_config() -> None:
+def test_gemma3_config_from_ir_accepts_nested_text_config() -> None:
     hf_config = {
         "model_type": "gemma3",
         "text_config": {
@@ -93,7 +92,8 @@ def test_gemma3_config_from_fetched_accepts_nested_text_config() -> None:
         },
     }
 
-    cfg = gemma3_config_from_fetched(hf_config)
+    ir = model_ir_from_hf(hf_config, {}, architecture="gemma3")
+    cfg = Gemma3Model.config_from_ir(ir)
 
     assert cfg["rope_base"] == 1000000.0
     assert cfg["rope_local_base"] == 10000.0
@@ -118,9 +118,8 @@ def test_gemma3_attention_supports_head_dim_different_from_embedding_split() -> 
     assert out.shape == (2, 3, 8)
 
 
-def test_gemma3_load_fetched_model_copies_hugging_face_weights() -> None:
+def test_gemma3_load_ir_weights_copies_hugging_face_weights() -> None:
     cfg = _tiny_gemma3_config()
-    model = Gemma3Model(cfg)
     weights: dict[str, torch.Tensor] = {
         "model.embed_tokens.weight": torch.randn(13, 8),
         "model.norm.weight": torch.randn(8),
@@ -158,13 +157,10 @@ def test_gemma3_load_fetched_model_copies_hugging_face_weights() -> None:
                 f"model.layers.{layer_idx}.mlp.down_proj.weight": torch.randn(8, 16),
             }
         )
-    fetched = FetchedModel(
-        path=Path("/tmp/fake-gemma3"),
-        config=_tiny_hf_gemma3_config(),
-        weights=weights,
-    )
+    ir = model_ir_from_hf(_tiny_hf_gemma3_config(), weights, architecture="gemma3")
+    model = Gemma3Model(cfg)
 
-    model.load_fetched_model(fetched)
+    model.load_ir_weights(ir)
 
     torch.testing.assert_close(model.tok_emb.weight, weights["model.embed_tokens.weight"])
     torch.testing.assert_close(model.final_norm.scale, weights["model.norm.weight"])
@@ -176,17 +172,17 @@ def test_gemma3_load_fetched_model_copies_hugging_face_weights() -> None:
     )
 
 
-def test_gemma3_load_fetched_model_rejects_bad_shapes() -> None:
-    cfg = _tiny_gemma3_config()
-    model = Gemma3Model(cfg)
-    fetched = FetchedModel(
-        path=Path("/tmp/fake-gemma3"),
-        config=_tiny_hf_gemma3_config(),
-        weights={"model.embed_tokens.weight": torch.randn(12, 8)},
+def test_gemma3_load_ir_weights_rejects_bad_shapes() -> None:
+    ir = model_ir_from_hf(
+        _tiny_hf_gemma3_config(),
+        {"model.embed_tokens.weight": torch.randn(12, 8)},
+        architecture="gemma3",
     )
+    cfg = Gemma3Model.config_from_ir(ir)
+    model = Gemma3Model(cfg)
 
     with pytest.raises(ValueError, match="shape mismatch"):
-        model.load_fetched_model(fetched)
+        model.load_ir_weights(ir)
 
 
 def test_gemma3_tiny_model_matches_transformers_reference_model() -> None:
@@ -194,13 +190,11 @@ def test_gemma3_tiny_model_matches_transformers_reference_model() -> None:
     reference_config = _tiny_transformers_gemma3_config()
     reference = Gemma3ForCausalLM(reference_config)
     reference.eval()
-    fetched = FetchedModel(
-        path=Path("."),
-        config=reference_config.to_dict(),
-        weights=reference.state_dict(),
+    ir = model_ir_from_hf(
+        reference_config.to_dict(), reference.state_dict(), architecture="gemma3"
     )
-    model = Gemma3Model(gemma3_config_from_fetched(fetched.config))
-    model.load_fetched_model(fetched)
+    model = Gemma3Model(Gemma3Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
 
     input_ids = torch.tensor([[2, 4, 6, 8, 10]], dtype=torch.long)
 

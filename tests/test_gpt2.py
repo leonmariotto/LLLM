@@ -1,29 +1,21 @@
+from typing import Any, Callable, cast
+
 import pytest
 import torch
 from torch import nn
-from typing import Any, Callable, cast
-
-torch = pytest.importorskip("torch")
 
 from ..LLLM.gpt2 import (
     GPT2Config,
-    GPT2Model,
-    gpt2_config_from_fetched,
-)
-
-from ..LLLM.gpt2 import (
     GPT2FeedForward,
-    GELU,
-    GPT2TransformerBlock
+    GPT2Model,
+    GPT2MultiHeadAttention,
+    GPT2TransformerBlock,
 )
+from ..LLLM.hf_loader import model_ir_from_hf
 from ..LLLM.norm import LayerNorm
 
 
 _manual_seed = cast(Callable[[int], torch.Generator], cast(Any, torch).manual_seed)
-
-from ..LLLM.gpt2 import (
-    GPT2MultiHeadAttention,
-)
 
 
 def _tiny_gpt_config() -> GPT2Config:
@@ -267,24 +259,13 @@ class ScaleBy(nn.Module):
         return x * self.factor
 
 
-def test_gelu_matches_torch_tanh_approximation() -> None:
-    """Verify GELU matches PyTorch's tanh-approximate GELU implementation."""
-    activation = GELU()
-    inputs = torch.tensor([-2.0, -0.5, 0.0, 0.5, 2.0])
-
-    outputs = activation(inputs)
-    expected_outputs = torch.nn.functional.gelu(inputs, approximate="tanh")
-
-    torch.testing.assert_close(outputs, expected_outputs)
-
-
 def test_feed_forward_matches_manual_two_layer_computation() -> None:
     """Check FeedForward matches an explicit two-linear-layer GELU computation."""
     feed_forward = GPT2FeedForward(embedded_dimension=2, expansion_factor=2)
 
     # Pull out the internal linear layers so the expected result can be computed step by step.
-    first_linear = feed_forward.layers[0]
-    second_linear = feed_forward.layers[2]
+    first_linear = feed_forward.fc1
+    second_linear = feed_forward.fc2
 
     with torch.no_grad():
         first_linear.weight.copy_(
@@ -374,8 +355,9 @@ def test_transformer_block_applies_both_residual_paths() -> None:
 
     torch.testing.assert_close(outputs, expected_outputs)
 
-def test_gpt_config_from_fetched_translates_hugging_face_names() -> None:
-    cfg = gpt2_config_from_fetched(_tiny_hf_gpt2_config())
+def test_gpt_config_from_ir_translates_hugging_face_names() -> None:
+    ir = model_ir_from_hf(_tiny_hf_gpt2_config(), {}, architecture="gpt2")
+    cfg = GPT2Model.config_from_ir(ir)
 
     assert cfg == {
         "vocab_size": 5,
@@ -485,5 +467,3 @@ def test_gpt_rejects_sequences_longer_than_context_length() -> None:
 
     with pytest.raises(AssertionError):
         model(in_idx)
-
-

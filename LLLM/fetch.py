@@ -1,107 +1,109 @@
-"""Fetch Hugging Face model repos and load cached model artifacts."""
+"""
+Fetch or locate model artifacts and call parser functions
+to load them into ModelIR.
+Entrypoint is fetch_model_ir.
+"""
 
 from __future__ import annotations
 
 import logging
 
-import json
-from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, cast
 
-import torch
-
+from .model_ir import ModelIR
 from .quantization import WeightMode
 
 
-@dataclass(frozen=True)
-class FetchedModel:
-    """A cached model snapshot plus its decoded config and loaded weights."""
+def load_model_ir(
+    path: str | Path,
+    *,
+    gguf_filename: str | None = None,
+    source_format: str | None = None,
+    weight_mode: WeightMode = "dense",
+) -> ModelIR:
+    """
+    Dispatch a local artifact path to the matching format loader
+    and return IR.
 
-    path: Path
-    config: dict[str, Any]
-    weights: dict[str, Any]
+    Args:
+        path: Local model artifact path, snapshot directory, or GGUF file.
+        gguf_filename: GGUF file to select when ``path`` is a directory.
+        source_format: Explicit loader format override, such as ``"huggingface"``
+            or ``"gguf"``.
+        weight_mode: Whether GGUF linear weights are loaded densely or preserved
+            as quantized weights.
 
-    @property
-    def model_type(self) -> str:
-        model_type = self.config.get("model_type")
-        if not isinstance(model_type, str):
-            raise ValueError("config.json does not contain a string model_type")
-        return model_type
+    Returns:
+        Source-independent model IR.
+    """
+
+    source_path = Path(path).expanduser()
+    inferred_format = source_format
+    if inferred_format is None:
+        if source_path.is_file() and source_path.suffix.lower() == ".gguf":
+            inferred_format = "gguf"
+        elif gguf_filename is not None:
+            inferred_format = "gguf"
+        elif source_path.is_dir() and not (source_path / "config.json").is_file():
+            if list(source_path.glob("*.gguf")):
+                inferred_format = "gguf"
+            else:
+                inferred_format = "huggingface"
+        else:
+            inferred_format = "huggingface"
+
+    if inferred_format in {"hf", "huggingface"}:
+        if weight_mode == "quantized":
+            raise NotImplementedError(
+                "quantized loading is currently supported for GGUF"
+            )
+        from .hf_loader import load_hf_model_ir
+
+        return load_hf_model_ir(source_path)
+    if inferred_format == "gguf":
+        from .gguf import load_gguf_ir
+
+        return load_gguf_ir(source_path, gguf_filename, weight_mode=weight_mode)
+    raise ValueError(f"unsupported source_format {source_format!r}")
 
 
-def fetch_hf_model(
+def fetch_model_ir(
     repo_id: str,
     *,
     revision: str | None = None,
     local_files_only: bool = False,
     gguf_filename: str | None = None,
     weight_mode: WeightMode = "dense",
-) -> FetchedModel:
+) -> ModelIR:
     """
-    Download or reuse a Hugging Face model snapshot and load common artifacts.
+    Fetch or locate a model repository and parse it into ``ModelIR``.
 
-    The cache is managed by huggingface_hub. Use default system cache dir.
+    Args:
+        repo_id: Hugging Face repository id or local filesystem path.
+        revision: Optional Hugging Face revision to download.
+        local_files_only: Restrict downloads to the Hugging Face cache.
+        gguf_filename: GGUF file to download or select from a local directory.
+        weight_mode: Whether GGUF linear weights are loaded densely or preserved
+            as quantized weights.
+
+    Returns:
+        Source-independent model IR.
     """
+
     local_path = Path(repo_id).expanduser()
-    if local_path.is_dir():
-        return load_cached_model(
+    if local_path.exists():
+        return load_model_ir(
             local_path, gguf_filename=gguf_filename, weight_mode=weight_mode
         )
-    if local_path.is_file() and local_path.suffix.lower() == ".gguf":
-        return load_cached_model(local_path, weight_mode=weight_mode)
-
     path = _download_snapshot(
         repo_id,
         revision=revision,
         local_files_only=local_files_only,
         gguf_filename=gguf_filename,
     )
-    return load_cached_model(path, gguf_filename=gguf_filename, weight_mode=weight_mode)
-
-
-def load_cached_model(
-    path: str | Path,
-    *,
-    gguf_filename: str | None = None,
-    weight_mode: WeightMode = "dense",
-) -> FetchedModel:
-    """Load config and weights from an already cached snapshot path."""
-    snapshot_path = Path(path)
-    if snapshot_path.is_file() and snapshot_path.suffix.lower() == ".gguf":
-        from .gguf import load_gguf, load_gguf_quantized
-
-        if weight_mode == "quantized":
-            config, weights = load_gguf_quantized(snapshot_path)
-        else:
-            config, weights = load_gguf(snapshot_path)
-        return FetchedModel(path=snapshot_path, config=config, weights=weights)
-
-    config_path = snapshot_path / "config.json"
-    gguf_files = sorted(snapshot_path.glob("*.gguf"))
-    if gguf_filename is not None or (gguf_files and not config_path.is_file()):
-        from .gguf import load_gguf, load_gguf_quantized
-
-        if weight_mode == "quantized":
-            config, weights = load_gguf_quantized(snapshot_path, gguf_filename)
-        else:
-            config, weights = load_gguf(snapshot_path, gguf_filename)
-        return FetchedModel(path=snapshot_path, config=config, weights=weights)
-
-    if weight_mode == "quantized":
-        raise NotImplementedError("quantized loading is currently supported for GGUF")
-
-    if not config_path.is_file():
-        raise FileNotFoundError(f"missing config.json in {snapshot_path}")
-
-    raw_config: object = json.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(raw_config, dict):
-        raise ValueError(f"{config_path} did not contain a JSON object")
-    config = cast(dict[str, Any], raw_config)
-
-    weights = _load_safetensors(snapshot_path)
-    return FetchedModel(path=snapshot_path, config=config, weights=weights)
+    return load_model_ir(path, gguf_filename=gguf_filename, weight_mode=weight_mode)
 
 
 def _download_snapshot(
@@ -111,6 +113,19 @@ def _download_snapshot(
     local_files_only: bool,
     gguf_filename: str | None,
 ) -> Path:
+    """
+    Download only files needed by the supported loaders.
+
+    Args:
+        repo_id: Hugging Face repository id.
+        revision: Optional repository revision to download.
+        local_files_only: Restrict downloads to the Hugging Face cache.
+        gguf_filename: GGUF file to download instead of HF-format artifacts.
+
+    Returns:
+        Local snapshot directory path.
+    """
+
     hf_hub = cast(Any, import_module("huggingface_hub"))
     download = cast(Callable[..., str], hf_hub.snapshot_download)
     logging.debug("repo_id=%s revision=%s", repo_id, revision)
@@ -136,26 +151,3 @@ def _download_snapshot(
         allow_patterns=allow_patterns,
     )
     return Path(path)
-
-
-def _load_safetensors(path: Path) -> dict[str, torch.Tensor]:
-    safetensors_torch = cast(Any, import_module("safetensors.torch"))
-    load_safetensors_file = cast(
-        Callable[[Path], dict[str, torch.Tensor]],
-        safetensors_torch.load_file,
-    )
-    files = sorted(path.glob("*.safetensors"))
-    if not files:
-        raise FileNotFoundError(f"no safetensors weights found in {path}")
-
-    weights: dict[str, torch.Tensor] = {}
-    for file in files:
-        tensors = load_safetensors_file(file)
-        overlap = set(weights).intersection(tensors)
-        if overlap:
-            names = ", ".join(sorted(overlap)[:3])
-            raise ValueError(
-                f"duplicate tensor names across safetensors files: {names}"
-            )
-        weights.update(tensors)
-    return weights

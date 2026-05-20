@@ -4,15 +4,14 @@ from typing import Any, Callable, cast
 
 import pytest
 import torch
-from torch import nn
 
 from ..LLLM.fetch import (
-    FetchedModel,
-    fetch_hf_model,
-    load_cached_model,
+    fetch_model_ir,
+    load_model_ir,
 )
-from ..LLLM.gpt2 import GPT2Model, gpt2_config_from_fetched
+from ..LLLM.gpt2 import GPT2Model
 from ..LLLM.gpt2 import GPT2TransformerBlock
+from ..LLLM.hf_loader import model_ir_from_hf
 
 
 _safetensors_torch = cast(Any, import_module("safetensors.torch"))
@@ -86,49 +85,53 @@ def _unprefixed_gpt2_weights() -> dict[str, torch.Tensor]:
     }
 
 
-def test_load_cached_model_reads_config_and_safetensors(tmp_path: Path) -> None:
-    (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
-    _save_file(
-        {"a": torch.tensor([1.0]), "b": torch.tensor([2.0])},
-        tmp_path / "a.safetensors",
+def _write_tiny_hf_gpt2_snapshot(path: Path) -> None:
+    (path / "config.json").write_text(
+        (
+            '{"model_type": "gpt2", "vocab_size": 5, "n_positions": 4, '
+            '"n_embd": 4, "n_head": 1, "n_layer": 1}'
+        ),
+        encoding="utf-8",
     )
-    _save_file({"c": torch.tensor([3.0])}, tmp_path / "b.safetensors")
-
-    fetched = load_cached_model(tmp_path)
-
-    assert fetched.model_type == "gpt2"
-    assert set(fetched.weights) == {"a", "b", "c"}
+    _save_file(
+        {"transformer.wte.weight": torch.ones(5, 4)},
+        path / "model.safetensors",
+    )
 
 
-def test_load_cached_model_rejects_quantized_safetensors(tmp_path: Path) -> None:
-    (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
-    _save_file({"a": torch.tensor([1.0])}, tmp_path / "model.safetensors")
+def test_load_model_ir_reads_hf_config_and_safetensors(tmp_path: Path) -> None:
+    _write_tiny_hf_gpt2_snapshot(tmp_path)
+
+    ir = load_model_ir(tmp_path)
+
+    assert ir.architecture == "gpt2"
+    assert ir.config.require_int("vocab_size") == 5
+    assert set(ir.weights) == {"token_embedding.weight"}
+
+
+def test_load_model_ir_rejects_quantized_safetensors(tmp_path: Path) -> None:
+    _write_tiny_hf_gpt2_snapshot(tmp_path)
 
     with pytest.raises(NotImplementedError, match="GGUF"):
-        load_cached_model(tmp_path, weight_mode="quantized")
+        load_model_ir(tmp_path, weight_mode="quantized")
 
 
-def test_fetch_hf_model_loads_local_snapshot_path(tmp_path: Path) -> None:
-    (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
-    _save_file({"a": torch.tensor([1.0])}, tmp_path / "model.safetensors")
+def test_fetch_model_ir_loads_local_snapshot_path(tmp_path: Path) -> None:
+    _write_tiny_hf_gpt2_snapshot(tmp_path)
 
-    fetched = fetch_hf_model(str(tmp_path))
+    ir = fetch_model_ir(str(tmp_path))
 
-    assert fetched.path == tmp_path
-    assert fetched.model_type == "gpt2"
-    assert set(fetched.weights) == {"a"}
+    assert ir.architecture == "gpt2"
+    assert ir.metadata["path"] == str(tmp_path)
+    assert set(ir.weights) == {"token_embedding.weight"}
 
 
-def test_gpt_model_loads_from_fetched_gpt2_artifacts() -> None:
+def test_gpt_model_loads_from_hf_gpt2_ir() -> None:
     weights = _tiny_gpt2_weights()
-    fetched = FetchedModel(
-        path=Path("/tmp/fake-snapshot"),
-        config=_tiny_hf_gpt2_config(),
-        weights=weights,
-    )
+    ir = model_ir_from_hf(_tiny_hf_gpt2_config(), weights, architecture="gpt2")
 
-    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
-    model.load_fetched_model(fetched)
+    model = GPT2Model(GPT2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
     block = cast(GPT2TransformerBlock, model.trf_blocks[0])
 
     torch.testing.assert_close(model.tok_emb.weight, weights["transformer.wte.weight"])
@@ -139,28 +142,22 @@ def test_gpt_model_loads_from_fetched_gpt2_artifacts() -> None:
     torch.testing.assert_close(block.att.W_query.weight, q_weight.T)
     torch.testing.assert_close(block.att.W_key.weight, k_weight.T)
     torch.testing.assert_close(block.att.W_value.weight, v_weight.T)
-    fc = cast(nn.Linear, block.ff.layers[0])
-    proj = cast(nn.Linear, block.ff.layers[2])
     torch.testing.assert_close(
-        fc.weight,
+        block.ff.fc1.weight,
         weights["transformer.h.0.mlp.c_fc.weight"].T,
     )
     torch.testing.assert_close(
-        proj.weight,
+        block.ff.fc2.weight,
         weights["transformer.h.0.mlp.c_proj.weight"].T,
     )
 
 
 def test_gpt_model_loads_from_openai_gpt2_unprefixed_safetensors() -> None:
     weights = _unprefixed_gpt2_weights()
-    fetched = FetchedModel(
-        path=Path("/tmp/fake-snapshot"),
-        config=_tiny_hf_gpt2_config(),
-        weights=weights,
-    )
+    ir = model_ir_from_hf(_tiny_hf_gpt2_config(), weights, architecture="gpt2")
 
-    model = GPT2Model(gpt2_config_from_fetched(fetched.config))
-    model.load_fetched_model(fetched)
+    model = GPT2Model(GPT2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
     block = cast(GPT2TransformerBlock, model.trf_blocks[0])
 
     torch.testing.assert_close(model.tok_emb.weight, weights["wte.weight"])

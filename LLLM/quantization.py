@@ -101,6 +101,13 @@ class QuantizedLinear(nn.Module):
             self.bias = nn.Parameter(bias.detach().clone())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor with shape ``[..., in_features]``.
+
+        Returns:
+            Output tensor with shape ``[..., out_features]``.
+        """
         weight = self.weight.dequantize(device=x.device).to(dtype=x.dtype)
         bias = (
             None if self.bias is None else self.bias.to(device=x.device, dtype=x.dtype)

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import gguf
 import numpy as np
 import pytest
@@ -7,14 +5,14 @@ import torch
 from torch import nn
 
 from ..LLLM.kv_cache import KVCache
-from ..LLLM.fetch import FetchedModel
 from ..LLLM.llama3 import (
     Llama3Config,
     Llama3GroupedQueryAttention,
     Llama3Model,
     Llama3TransformerBlock,
-    llama3_config_from_fetched,
 )
+from ..LLLM.hf_loader import model_ir_from_hf
+from ..LLLM.model_ir import ModelConfigIR, ModelIR
 from ..LLLM.quantization import QuantizedLinear, QuantizedWeight
 from ..LLLM.rope import precompute_rope_cache
 
@@ -54,8 +52,9 @@ def _tiny_transformer_llama3_config() -> Llama3Config:
     return cfg
 
 
-def test_llama3_config_from_fetched_translates_hugging_face_names() -> None:
-    cfg = llama3_config_from_fetched(_tiny_hf_llama3_config())
+def test_llama3_config_from_ir_translates_hugging_face_names() -> None:
+    ir = model_ir_from_hf(_tiny_hf_llama3_config(), {}, architecture="llama3")
+    cfg = Llama3Model.config_from_ir(ir)
 
     assert cfg == {
         "vocab_size": 5,
@@ -72,16 +71,18 @@ def test_llama3_config_from_fetched_translates_hugging_face_names() -> None:
     }
 
 
-def test_llama3_config_from_fetched_uses_remote_rope_interleaved() -> None:
+def test_llama3_config_from_ir_uses_remote_rope_interleaved() -> None:
     hf_config = _tiny_hf_llama3_config()
     hf_config["rope_interleaved"] = True
 
-    cfg = llama3_config_from_fetched(hf_config)
+    cfg = Llama3Model.config_from_ir(
+        model_ir_from_hf(hf_config, {}, architecture="llama3")
+    )
 
     assert cfg["rope_interleaved"] is True
 
 
-def test_llama3_config_from_fetched_translates_hugging_face_rope_scaling() -> None:
+def test_llama3_config_from_ir_translates_hugging_face_rope_scaling() -> None:
     hf_config = _tiny_hf_llama3_config()
     hf_config["rope_scaling"] = {
         "factor": 8.0,
@@ -91,7 +92,9 @@ def test_llama3_config_from_fetched_translates_hugging_face_rope_scaling() -> No
         "rope_type": "llama3",
     }
 
-    cfg = llama3_config_from_fetched(hf_config)
+    cfg = Llama3Model.config_from_ir(
+        model_ir_from_hf(hf_config, {}, architecture="llama3")
+    )
 
     assert cfg["freq_config"] == {
         "factor": 8.0,
@@ -101,7 +104,7 @@ def test_llama3_config_from_fetched_translates_hugging_face_rope_scaling() -> No
     }
 
 
-def test_llama3_config_from_fetched_accepts_legacy_rope_scaling_type() -> None:
+def test_llama3_config_from_ir_accepts_legacy_rope_scaling_type() -> None:
     hf_config = _tiny_hf_llama3_config()
     hf_config["rope_scaling"] = {
         "factor": 8.0,
@@ -111,7 +114,9 @@ def test_llama3_config_from_fetched_accepts_legacy_rope_scaling_type() -> None:
         "type": "llama3",
     }
 
-    cfg = llama3_config_from_fetched(hf_config)
+    cfg = Llama3Model.config_from_ir(
+        model_ir_from_hf(hf_config, {}, architecture="llama3")
+    )
 
     assert cfg["freq_config"] == {
         "factor": 8.0,
@@ -121,7 +126,7 @@ def test_llama3_config_from_fetched_accepts_legacy_rope_scaling_type() -> None:
     }
 
 
-def test_llama3_config_from_fetched_rejects_unsupported_rope_scaling() -> None:
+def test_llama3_config_from_ir_rejects_unsupported_rope_scaling() -> None:
     hf_config = _tiny_hf_llama3_config()
     hf_config["rope_scaling"] = {
         "factor": 2.0,
@@ -129,19 +134,23 @@ def test_llama3_config_from_fetched_rejects_unsupported_rope_scaling() -> None:
     }
 
     with pytest.raises(ValueError, match="unsupported rope_scaling"):
-        llama3_config_from_fetched(hf_config)
+        Llama3Model.config_from_ir(
+            model_ir_from_hf(hf_config, {}, architecture="llama3")
+        )
 
 
-def test_llama3_config_from_fetched_rejects_bad_rope_scaling_types() -> None:
+def test_llama3_config_from_ir_rejects_bad_rope_scaling_types() -> None:
     hf_config = _tiny_hf_llama3_config()
     hf_config["rope_scaling"] = "llama3"
 
     with pytest.raises(ValueError, match="rope_scaling"):
-        llama3_config_from_fetched(hf_config)
+        Llama3Model.config_from_ir(
+            model_ir_from_hf(hf_config, {}, architecture="llama3")
+        )
 
     hf_config = _tiny_hf_llama3_config()
     hf_config["rope_scaling"] = {
-        "factor": 8,
+        "factor": "8",
         "low_freq_factor": 1.0,
         "high_freq_factor": 4.0,
         "original_max_position_embeddings": 8192,
@@ -149,7 +158,9 @@ def test_llama3_config_from_fetched_rejects_bad_rope_scaling_types() -> None:
     }
 
     with pytest.raises(ValueError, match="factor"):
-        llama3_config_from_fetched(hf_config)
+        Llama3Model.config_from_ir(
+            model_ir_from_hf(hf_config, {}, architecture="llama3")
+        )
 
 
 def _manual_rms_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
@@ -427,12 +438,12 @@ def test_llama3_quantized_loader_installs_quantized_output_head() -> None:
     cfg["hidden_dim"] = 32
     source = np.linspace(-1.0, 1.0, 160, dtype=np.float32).reshape(5, 32)
     quantized = gguf.quantize(source, gguf.GGMLQuantizationType.Q4_0)
-    fetched = FetchedModel(
-        path=Path("."),
-        config={"model_type": "llama"},
+    ir = ModelIR(
+        architecture="llama3",
+        config=ModelConfigIR({}),
         weights={
-            "model.embed_tokens.weight": torch.randn(5, 32),
-            "model.norm.weight": torch.ones(32),
+            "token_embedding.weight": torch.randn(5, 32),
+            "final_norm.weight": torch.ones(32),
             "lm_head.weight": QuantizedWeight(
                 name="lm_head.weight",
                 tensor_type=gguf.GGMLQuantizationType.Q4_0,
@@ -444,7 +455,7 @@ def test_llama3_quantized_loader_installs_quantized_output_head() -> None:
     )
     model = Llama3Model(cfg, weight_mode="quantized")
 
-    model.load_quantized_fetched_model(fetched)
+    model.load_quantized_ir_weights(ir)
     logits = model(torch.tensor([[0, 1, 2]]))
 
     assert isinstance(model.out_head, QuantizedLinear)

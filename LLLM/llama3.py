@@ -24,7 +24,7 @@ from .kv_cache import KVCache
 from .quantization import QuantizedLinear, QuantizedWeight, WeightMode
 
 if TYPE_CHECKING:
-    from .fetch import FetchedModel
+    from .model_ir import ModelIR
 
 
 class Llama3Config(TypedDict):
@@ -41,94 +41,11 @@ class Llama3Config(TypedDict):
     dtype: torch.dtype
 
 
-def llama3_config_from_fetched(config: dict[str, Any]) -> Llama3Config:
-    """Translate a Hugging Face Llama config into LLLM Llama3Config."""
-
-    def _float_config(
-        config: dict[str, Any],
-        key: str,
-        *,
-        fallback_key: str | None = None,
-        default: float | None = None,
-        allow_int: bool = False,
-    ) -> float:
-        value = config.get(key)
-        if value is None and fallback_key is not None:
-            value = config.get(fallback_key)
-        if value is None and default is not None:
-            return default
-        if allow_int and isinstance(value, int):
-            return float(value)
-        if not isinstance(value, float):
-            raise ValueError(f"config value {key!r} must be an float")
-        return value
-
-    def _int_config(
-        config: dict[str, Any], key: str, *, fallback_key: str | None = None
-    ) -> int:
-        value = config.get(key)
-        if value is None and fallback_key is not None:
-            value = config.get(fallback_key)
-        if not isinstance(value, int):
-            raise ValueError(f"config value {key!r} must be an int")
-        return value
-
-    def _bool_config(config: dict[str, Any], key: str, *, default: bool) -> bool:
-        value = config.get(key, default)
-        if not isinstance(value, bool):
-            raise ValueError(f"config value {key!r} must be a bool")
-        return value
-
-    def _hidden_dim_config(config: dict[str, Any]) -> int:
-        intermediate_size = config.get("intermediate_size")
-        if isinstance(intermediate_size, int):
-            return intermediate_size
-
-        dim = _int_config(config, "dim")
-        multiple_of = _int_config(config, "multiple_of")
-        hidden_dim = int(2 * (4 * dim) / 3)
-        return multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
-    def _rope_frequency_config(config: dict[str, Any]) -> RopeFrequencyConfig | None:
-        rope_scaling = config.get("rope_scaling")
-        if rope_scaling is None:
-            return None
-        if not isinstance(rope_scaling, dict):
-            raise ValueError("config value 'rope_scaling' must be a dict")
-        rope_scaling = cast(dict[str, Any], rope_scaling)
-
-        rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
-        if rope_type != "llama3":
-            raise ValueError(f"unsupported rope_scaling rope_type: {rope_type!r}")
-
-        return {
-            "factor": _float_config(rope_scaling, "factor"),
-            "low_freq_factor": _float_config(rope_scaling, "low_freq_factor"),
-            "high_freq_factor": _float_config(rope_scaling, "high_freq_factor"),
-            "original_context_len": _int_config(
-                rope_scaling, "original_max_position_embeddings"
-            ),
-        }
-
-    return {
-        "vocab_size": _int_config(config, "vocab_size"),
-        "context_length": _int_config(
-            config, "max_position_embeddings", fallback_key="max_seq_len"
-        ),
-        "emb_dim": _int_config(config, "hidden_size", fallback_key="dim"),
-        "n_heads": _int_config(config, "num_attention_heads", fallback_key="n_heads"),
-        "n_kv_groups": _int_config(
-            config, "num_key_value_heads", fallback_key="n_heads"
-        ),
-        "n_layers": _int_config(config, "num_hidden_layers", fallback_key="n_layers"),
-        "hidden_dim": _hidden_dim_config(config),
-        "rope_theta": _float_config(
-            config, "rope_theta", default=10000.0, allow_int=True
-        ),
-        "rope_interleaved": _bool_config(config, "rope_interleaved", default=False),
-        "freq_config": _rope_frequency_config(config),
-        "dtype": torch.float32,
-    }
+def _rope_scaling_float(rope_scaling: dict[str, Any], key: str) -> float:
+    value = rope_scaling.get(key)
+    if not isinstance(value, float):
+        raise ValueError(f"IR rope_scaling field {key!r} must be a float")
+    return value
 
 
 class Llama3GroupedQueryAttention(nn.Module):
@@ -169,19 +86,6 @@ class Llama3GroupedQueryAttention(nn.Module):
         rope_interleaved: bool = False,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
-        """
-        - d_in: embedding size (size of embedded vector, 1 embedded vector per token)
-        - d_out context vector size.
-        - context_lenght: correspond to the number token used to compute a context
-        vector. In the case of a DataSet/DataLoader setup, it will correspond
-        to the window_size.
-        - droput: for training purpose, it is possible to hide randomly some attention
-        weight before computing the context vector. dropout value is the probability
-        for a weight to be zeroed.
-        - num_head: number of head.
-        - num_kv_groups: for GQA, this is the number of KV matrice, that will be
-        distributed to heads.
-        """
         super().__init__()
 
         assert num_heads != 0, "num_head shall not be 0"
@@ -224,14 +128,20 @@ class Llama3GroupedQueryAttention(nn.Module):
         layer_idx: int | None = None,
     ) -> torch.Tensor:
         """
-        forward method is called by the nn.Module __call__ method.
-        x is expected to be a batch of tensor of d_in size.
-        (number of batch, number of token, embedding size)
-        return a tensor of d_out size.
-        Note that mask is always computed on-the-fly here.
+        Args:
+            x: Hidden states with shape ``[batch, tokens, d_in]``.
+            cos: RoPE cosine cache with shape
+                ``[context_length, head_dim]``.
+            sin: RoPE sine cache with shape
+                ``[context_length, head_dim]``.
+            pos: Optional starting token position used for RoPE
+                or cached decoding.
+            kv_cache: Optional key/value cache used during
+                autoregressive decoding.
+            layer_idx: Layer index used to read or update the cache.
 
-        cos and sin are pre-computed rope sequence.
-        pos: contains the (context-wide relative) starting index of the sequence.
+        Returns:
+            Hidden states with shape ``[batch, tokens, d_out]``.
         """
         b, num_tokens, d_in = x.shape
 
@@ -251,12 +161,7 @@ class Llama3GroupedQueryAttention(nn.Module):
         keys_new = keys_new.view(b, num_tokens, self.num_kv_groups, self.head_dim)
         values_new = values_new.view(b, num_tokens, self.num_kv_groups, self.head_dim)
 
-        # Transpose:
-        #   (b, num_tokens, num_heads, head_dim) ->
-        #       (b, num_heads, num_tokens, head_dim)
         queries = queries.transpose(1, 2)
-        #   (b, num_tokens, num_kv_groups, head_dim) ->
-        #       (b, num_kv_groups, num_tokens, head_dim)
         keys_new = keys_new.transpose(1, 2)
         values_new = values_new.transpose(1, 2)
 
@@ -281,8 +186,6 @@ class Llama3GroupedQueryAttention(nn.Module):
             start_pos + num_tokens,
             device=x.device,
         )
-        # TODO rope can support positional information exceeding context lenght, remove the
-        # following when in place.
         assert int(position_ids[-1]) < self.context_length, (
             "RoPE position exceeds precomputed context length"
         )
@@ -307,12 +210,7 @@ class Llama3GroupedQueryAttention(nn.Module):
             assert layer_idx is not None
             keys, values = kv_cache.update(layer_idx, keys_new, values_new)
 
-        # Expand keys and values to match the number of heads
-        # Shape: (b, num_heads, num_tokens, head_dim)
-        # For example, before repeat_interleave along dim=1 (query groups):
-        #   [K1, K2]
-        # After repeat_interleave (each query group is repeated group_size times):
-        #   [K1, K1, K2, K2]
+        # Expand grouped K/V heads to match query heads.
         keys = keys.repeat_interleave(self.kv_group_size, dim=1)
         values = values.repeat_interleave(self.kv_group_size, dim=1)
 
@@ -337,14 +235,11 @@ class Llama3GroupedQueryAttention(nn.Module):
         attn_weights = torch.softmax(attn_scores / keys.shape[-1] ** 0.5, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
-        # Shape: (b, num_tokens, num_heads, head_dim)
         context_vec = (attn_weights @ values).transpose(1, 2)
 
         # Combine heads, where self.d_out = self.num_heads * self.head_dim
         context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
-        context_vec = self.out_proj(context_vec)  # optional projection
-
-        return context_vec
+        return self.out_proj(context_vec)  # optional projection
 
 
 class Llama3TransformerBlock(nn.Module):
@@ -375,6 +270,20 @@ class Llama3TransformerBlock(nn.Module):
         layer_idx: int | None = None,
     ):
         # Shortcut connection for attention block
+        """
+        Args:
+            x: Hidden states with shape ``[batch, tokens, emb_dim]``.
+            cos: RoPE cosine cache with shape
+                ``[context_length, head_dim]``.
+            sin: RoPE sine cache with shape
+                ``[context_length, head_dim]``.
+            pos: Optional starting token position used for RoPE or cached decoding.
+            kv_cache: Optional key/value cache used during autoregressive decoding.
+            layer_idx: Layer index used to read or update the cache.
+
+        Returns:
+            Hidden states with shape ``[batch, tokens, emb_dim]``.
+        """
         shortcut = x
         x = self.norm1(x)
         if kv_cache is None:
@@ -387,9 +296,7 @@ class Llama3TransformerBlock(nn.Module):
         shortcut = x
         x = self.norm2(x)
         x = self.ff(x)
-        x = x + shortcut  # Add the original input back
-
-        return x
+        return x + shortcut  # Add the original input back
 
 
 class Llama3Model(nn.Module):
@@ -421,6 +328,45 @@ class Llama3Model(nn.Module):
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
 
+    @staticmethod
+    def config_from_ir(ir: ModelIR) -> Llama3Config:
+        if ir.architecture != "llama3":
+            raise ValueError(f"expected llama3 IR, got {ir.architecture!r}")
+
+        rope_scaling = ir.config.get("rope_scaling")
+        freq_config: RopeFrequencyConfig | None = None
+        if rope_scaling is not None:
+            if not isinstance(rope_scaling, dict):
+                raise ValueError("IR config field 'rope_scaling' must be a dict")
+            rope_scaling = cast(dict[str, Any], rope_scaling)
+            rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
+            if rope_type != "llama3":
+                raise ValueError(f"unsupported rope_scaling rope_type: {rope_type!r}")
+            freq_config = {
+                "factor": _rope_scaling_float(rope_scaling, "factor"),
+                "low_freq_factor": _rope_scaling_float(rope_scaling, "low_freq_factor"),
+                "high_freq_factor": _rope_scaling_float(
+                    rope_scaling, "high_freq_factor"
+                ),
+                "original_context_len": int(
+                    rope_scaling["original_max_position_embeddings"]
+                ),
+            }
+
+        return {
+            "vocab_size": ir.config.require_int("vocab_size"),
+            "context_length": ir.config.require_int("context_length"),
+            "emb_dim": ir.config.require_int("hidden_size"),
+            "n_heads": ir.config.require_int("num_attention_heads"),
+            "n_kv_groups": ir.config.require_int("num_key_value_heads"),
+            "n_layers": ir.config.require_int("num_hidden_layers"),
+            "hidden_dim": ir.config.require_int("intermediate_size"),
+            "rope_theta": ir.config.require_float("rope_theta"),
+            "rope_interleaved": bool(ir.config.get("rope_interleaved", False)),
+            "freq_config": freq_config,
+            "dtype": torch.float32,
+        }
+
     def forward(
         self,
         in_idx: torch.Tensor,
@@ -428,7 +374,15 @@ class Llama3Model(nn.Module):
         *,
         kv_cache: KVCache | None = None,
     ):
-        # batch_size, seq_len = in_idx.shape
+        """
+        Args:
+            in_idx: Token ids with shape ``[batch, tokens]``.
+            pos: Optional starting token position used for RoPE or cached decoding.
+            kv_cache: Optional key/value cache used during autoregressive decoding.
+
+        Returns:
+            Logits with shape ``[batch, tokens, vocab_size]``.
+        """
         tok_embeds = self.tok_emb(in_idx)
         x = tok_embeds
         for layer_idx, module in enumerate(self.trf_blocks):
@@ -442,17 +396,18 @@ class Llama3Model(nn.Module):
                 layer_idx=layer_idx,
             )
         x = self.final_norm(x)
-        logits = self.out_head(x)
-        return logits
+        return self.out_head(x)
 
-    def load_fetched_model(self, fetched: FetchedModel) -> None:
-        """Copy Llama tensors from a fetched safetensors checkpoint."""
+    def load_ir_weights(self, ir: ModelIR) -> None:
+        """Copy canonical dense Llama3 IR tensors into this model."""
+        if ir.architecture != "llama3":
+            raise ValueError(f"expected llama3 IR, got {ir.architecture!r}")
         with torch.no_grad():
             embedding_weight = self._optional_dense_weight(
-                fetched.weights, "tok_embeddings.weight"
+                ir.weights, "token_embedding.weight"
             )
             if embedding_weight is None:
-                embedding_weight = self._dense_weight(fetched.weights, "output.weight")
+                embedding_weight = self._dense_weight(ir.weights, "lm_head.weight")
             self._copy_param(self.tok_emb.weight, embedding_weight)
 
             for layer_idx, module in enumerate(self.trf_blocks):
@@ -461,82 +416,76 @@ class Llama3Model(nn.Module):
 
                 self._copy_param(
                     block.att.W_query.weight,
-                    self._dense_weight(
-                        fetched.weights, f"{prefix}.attention.wq.weight"
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.attention.q_proj.weight"),
                 )
                 self._copy_param(
                     block.att.W_key.weight,
-                    self._dense_weight(
-                        fetched.weights, f"{prefix}.attention.wk.weight"
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.attention.k_proj.weight"),
                 )
                 self._copy_param(
                     block.att.W_value.weight,
-                    self._dense_weight(
-                        fetched.weights, f"{prefix}.attention.wv.weight"
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.attention.v_proj.weight"),
                 )
                 self._copy_param(
                     block.att.out_proj.weight,
-                    self._dense_weight(
-                        fetched.weights, f"{prefix}.attention.wo.weight"
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.attention.o_proj.weight"),
                 )
 
                 self._copy_param(
                     block.norm1.weight,
-                    self._dense_weight(
-                        fetched.weights, f"{prefix}.attention_norm.weight"
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.input_norm.weight"),
                 )
                 self._copy_param(
                     block.norm2.weight,
-                    self._dense_weight(fetched.weights, f"{prefix}.ffn_norm.weight"),
+                    self._dense_weight(
+                        ir.weights, f"{prefix}.post_attention_norm.weight"
+                    ),
                 )
 
                 self._copy_param(
                     block.ff.fc1.weight,
                     self._dense_weight(
-                        fetched.weights, f"{prefix}.feed_forward.w1.weight"
+                        ir.weights, f"{prefix}.feed_forward.gate_proj.weight"
                     ),
                 )
                 self._copy_param(
                     block.ff.fc2.weight,
                     self._dense_weight(
-                        fetched.weights, f"{prefix}.feed_forward.w3.weight"
+                        ir.weights, f"{prefix}.feed_forward.up_proj.weight"
                     ),
                 )
                 self._copy_param(
                     block.ff.fc3.weight,
                     self._dense_weight(
-                        fetched.weights, f"{prefix}.feed_forward.w2.weight"
+                        ir.weights, f"{prefix}.feed_forward.down_proj.weight"
                     ),
                 )
 
             self._copy_param(
                 self.final_norm.weight,
-                self._dense_weight(fetched.weights, "norm.weight"),
+                self._dense_weight(ir.weights, "final_norm.weight"),
             )
             self._copy_param(
                 self.out_head.weight,
-                self._dense_weight(fetched.weights, "output.weight"),
+                self._dense_weight(ir.weights, "lm_head.weight"),
             )
 
         self.eval()
 
-    def load_quantized_fetched_model(self, fetched: FetchedModel) -> None:
-        """Install quantized GGUF linear weights and copy dense non-linear tensors."""
+    def load_quantized_ir_weights(self, ir: ModelIR) -> None:
+        """Install quantized Llama3 IR linear weights and copy dense tensors."""
         if self.weight_mode != "quantized":
             raise ValueError(
-                "load_quantized_fetched_model requires weight_mode='quantized'"
+                "load_quantized_ir_weights requires weight_mode='quantized'"
             )
+        if ir.architecture != "llama3":
+            raise ValueError(f"expected llama3 IR, got {ir.architecture!r}")
         with torch.no_grad():
             embedding_weight = self._optional_dense_weight(
-                fetched.weights, "tok_embeddings.weight"
+                ir.weights, "token_embedding.weight"
             )
             if embedding_weight is None:
-                embedding_weight = self._dense_weight(fetched.weights, "output.weight")
+                embedding_weight = self._dense_weight(ir.weights, "lm_head.weight")
             self._copy_param(self.tok_emb.weight, embedding_weight)
 
             for layer_idx, module in enumerate(self.trf_blocks):
@@ -546,59 +495,59 @@ class Llama3Model(nn.Module):
                 self._load_linear_weight(
                     block.att,
                     "W_query",
-                    self._weight(fetched.weights, f"{prefix}.attention.wq.weight"),
+                    self._weight(ir.weights, f"{prefix}.attention.q_proj.weight"),
                 )
                 self._load_linear_weight(
                     block.att,
                     "W_key",
-                    self._weight(fetched.weights, f"{prefix}.attention.wk.weight"),
+                    self._weight(ir.weights, f"{prefix}.attention.k_proj.weight"),
                 )
                 self._load_linear_weight(
                     block.att,
                     "W_value",
-                    self._weight(fetched.weights, f"{prefix}.attention.wv.weight"),
+                    self._weight(ir.weights, f"{prefix}.attention.v_proj.weight"),
                 )
                 self._load_linear_weight(
                     block.att,
                     "out_proj",
-                    self._weight(fetched.weights, f"{prefix}.attention.wo.weight"),
+                    self._weight(ir.weights, f"{prefix}.attention.o_proj.weight"),
                 )
 
                 self._copy_param(
                     block.norm1.weight,
-                    self._dense_weight(
-                        fetched.weights, f"{prefix}.attention_norm.weight"
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.input_norm.weight"),
                 )
                 self._copy_param(
                     block.norm2.weight,
-                    self._dense_weight(fetched.weights, f"{prefix}.ffn_norm.weight"),
+                    self._dense_weight(
+                        ir.weights, f"{prefix}.post_attention_norm.weight"
+                    ),
                 )
 
                 self._load_linear_weight(
                     block.ff,
                     "fc1",
-                    self._weight(fetched.weights, f"{prefix}.feed_forward.w1.weight"),
+                    self._weight(ir.weights, f"{prefix}.feed_forward.gate_proj.weight"),
                 )
                 self._load_linear_weight(
                     block.ff,
                     "fc2",
-                    self._weight(fetched.weights, f"{prefix}.feed_forward.w3.weight"),
+                    self._weight(ir.weights, f"{prefix}.feed_forward.up_proj.weight"),
                 )
                 self._load_linear_weight(
                     block.ff,
                     "fc3",
-                    self._weight(fetched.weights, f"{prefix}.feed_forward.w2.weight"),
+                    self._weight(ir.weights, f"{prefix}.feed_forward.down_proj.weight"),
                 )
 
             self._copy_param(
                 self.final_norm.weight,
-                self._dense_weight(fetched.weights, "norm.weight"),
+                self._dense_weight(ir.weights, "final_norm.weight"),
             )
             self._load_linear_weight(
                 self,
                 "out_head",
-                self._weight(fetched.weights, "output.weight"),
+                self._weight(ir.weights, "lm_head.weight"),
             )
 
         self.eval()
@@ -618,8 +567,7 @@ class Llama3Model(nn.Module):
 
     @staticmethod
     def _optional_weight(weights: dict[str, Any], name: str) -> torch.Tensor | None:
-        value = Llama3Model._optional_dense_weight(weights, name)
-        return value
+        return Llama3Model._optional_dense_weight(weights, name)
 
     @staticmethod
     def _optional_dense_weight(
@@ -637,8 +585,7 @@ class Llama3Model(nn.Module):
                 return value
             if isinstance(value, QuantizedWeight):
                 raise TypeError(
-                    f"weight {candidate!r} is quantized; use "
-                    "load_quantized_fetched_model"
+                    f"weight {candidate!r} is quantized; use load_quantized_ir_weights"
                 )
         return None
 
@@ -692,47 +639,7 @@ class Llama3Model(nn.Module):
 
     @staticmethod
     def _weight_names(name: str) -> list[str]:
-        names = [name]
-        exact_aliases = {
-            "tok_embeddings.weight": "model.embed_tokens.weight",
-            "output.weight": "lm_head.weight",
-            "norm.weight": "model.norm.weight",
-        }
-        if name in exact_aliases:
-            names.append(exact_aliases[name])
-        if name == "output.weight":
-            names.append("model.embed_tokens.weight")
-
-        prefix = "layers."
-        if name.startswith(prefix):
-            parts = name.split(".")
-            if len(parts) == 5:
-                _, layer_idx, group, weight_name, suffix = parts
-                if suffix == "weight":
-                    layer_aliases = {
-                        ("attention", "wq"): "self_attn.q_proj",
-                        ("attention", "wk"): "self_attn.k_proj",
-                        ("attention", "wv"): "self_attn.v_proj",
-                        ("attention", "wo"): "self_attn.o_proj",
-                        ("feed_forward", "w1"): "mlp.gate_proj",
-                        ("feed_forward", "w2"): "mlp.down_proj",
-                        ("feed_forward", "w3"): "mlp.up_proj",
-                    }
-                    hf_name = layer_aliases.get((group, weight_name))
-                    if hf_name is not None:
-                        names.append(f"model.layers.{layer_idx}.{hf_name}.weight")
-            elif len(parts) == 4:
-                _, layer_idx, weight_name, suffix = parts
-                if suffix == "weight":
-                    layer_norm_aliases = {
-                        "attention_norm": "input_layernorm",
-                        "ffn_norm": "post_attention_layernorm",
-                    }
-                    hf_name = layer_norm_aliases.get(weight_name)
-                    if hf_name is not None:
-                        names.append(f"model.layers.{layer_idx}.{hf_name}.weight")
-
-        return names
+        return [name]
 
 
 class Llama3Tokenizer:

@@ -4,8 +4,6 @@ import pytest
 import torch
 from torch import nn
 
-torch = pytest.importorskip("torch")
-
 from ..LLLM.llama2 import (
     Llama2Config,
     Llama2FeedForward,
@@ -13,11 +11,10 @@ from ..LLLM.llama2 import (
     Llama2MultiHeadAttention,
     Llama2Tokenizer,
     Llama2TransformerBlock,
-    SiLU,
-    llama2_config_from_fetched,
 )
 from ..LLLM.kv_cache import KVCache
 from ..LLLM.norm import RMSNorm
+from ..LLLM.hf_loader import model_ir_from_hf
 
 
 def _tiny_llama_config() -> Llama2Config:
@@ -95,16 +92,6 @@ class FakeSentencePieceProcessor:
         return "".join(chr(idx) for idx in ids)
 
 
-def test_silu_matches_manual_swish_computation() -> None:
-    activation = SiLU()
-    inputs = torch.tensor([-2.0, -0.5, 0.0, 0.5, 2.0])
-
-    outputs = activation(inputs)
-    expected_outputs = inputs * torch.sigmoid(inputs)
-
-    torch.testing.assert_close(outputs, expected_outputs)
-
-
 def test_feed_forward_matches_manual_swiglu_computation() -> None:
     feed_forward = Llama2FeedForward(emb_dim=2, hidden_dim=3, dtype=None)
 
@@ -142,7 +129,7 @@ def test_feed_forward_matches_manual_swiglu_computation() -> None:
 
     x_fc1 = inputs @ feed_forward.fc1.weight.T
     x_fc2 = inputs @ feed_forward.fc2.weight.T
-    hidden = (x_fc1 * torch.sigmoid(x_fc1)) * x_fc2
+    hidden = torch.nn.functional.silu(x_fc1) * x_fc2
     expected_outputs = hidden @ feed_forward.fc3.weight.T
 
     torch.testing.assert_close(outputs, expected_outputs)
@@ -310,8 +297,9 @@ def test_transformer_block_applies_both_residual_paths() -> None:
     torch.testing.assert_close(outputs, expected_outputs)
 
 
-def test_llama_config_from_fetched_translates_hugging_face_names() -> None:
-    cfg = llama2_config_from_fetched(_tiny_hf_llama_config())
+def test_llama_config_from_ir_translates_hugging_face_names() -> None:
+    ir = model_ir_from_hf(_tiny_hf_llama_config(), {}, architecture="llama2")
+    cfg = Llama2Model.config_from_ir(ir)
 
     assert cfg == {
         "vocab_size": 5,
@@ -325,15 +313,19 @@ def test_llama_config_from_fetched_translates_hugging_face_names() -> None:
     }
 
 
-def test_llama_config_from_fetched_rejects_missing_or_wrong_types() -> None:
+def test_llama_config_from_ir_rejects_missing_or_wrong_types() -> None:
     with pytest.raises(ValueError, match="vocab_size"):
-        llama2_config_from_fetched({})
+        Llama2Model.config_from_ir(
+            model_ir_from_hf({"model_type": "llama"}, {}, architecture="llama2")
+        )
 
     bad_config = _tiny_hf_llama_config()
-    bad_config["rope_theta"] = 10000
+    bad_config["rope_theta"] = "10000"
 
     with pytest.raises(ValueError, match="rope_theta"):
-        llama2_config_from_fetched(bad_config)
+        Llama2Model.config_from_ir(
+            model_ir_from_hf(bad_config, {}, architecture="llama2")
+        )
 
 
 def test_llama_forward_matches_manual_computation_without_transformer_blocks() -> None:

@@ -1,6 +1,4 @@
-"""
-Reusable key/value cache primitives for autoregressive attention.
-"""
+"""Reusable key/value cache primitives for autoregressive attention."""
 
 from __future__ import annotations
 
@@ -16,10 +14,6 @@ class KVCache:
     """
 
     def __init__(self, max_seq_len: int | None = None) -> None:
-        """
-        max_seq_len control cache maximum lenght.
-        if none, cache have no maximum lenght and grow endlessly.
-        """
         self.max_seq_len = max_seq_len
         self._layers: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -69,6 +63,7 @@ class KVCache:
 
     @staticmethod
     def _validate_new_tensors(keys: torch.Tensor, values: torch.Tensor) -> None:
+        """Sanity check before adding tensors to KV cache."""
         if keys.ndim != 4 or values.ndim != 4:
             raise ValueError("KV cache tensors must be 4D [batch, heads, tokens, dim]")
         if tuple(keys.shape) != tuple(values.shape):
@@ -87,6 +82,10 @@ class KVCache:
         keys_new: torch.Tensor,
         values_new: torch.Tensor,
     ) -> None:
+        """
+        Used to validate cached tensor and new tensor before concatenate the
+        whole and giving it back to the model.
+        """
         if (
             keys_cached.device != keys_new.device
             or values_cached.device != values_new.device

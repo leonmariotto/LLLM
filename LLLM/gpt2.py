@@ -1,11 +1,9 @@
-"""
-GPT2 (Generative Pretrained Tranformer)
-"""
+"""GPT2 (Generative Pretrained Tranformer)"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast, TypeAlias, Dict, Optional
-from typing import Any, TypedDict, Literal
+from typing import TypedDict, Literal
 
 import torch
 from torch import nn
@@ -18,7 +16,7 @@ from .norm import LayerNorm
 from .rope import apply_rope, precompute_rope_cache
 
 if TYPE_CHECKING:
-    from .fetch import FetchedModel
+    from .model_ir import ModelIR, ModelWeightsIR
 
 PositionalEncoding = Literal["gpt2", "rope"]
 
@@ -32,53 +30,6 @@ class GPT2Config(TypedDict):
     drop_rate: float
     qkv_bias: bool
     positional_encoding: PositionalEncoding
-
-
-def gpt2_config_from_fetched(config: dict[str, Any]) -> GPT2Config:
-    """Translate a Hugging Face GPT2 config into LLLM GPT2Config.
-    GPT2_CONFIG_124M: GPT2Config = {
-        "vocab_size": 50257,  # Vocabulary size
-        "context_length": 1024,  # Context length
-        "emb_dim": 768,  # Embedding dimension
-        "n_heads": 12,  # Number of attention heads
-        "n_layers": 12,  # Number of layers
-        "drop_rate": 0.1,  # Dropout rate
-        "qkv_bias": True,  # Query-Key-Value bias: set to true as pre-trained use it
-        "positional_encoding": "gpt2",
-    }
-
-    GPT2_CONFIG_355M: GPT2Config = {
-        "vocab_size": 50257,  # Vocabulary size
-        "context_length": 1024,  # Context length
-        "emb_dim": 1024,  # Embedding dimension
-        "n_heads": 16,  # Number of attention heads
-        "n_layers": 24,  # Number of layers
-        "drop_rate": 0.0,  # Dropout rate
-        "qkv_bias": True,  # Query-Key-Value bias: set to true as pre-trained use it
-        "positional_encoding": "gpt2",
-    }
-    """
-
-    def _int_config(
-        config: dict[str, Any], key: str, *, fallback_key: str | None = None
-    ) -> int:
-        value = config.get(key)
-        if value is None and fallback_key is not None:
-            value = config.get(fallback_key)
-        if not isinstance(value, int):
-            raise ValueError(f"config value {key!r} must be an int")
-        return value
-
-    return {
-        "vocab_size": _int_config(config, "vocab_size"),
-        "context_length": _int_config(config, "n_ctx", fallback_key="n_positions"),
-        "emb_dim": _int_config(config, "n_embd"),
-        "n_heads": _int_config(config, "n_head"),
-        "n_layers": _int_config(config, "n_layer"),
-        "drop_rate": float(config.get("resid_pdrop", 0.0)),
-        "qkv_bias": True,  # Always use bias.
-        "positional_encoding": "gpt2",  # No RoPE in GPT2.
-    }
 
 
 class GPT2Model(nn.Module):
@@ -116,38 +67,67 @@ class GPT2Model(nn.Module):
         self.final_norm = LayerNorm(cfg["emb_dim"])
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
 
-    def load_fetched_model(self, fetched: FetchedModel) -> None:
+    @staticmethod
+    def config_from_ir(ir: ModelIR) -> GPT2Config:
         """
-        Copy Hugging Face GPT2 tensors into this model.
+        Build a model configuration from normalized IR.
 
-        Hugging Face GPT2 stores linear projection weights in Conv1D layout
+        Args:
+            ir: Normalized model IR that supplies configuration
+                and canonical weights.
+
+        Returns:
+            Configuration dictionary accepted by the model constructor.
+        """
+        if ir.architecture != "gpt2":
+            raise ValueError(f"expected gpt2 IR, got {ir.architecture!r}")
+        positional_encoding = ir.config.get("positional_encoding", "gpt2")
+        if positional_encoding not in {"gpt2", "rope"}:
+            raise ValueError(
+                "IR config field 'positional_encoding' must be gpt2 or rope"
+            )
+        return {
+            "vocab_size": ir.config.require_int("vocab_size"),
+            "context_length": ir.config.require_int("context_length"),
+            "emb_dim": ir.config.require_int("hidden_size"),
+            "n_heads": ir.config.require_int("num_attention_heads"),
+            "n_layers": ir.config.require_int("num_hidden_layers"),
+            "drop_rate": float(ir.config.get("dropout", 0.0)),
+            "qkv_bias": bool(ir.config.get("qkv_bias", True)),
+            "positional_encoding": cast(PositionalEncoding, positional_encoding),
+        }
+
+    def load_ir_weights(self, ir: ModelIR) -> None:
+        """
+        Copy canonical GPT2 IR tensors into this model.
+
+        GPT2 stores linear projection weights in Conv1D layout
         ``[input_dim, output_dim]``. PyTorch Linear expects
         ``[output_dim, input_dim]``, so projection weights are transposed while
         biases are copied as-is.
         """
-        if fetched.model_type != "gpt2":
-            raise NotImplementedError(f"unsupported model_type: {fetched.model_type}")
+        if ir.architecture != "gpt2":
+            raise ValueError(f"expected gpt2 IR, got {ir.architecture!r}")
+        weights = ir.weights
         with torch.no_grad():
             self._copy_param(
-                self.tok_emb.weight, self._weight(fetched.weights, "wte.weight")
+                self.tok_emb.weight, self._weight(weights, "token_embedding.weight")
             )
             if self.pos_emb is None:
-                raise ValueError(
-                    "GPT2 fetched.weights require absolute position embeddings"
-                )
+                raise ValueError("GPT2 IR weights require absolute position embeddings")
             self._copy_param(
-                self.pos_emb.weight, self._weight(fetched.weights, "wpe.weight")
+                self.pos_emb.weight, self._weight(weights, "position_embedding.weight")
             )
 
             for layer_idx, module in enumerate(self.trf_blocks):
                 block = cast(GPT2TransformerBlock, module)
-                prefix = f"h.{layer_idx}"
+                prefix = f"layers.{layer_idx}"
 
                 q_weight, k_weight, v_weight = self._weight(
-                    fetched.weights, f"{prefix}.attn.c_attn.weight"
+                    weights, f"{prefix}.attention.qkv_proj.weight"
                 ).chunk(3, dim=1)
                 q_bias, k_bias, v_bias = self._weight(
-                    fetched.weights, f"{prefix}.attn.c_attn.bias"
+                    weights, f"{prefix}.attention.qkv_proj.bias"
                 ).chunk(3, dim=0)
 
                 self._copy_param(block.att.W_query.weight, q_weight.T)
@@ -159,57 +139,54 @@ class GPT2Model(nn.Module):
 
                 self._copy_param(
                     block.att.out_proj.weight,
-                    self._weight(fetched.weights, f"{prefix}.attn.c_proj.weight").T,
+                    self._weight(weights, f"{prefix}.attention.o_proj.weight").T,
                 )
                 self._copy_param(
                     block.att.out_proj.bias,
-                    self._weight(fetched.weights, f"{prefix}.attn.c_proj.bias"),
+                    self._weight(weights, f"{prefix}.attention.o_proj.bias"),
                 )
 
                 self._copy_param(
                     block.norm1.scale,
-                    self._weight(fetched.weights, f"{prefix}.ln_1.weight"),
+                    self._weight(weights, f"{prefix}.input_norm.weight"),
                 )
                 self._copy_param(
                     block.norm1.shift,
-                    self._weight(fetched.weights, f"{prefix}.ln_1.bias"),
+                    self._weight(weights, f"{prefix}.input_norm.bias"),
                 )
                 self._copy_param(
                     block.norm2.scale,
-                    self._weight(fetched.weights, f"{prefix}.ln_2.weight"),
+                    self._weight(weights, f"{prefix}.post_attention_norm.weight"),
                 )
                 self._copy_param(
                     block.norm2.shift,
-                    self._weight(fetched.weights, f"{prefix}.ln_2.bias"),
+                    self._weight(weights, f"{prefix}.post_attention_norm.bias"),
                 )
 
-                fc = cast(nn.Linear, block.ff.layers[0])
-                proj = cast(nn.Linear, block.ff.layers[2])
                 self._copy_param(
-                    fc.weight,
-                    self._weight(fetched.weights, f"{prefix}.mlp.c_fc.weight").T,
+                    block.ff.fc1.weight,
+                    self._weight(weights, f"{prefix}.feed_forward.up_proj.weight").T,
                 )
                 self._copy_param(
-                    fc.bias, self._weight(fetched.weights, f"{prefix}.mlp.c_fc.bias")
+                    block.ff.fc1.bias,
+                    self._weight(weights, f"{prefix}.feed_forward.up_proj.bias"),
                 )
                 self._copy_param(
-                    proj.weight,
-                    self._weight(fetched.weights, f"{prefix}.mlp.c_proj.weight").T,
+                    block.ff.fc2.weight,
+                    self._weight(weights, f"{prefix}.feed_forward.down_proj.weight").T,
                 )
                 self._copy_param(
-                    proj.bias,
-                    self._weight(fetched.weights, f"{prefix}.mlp.c_proj.bias"),
+                    block.ff.fc2.bias,
+                    self._weight(weights, f"{prefix}.feed_forward.down_proj.bias"),
                 )
 
             self._copy_param(
-                self.final_norm.scale, self._weight(fetched.weights, "ln_f.weight")
+                self.final_norm.scale, self._weight(weights, "final_norm.weight")
             )
             self._copy_param(
-                self.final_norm.shift, self._weight(fetched.weights, "ln_f.bias")
+                self.final_norm.shift, self._weight(weights, "final_norm.bias")
             )
-            self._copy_param(
-                self.out_head.weight, self._lm_head_weight(fetched.weights)
-            )
+            self._copy_param(self.out_head.weight, self._lm_head_weight(weights))
 
         self.eval()
 
@@ -227,21 +204,31 @@ class GPT2Model(nn.Module):
         param.copy_(value)
 
     @staticmethod
-    def _lm_head_weight(weights: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _lm_head_weight(weights: ModelWeightsIR) -> torch.Tensor:
         if "lm_head.weight" in weights:
-            return weights["lm_head.weight"]
-        return GPT2Model._weight(weights, "wte.weight")
+            value = weights["lm_head.weight"]
+            if isinstance(value, torch.Tensor):
+                return value
+        return GPT2Model._weight(weights, "token_embedding.weight")
 
     @staticmethod
-    def _weight(weights: dict[str, torch.Tensor], name: str) -> torch.Tensor:
+    def _weight(weights: ModelWeightsIR, name: str) -> torch.Tensor:
         if name in weights:
-            return weights[name]
-        prefixed_name = f"transformer.{name}"
-        if prefixed_name in weights:
-            return weights[prefixed_name]
-        raise KeyError(f"missing GPT2 weight {name!r} or {prefixed_name!r}")
+            value = weights[name]
+            if isinstance(value, torch.Tensor):
+                return value
+            raise TypeError(f"GPT2 weight {name!r} is quantized")
+        raise KeyError(f"missing GPT2 IR weight {name!r}")
 
     def forward(self, in_idx: torch.Tensor, pos: int | None = None) -> torch.Tensor:
+        """
+        Args:
+            in_idx: Token ids with shape ``[batch, tokens]``.
+            pos: Optional starting token position used for RoPE.
+
+        Returns:
+            Logits with shape ``[batch, tokens, vocab_size]``.
+        """
         _, seq_len = in_idx.shape  # batch_size, seq_len
         tok_embeds = self.tok_emb(in_idx)
         if self.positional_encoding == "gpt2":
@@ -257,8 +244,7 @@ class GPT2Model(nn.Module):
         for blk in self.trf_blocks:
             x = blk(x, pos)
         x = self.final_norm(x)
-        logits = self.out_head(x)
-        return logits
+        return self.out_head(x)
 
 
 TokenId: TypeAlias = int
@@ -287,29 +273,50 @@ class GPT2Tokenizer:
 
     @property
     def vocabulary_size(self) -> int:
-        # Surface encoder capacity directly from tiktoken for quick inspection.
+        """Surface encoder capacity directly from tiktoken for quick inspection."""
         return self.tiktok.n_vocab
 
     @property
     def eos_token_id(self) -> TokenId:
-        # Keep the canonical special token id accessible to callers and tests.
+        """Keep the canonical special token id accessible to callers and tests."""
         return self.tiktok.eot_token
 
     @property
     def special_tokens(self) -> set[str]:
+        """Return list of special token of the tokenizer."""
         return set(self.tiktok.special_tokens_set)
 
     def encode(self, in_str: str) -> list[TokenId]:
+        """
+        Encode text into token ids.
+
+        Args:
+            in_str: Input string to encode.
+
+        Returns:
+            Encoded token ids.
+        """
         return self.tiktok.encode(in_str, allowed_special="all")
-        # TODO should return tensor here ??
-        # encoded = tokenizer.encode(text, allowed_special={"<|endoftext|>"})
-        # encoded_tensor = torch.tensor(encoded).unsqueeze(0)  # add batch dimension
-        # return encoded_tensor
 
     def decode(self, in_tok: list[TokenId]) -> str:
+        """
+        Decode token ids into text.
+
+        Args:
+            in_tok: Token ids to decode.
+
+        Returns:
+            Decoded text.
+        """
         return self.tiktok.decode(in_tok)
 
     def token_count(self, in_str: str) -> int:
+        """
+        Implement token count behavior.
+
+        Args:
+            in_str: Input string to encode.
+        """
         return len(self.encode(in_str))
 
 
@@ -349,17 +356,6 @@ class GPT2MultiHeadAttention(nn.Module):
         use_rope: bool = False,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
-        """
-        - d_in: embedding size (size of embedded vector, 1 embedded vector per token)
-        - d_out context vector size.
-        - context_lenght: correspond to the number token used to compute a context
-        vector. In the case of a DataSet/DataLoader setup, it will correspond
-        to the window_size.
-        - droput: for training purpose, it is possible to hide randomly some attention
-        weight before computing the context vector. dropout value is the probability
-        for a weight to be zeroed.
-        - num_head: number of head.
-        """
         super().__init__()
 
         assert num_heads != 0, "num_head shall not be 0"
@@ -392,12 +388,12 @@ class GPT2MultiHeadAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, pos: int | None = None) -> torch.Tensor:
         """
-        forward method is called by the nn.Module __call__ method.
-        x is expected to be a batch of tensor of d_in size.
-        (number of batch, number of token, embedding size)
-        return a tensor of d_out size.
+        Args:
+            x: Hidden states with shape ``[batch, tokens, d_in]``.
+            pos: Optional starting token position used for RoPE.
 
-        pos: contains the (context-wide relative) starting index of the sequence.
+        Returns:
+            Hidden states with shape ``[batch, tokens, d_out]``.
         """
         b, num_tokens, d_in = x.shape
 
@@ -412,21 +408,6 @@ class GPT2MultiHeadAttention(nn.Module):
         keys_new = self.W_key(x)  # Shape: (b, num_tokens, d_out)
         values_new = self.W_value(x)
         queries = self.W_query(x)
-
-        # NOTE on tensor.view and tensor.transpose methods.
-        # Tensor view method reshape a tensor, without moving elements in memory.
-        # Whereas transpose change how dimensions are indexed.
-        # So, for example :
-        #     tensor([[0, 1, 2],
-        #         [3, 4, 5]])
-        # y.view(3,2)
-        #     tensor([[0, 1],
-        #         [2, 3],
-        #         [4, 5]])
-        # y.transpose(0, 1)
-        #     tensor([[0, 3],
-        #             [1, 4],
-        #             [2, 5]])
 
         # We implicitly split the matrix by adding a `num_heads` dimension
         # Unroll last dim: (b, num_tokens, d_out) -> (b, num_tokens, num_heads, head_dim)
@@ -444,7 +425,6 @@ class GPT2MultiHeadAttention(nn.Module):
         if self.use_rope:
             # Add RoPE after Q/K projection and head reshaping and before computing
             # attention scores.
-            # TODO somewhat messy, clean it up.
             if pos is None:
                 position_ids = torch.arange(num_tokens, device=x.device)
             else:
@@ -477,56 +457,32 @@ class GPT2MultiHeadAttention(nn.Module):
         attn_weights = torch.softmax(attn_scores / keys.shape[-1] ** 0.5, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
-        # Shape: (b, num_tokens, num_heads, head_dim)
         context_vec = (attn_weights @ values).transpose(1, 2)
 
         # Combine heads, where self.d_out = self.num_heads * self.head_dim
         context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
-        context_vec = self.out_proj(context_vec)  # optional projection
-
-        return context_vec
-
-
-# TODO use torch GeLu and remove this, or move some in comments.
-class GELU(nn.Module):
-    """
-    Implement the GeLu activation function approximation (computationally cheaper).
-    An optimized version is present torch.nn.functional.gelu but keep it here
-    for illustration purpose.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (
-            0.5
-            * x
-            * (
-                1
-                + torch.tanh(
-                    torch.sqrt(torch.tensor(2.0 / torch.pi))
-                    * (x + 0.044715 * torch.pow(x, 3))
-                )
-            )
-        )
+        return self.out_proj(context_vec)  # optional projection
 
 
 class GPT2FeedForward(nn.Module):
-    """
-    FeedForward: expansion -> activation (GeLu) -> contraction.
-    """
+    """FeedForward: expansion -> activation (GeLu) -> contraction."""
 
     def __init__(self, embedded_dimension: int, expansion_factor: int = 4) -> None:
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(embedded_dimension, expansion_factor * embedded_dimension),
-            GELU(),
-            nn.Linear(expansion_factor * embedded_dimension, embedded_dimension),
-        )
+        self.fc1 = nn.Linear(embedded_dimension, expansion_factor * embedded_dimension)
+        self.fc2 = nn.Linear(expansion_factor * embedded_dimension, embedded_dimension)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+        """
+        Args:
+            x: Hidden states with shape ``[..., emb_dim]``.
+
+        Returns:
+            Hidden states with shape ``[..., emb_dim]``.
+        """
+        x = self.fc1(x)
+        x = nn.functional.gelu(x, approximate="tanh")
+        return self.fc2(x)
 
 
 class GPT2TransformerBlock(nn.Module):
@@ -566,6 +522,15 @@ class GPT2TransformerBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, pos: int | None = None) -> torch.Tensor:
         # Shortcut connection for attention block
+        """
+        Args:
+            x: Hidden states with shape ``[batch, tokens, emb_dim]``.
+            pos: Optional starting token position used for RoPE
+                when the block is configured with RoPE.
+
+        Returns:
+            Hidden states with shape ``[batch, tokens, emb_dim]``.
+        """
         shortcut = x
         x = self.norm1(x)
         x = self.att(x, pos)  # Shape [batch_size, num_tokens, emb_size]
@@ -577,6 +542,4 @@ class GPT2TransformerBlock(nn.Module):
         x = self.norm2(x)
         x = self.ff(x)
         x = self.drop_shortcut(x)
-        x = x + shortcut  # Add the original input back
-
-        return x
+        return x + shortcut  # Add the original input back

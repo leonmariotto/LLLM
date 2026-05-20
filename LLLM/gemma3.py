@@ -1,5 +1,8 @@
 """
-Gemma3
+Gemma3.
+
+- GQA attention with sliding window mechanism.
+- Support quantization and KV cache.
 """
 
 from __future__ import annotations
@@ -13,12 +16,18 @@ from tokenizers import Tokenizer
 
 from .rope import precompute_rope_cache, apply_rope
 from .kv_cache import KVCache
+from .quantization import QuantizedLinear, QuantizedWeight, WeightMode
 
 if TYPE_CHECKING:
-    from .fetch import FetchedModel
+    from .model_ir import ModelIR
 
 
 class Gemma3Config(TypedDict):
+    """
+    Internal configuration, obtained from ModelIR intermediate
+    representation with Gemmma3.config_from_ir method.
+    """
+
     vocab_size: int
     context_length: int
     emb_dim: int
@@ -40,134 +49,6 @@ class Gemma3Config(TypedDict):
     dtype: torch.dtype
 
 
-def gemma3_config_from_fetched(config: dict[str, Any]) -> Gemma3Config:
-    """
-    Translate Hugging Face Gemma3 config data into this project's text config.
-
-    Input can be either a text-only ``Gemma3TextConfig`` dict or a multimodal
-    ``Gemma3Config`` dict containing ``text_config``.  The returned config keeps
-    only the language-model fields used here: GQA sizes, independent attention
-    ``head_dim``, local/global RoPE bases, sliding/full layer types, Gemma RMSNorm
-    epsilon, attention softcapping, and final-logit softcapping.
-    """
-    text_config = config.get("text_config")
-    if isinstance(text_config, dict):
-        config = cast(dict[str, Any], text_config)
-
-    def _float_config(
-        config: dict[str, Any],
-        key: str,
-        *,
-        fallback_key: str | None = None,
-        default: float | None = None,
-        allow_int: bool = False,
-    ) -> float:
-        value = config.get(key)
-        if value is None and fallback_key is not None:
-            value = config.get(fallback_key)
-        if value is None and default is not None:
-            return default
-        if allow_int and isinstance(value, int):
-            return float(value)
-        if not isinstance(value, float):
-            raise ValueError(f"config value {key!r} must be an float")
-        return value
-
-    def _hidden_dim_config(config: dict[str, Any]) -> int:
-        intermediate_size = config.get("intermediate_size")
-        if isinstance(intermediate_size, int):
-            return intermediate_size
-
-        dim = _int_config(config, "dim")
-        multiple_of = _int_config(config, "multiple_of")
-        hidden_dim = int(2 * (4 * dim) / 3)
-        return multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
-    def _int_config(
-        config: dict[str, Any], key: str, *, fallback_key: str | None = None
-    ) -> int:
-        value = config.get(key)
-        if value is None and fallback_key is not None:
-            value = config.get(fallback_key)
-        if not isinstance(value, int):
-            raise ValueError(f"config value {key!r} must be an int")
-        return value
-
-    def _layer_types_config(config: dict[str, Any], key: str) -> list[str]:
-        value = config.get(key)
-        if value is None:
-            return ["sliding_attention"] * _int_config(
-                config, "num_hidden_layers", fallback_key="n_layers"
-            )
-        if not isinstance(value, list):
-            raise ValueError(f"config value {key!r} must be a list")
-        return cast(list[str], value)
-
-    def _optional_float_config(config: dict[str, Any], key: str) -> float | None:
-        value = config.get(key)
-        if value is None:
-            return None
-        if isinstance(value, int):
-            return float(value)
-        if not isinstance(value, float):
-            raise ValueError(f"config value {key!r} must be a float or None")
-        return value
-
-    def _rope_base_config(
-        config: dict[str, Any], layer_type: str, default: float
-    ) -> float:
-        rope_parameters = config.get("rope_parameters")
-        if isinstance(rope_parameters, dict):
-            rope_parameters = cast(dict[str, Any], rope_parameters)
-            layer_parameters = rope_parameters.get(layer_type)
-            if isinstance(layer_parameters, dict):
-                layer_parameters = cast(dict[str, Any], layer_parameters)
-                value = layer_parameters.get("rope_theta")
-                if isinstance(value, int):
-                    return float(value)
-                if isinstance(value, float):
-                    return value
-        return _float_config(config, "rope_theta", default=default, allow_int=True)
-
-    def _bool_config(config: dict[str, Any], key: str, *, default: bool) -> bool:
-        value = config.get(key, default)
-        if not isinstance(value, bool):
-            raise ValueError(f"config value {key!r} must be a bool")
-        return value
-
-    return {
-        "vocab_size": _int_config(config, "vocab_size"),
-        "context_length": _int_config(
-            config, "max_position_embeddings", fallback_key="max_seq_len"
-        ),
-        "emb_dim": _int_config(config, "hidden_size", fallback_key="dim"),
-        "n_heads": _int_config(config, "num_attention_heads", fallback_key="n_heads"),
-        "n_kv_groups": _int_config(
-            config, "num_key_value_heads", fallback_key="n_heads"
-        ),
-        "sliding_window": _int_config(config, "sliding_window"),
-        "n_layers": _int_config(config, "num_hidden_layers", fallback_key="n_layers"),
-        "hidden_dim": _hidden_dim_config(config),
-        "head_dim": _int_config(config, "head_dim"),
-        "rope_base": _rope_base_config(config, "full_attention", 1000000.0),
-        "rope_local_base": _rope_base_config(config, "sliding_attention", 10000.0),
-        "rope_interleaved": _bool_config(config, "rope_interleaved", default=False),
-        "layer_types": _layer_types_config(config, "layer_types"),
-        "rms_norm_eps": _float_config(config, "rms_norm_eps", default=1e-6),
-        "query_pre_attn_scalar": _int_config(
-            config, "query_pre_attn_scalar", fallback_key="head_dim"
-        ),
-        "final_logit_softcapping": _optional_float_config(
-            config, "final_logit_softcapping"
-        ),
-        "attn_logit_softcapping": _optional_float_config(
-            config, "attn_logit_softcapping"
-        ),
-        "attention_bias": _bool_config(config, "attention_bias", default=False),
-        "dtype": torch.float32,
-    }
-
-
 class Gemma3FeedForward(nn.Module):
     """
     Gemma3 gated MLP block.
@@ -185,6 +66,13 @@ class Gemma3FeedForward(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, emb_dim, dtype=dtype, bias=False)
 
     def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: Hidden states with shape ``[..., emb_dim]``.
+
+        Returns:
+            Hidden states with shape ``[..., emb_dim]``.
+        """
         x_fc1 = self.fc1(x)
         x_fc2 = self.fc2(x)
         x = nn.functional.gelu(x_fc1, approximate="tanh") * x_fc2
@@ -210,6 +98,13 @@ class Gemma3RMSNorm(nn.Module):
         self.shift = nn.Parameter(torch.zeros(emb_dim)) if bias else None
 
     def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: Input tensor with shape ``[..., emb_dim]``.
+
+        Returns:
+            Normalized tensor with shape ``[..., emb_dim]``.
+        """
         input_dtype = x.dtype
         x_f = x.float()
         var = x_f.pow(2).mean(dim=-1, keepdim=True)
@@ -269,20 +164,6 @@ class Gemma3GroupedQueryAttention(nn.Module):
         attn_logit_softcapping: float | None = None,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
-        """
-        - d_in: embedding size (size of embedded vector, 1 embedded vector per token)
-        - d_out context vector size.
-        - context_lenght: correspond to the number token used to compute a context
-        vector. In the case of a DataSet/DataLoader setup, it will correspond
-        to the window_size.
-        - droput: for training purpose, it is possible to hide randomly some attention
-        weight before computing the context vector. dropout value is the probability
-        for a weight to be zeroed.
-        - num_head: number of head.
-        - num_kv_groups: for GQA, this is the number of KV matrice, that will be
-        distributed to heads.
-        - sliding window: number of recent key/value tokens visible to each query.
-        """
         super().__init__()
 
         assert num_heads != 0, "num_head shall not be 0"
@@ -334,17 +215,17 @@ class Gemma3GroupedQueryAttention(nn.Module):
         """
         Project tokens through Gemma3 grouped-query self-attention.
 
-        ``x`` has shape ``[batch, tokens, emb_dim]`` and the returned tensor has
+        ``x`` has shape ``[batch, tokens, d_in]`` and the returned tensor has
         shape ``[batch, tokens, d_out]``.  Unlike Llama in this repo, Gemma3's
         attention projection size is ``num_heads * head_dim``; ``head_dim`` is
         read from config and does not need to equal ``emb_dim // num_heads``.
 
         ``cos`` and ``sin`` are the precomputed RoPE cache selected by the
-        transformer block: local RoPE for sliding-window layers, global RoPE for
-        full-attention layers.  Query and key states are RMS-normalized before
-        RoPE, then attended with GQA expansion, causal masking, optional sliding
-        window masking, optional logit softcapping, and the Gemma3
-        ``query_pre_attn_scalar`` scale.
+        transformer block with shape ``[context_length, head_dim]``: local RoPE
+        for sliding-window layers, global RoPE for full-attention layers.  Query
+        and key states are RMS-normalized before RoPE, then attended with GQA
+        expansion, causal masking, optional sliding window masking, optional
+        logit softcapping, and the Gemma3 ``query_pre_attn_scalar`` scale.
         """
         b, num_tokens, d_in = x.shape
 
@@ -364,12 +245,7 @@ class Gemma3GroupedQueryAttention(nn.Module):
         keys_new = keys_new.view(b, num_tokens, self.num_kv_groups, self.head_dim)
         values_new = values_new.view(b, num_tokens, self.num_kv_groups, self.head_dim)
 
-        # Transpose:
-        #   (b, num_tokens, num_heads, head_dim) ->
-        #       (b, num_heads, num_tokens, head_dim)
         queries = queries.transpose(1, 2)
-        #   (b, num_tokens, num_kv_groups, head_dim) ->
-        #       (b, num_kv_groups, num_tokens, head_dim)
         keys_new = keys_new.transpose(1, 2)
         values_new = values_new.transpose(1, 2)
 
@@ -422,12 +298,7 @@ class Gemma3GroupedQueryAttention(nn.Module):
             assert layer_idx is not None
             keys, values = kv_cache.update(layer_idx, keys_new, values_new)
 
-        # Expand keys and values to match the number of heads
-        # Shape: (b, num_heads, num_tokens, head_dim)
-        # For example, before repeat_interleave along dim=1 (query groups):
-        #   [K1, K2]
-        # After repeat_interleave (each query group is repeated group_size times):
-        #   [K1, K1, K2, K2]
+        # Expand grouped K/V heads to match query heads.
         keys = keys.repeat_interleave(self.kv_group_size, dim=1)
         values = values.repeat_interleave(self.kv_group_size, dim=1)
 
@@ -472,14 +343,11 @@ class Gemma3GroupedQueryAttention(nn.Module):
         )
         attn_weights = self.dropout(attn_weights)
 
-        # Shape: (b, num_tokens, num_heads, head_dim)
         context_vec = (attn_weights @ values).transpose(1, 2)
 
         # Combine heads, where self.d_out = self.num_heads * self.head_dim
         context_vec = context_vec.contiguous().view(b, num_tokens, self.q_size)
-        context_vec = self.out_proj(context_vec)  # optional projection
-
-        return context_vec
+        return self.out_proj(context_vec)  # optional projection
 
 
 class Gemma3TransformerBlock(nn.Module):
@@ -538,6 +406,26 @@ class Gemma3TransformerBlock(nn.Module):
         kv_cache: KVCache | None = None,
         layer_idx: int | None = None,
     ):
+        """
+        Args:
+            x: Hidden states with shape ``[batch, tokens, emb_dim]``.
+            cos_global: Global RoPE cosine cache with shape
+                ``[context_length, head_dim]``.
+            sin_global: Global RoPE sine cache with shape
+                ``[context_length, head_dim]``.
+            cos_local: Local RoPE cosine cache with shape
+                ``[context_length, head_dim]``.
+            sin_local: Local RoPE sine cache with shape
+                ``[context_length, head_dim]``.
+            pos: Optional starting token position used for RoPE
+                or cached decoding.
+            kv_cache: Optional key/value cache used
+                during autoregressive decoding.
+            layer_idx: Layer index used to read or update the cache.
+
+        Returns:
+            Hidden states with shape ``[batch, tokens, emb_dim]``.
+        """
         # Shortcut connection for attention block
         shortcut = x
         x = self.input_layernorm(x)
@@ -561,9 +449,7 @@ class Gemma3TransformerBlock(nn.Module):
         x_ffn = self.pre_feedforward_layernorm(x)
         x_ffn = self.ff(x_ffn)
         x_ffn = self.post_feedforward_layernorm(x_ffn)
-        x = shortcut + x_ffn
-
-        return x
+        return shortcut + x_ffn
 
 
 class Gemma3Model(nn.Module):
@@ -576,10 +462,8 @@ class Gemma3Model(nn.Module):
     precomputes separate local and global RoPE caches because Gemma3 alternates
     sliding-window and full-attention layers.
 
-    This class intentionally implements only the text decoder.  Multimodal
-    Gemma3 checkpoints can still provide compatible text weights under
-    ``model.language_model.*`` aliases, but image towers/projectors are outside
-    this model.
+    This class intentionally implements only the text decoder. Multimodal image
+    towers/projectors are outside this model and must be filtered by loaders.
     """
 
     rope_cos_global: torch.Tensor
@@ -587,7 +471,7 @@ class Gemma3Model(nn.Module):
     rope_cos_local: torch.Tensor
     rope_sin_local: torch.Tensor
 
-    def __init__(self, cfg: Gemma3Config):
+    def __init__(self, cfg: Gemma3Config, weight_mode: WeightMode = "dense"):
         super().__init__()
 
         assert (
@@ -596,6 +480,7 @@ class Gemma3Model(nn.Module):
         )
 
         self.context_length = cfg["context_length"]
+        self.weight_mode = weight_mode
         self.embedded_dim = cfg["emb_dim"]
         self.final_logit_softcapping = cfg["final_logit_softcapping"]
         self.tok_emb = nn.Embedding(
@@ -626,6 +511,52 @@ class Gemma3Model(nn.Module):
         self.register_buffer("rope_cos_local", cos_local, persistent=False)
         self.register_buffer("rope_sin_local", sin_local, persistent=False)
 
+    @staticmethod
+    def config_from_ir(ir: ModelIR) -> Gemma3Config:
+        """
+        Build a model configuration from normalized IR.
+
+        Args:
+            ir: Normalized model IR that supplies configuration
+                and canonical weights.
+
+        Returns:
+            Configuration dictionary accepted by the model constructor.
+        """
+        if ir.architecture != "gemma3":
+            raise ValueError(f"expected gemma3 IR, got {ir.architecture!r}")
+        layer_types = ir.config.get("layer_types")
+        if not isinstance(layer_types, list):
+            raise ValueError("IR config field 'layer_types' must be list[str]")
+        layer_types = cast(list[Any], layer_types)
+        if not all(isinstance(item, str) for item in layer_types):
+            raise ValueError("IR config field 'layer_types' must be list[str]")
+        return {
+            "vocab_size": ir.config.require_int("vocab_size"),
+            "context_length": ir.config.require_int("context_length"),
+            "emb_dim": ir.config.require_int("hidden_size"),
+            "n_heads": ir.config.require_int("num_attention_heads"),
+            "n_kv_groups": ir.config.require_int("num_key_value_heads"),
+            "sliding_window": ir.config.require_int("sliding_window"),
+            "n_layers": ir.config.require_int("num_hidden_layers"),
+            "hidden_dim": ir.config.require_int("intermediate_size"),
+            "head_dim": ir.config.require_int("head_dim"),
+            "rope_base": ir.config.require_float("rope_base"),
+            "rope_local_base": ir.config.require_float("rope_local_base"),
+            "rope_interleaved": bool(ir.config.get("rope_interleaved", False)),
+            "layer_types": cast(list[str], layer_types),
+            "rms_norm_eps": ir.config.require_float("rms_norm_eps"),
+            "query_pre_attn_scalar": ir.config.require_int("query_pre_attn_scalar"),
+            "final_logit_softcapping": ir.config.optional_float(
+                "final_logit_softcapping"
+            ),
+            "attn_logit_softcapping": ir.config.optional_float(
+                "attn_logit_softcapping"
+            ),
+            "attention_bias": bool(ir.config.get("attention_bias", False)),
+            "dtype": torch.float32,
+        }
+
     def forward(
         self,
         in_idx: torch.Tensor,
@@ -633,7 +564,17 @@ class Gemma3Model(nn.Module):
         *,
         kv_cache: KVCache | None = None,
     ):
-        # batch_size, seq_len = in_idx.shape
+        """
+        Args:
+            in_idx: Token ids with shape ``[batch, tokens]``.
+            pos: Optional starting token position used for RoPE
+                or cached decoding.
+            kv_cache: Optional key/value cache used during
+                autoregressive decoding.
+
+        Returns:
+            Logits with shape ``[batch, tokens, vocab_size]``.
+        """
         x = self.tok_emb(in_idx) * (self.embedded_dim**0.5)
         for layer_idx, module in enumerate(self.trf_blocks):
             block = cast(Gemma3TransformerBlock, module)
@@ -655,118 +596,123 @@ class Gemma3Model(nn.Module):
             logits = logits * self.final_logit_softcapping
         return logits
 
-    def load_fetched_model(self, fetched: FetchedModel) -> None:
+    def load_ir_weights(self, ir: ModelIR) -> None:
         """
-        Copy Gemma3 text weights from a fetched Hugging Face checkpoint.
+        Copy Gemma3 tensors from canonical IR.
 
-        Supports both text-only names such as ``model.layers.0.self_attn.q_proj``
-        and multimodal names such as
-        ``model.language_model.layers.0.self_attn.q_proj``.  Tied-output
-        checkpoints may omit ``lm_head.weight``; in that case the token embedding
-        weight is reused for ``out_head``.
+        Dense mode copies tensors into ``nn.Linear`` modules.  Quantized mode
+        installs ``QuantizedLinear`` for linear weights represented as
+        ``QuantizedWeight`` while dense tensors such as embeddings and norms are
+        still copied normally.
         """
+        if ir.architecture != "gemma3":
+            raise ValueError(f"expected gemma3 IR, got {ir.architecture!r}")
         with torch.no_grad():
             self._copy_param(
                 self.tok_emb.weight,
-                self._weight(fetched.weights, "tok_embeddings.weight"),
+                self._dense_weight(ir.weights, "token_embedding.weight"),
             )
 
             for layer_idx, module in enumerate(self.trf_blocks):
                 block = cast(Gemma3TransformerBlock, module)
                 prefix = f"layers.{layer_idx}"
-                self._copy_param(
-                    block.att.W_query.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention.wq.weight"),
+                self._load_linear_weight(
+                    block.att,
+                    "W_query",
+                    self._weight(ir.weights, f"{prefix}.attention.q_proj.weight"),
                 )
                 self._copy_optional_param(
                     block.att.W_query.bias,
                     self._optional_weight(
-                        fetched.weights, f"{prefix}.attention.wq.bias"
+                        ir.weights, f"{prefix}.attention.q_proj.bias"
                     ),
                 )
-                self._copy_param(
-                    block.att.W_key.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention.wk.weight"),
+                self._load_linear_weight(
+                    block.att,
+                    "W_key",
+                    self._weight(ir.weights, f"{prefix}.attention.k_proj.weight"),
                 )
                 self._copy_optional_param(
                     block.att.W_key.bias,
                     self._optional_weight(
-                        fetched.weights, f"{prefix}.attention.wk.bias"
+                        ir.weights, f"{prefix}.attention.k_proj.bias"
                     ),
                 )
-                self._copy_param(
-                    block.att.W_value.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention.wv.weight"),
+                self._load_linear_weight(
+                    block.att,
+                    "W_value",
+                    self._weight(ir.weights, f"{prefix}.attention.v_proj.weight"),
                 )
                 self._copy_optional_param(
                     block.att.W_value.bias,
                     self._optional_weight(
-                        fetched.weights, f"{prefix}.attention.wv.bias"
+                        ir.weights, f"{prefix}.attention.v_proj.bias"
                     ),
                 )
-                self._copy_param(
-                    block.att.out_proj.weight,
-                    self._weight(fetched.weights, f"{prefix}.attention.wo.weight"),
+                self._load_linear_weight(
+                    block.att,
+                    "out_proj",
+                    self._weight(ir.weights, f"{prefix}.attention.o_proj.weight"),
                 )
                 self._copy_optional_param(
                     block.att.out_proj.bias,
                     self._optional_weight(
-                        fetched.weights, f"{prefix}.attention.wo.bias"
+                        ir.weights, f"{prefix}.attention.o_proj.bias"
                     ),
                 )
                 self._copy_param(
                     block.att.q_norm.scale,
-                    self._weight(fetched.weights, f"{prefix}.attention.q_norm.weight"),
+                    self._dense_weight(ir.weights, f"{prefix}.attention.q_norm.weight"),
                 )
                 self._copy_param(
                     block.att.k_norm.scale,
-                    self._weight(fetched.weights, f"{prefix}.attention.k_norm.weight"),
+                    self._dense_weight(ir.weights, f"{prefix}.attention.k_norm.weight"),
                 )
 
                 self._copy_param(
                     block.input_layernorm.scale,
-                    self._weight(fetched.weights, f"{prefix}.input_layernorm.weight"),
+                    self._dense_weight(ir.weights, f"{prefix}.input_norm.weight"),
                 )
                 self._copy_param(
                     block.post_attention_layernorm.scale,
-                    self._weight(
-                        fetched.weights,
-                        f"{prefix}.post_attention_layernorm.weight",
+                    self._dense_weight(
+                        ir.weights,
+                        f"{prefix}.post_attention_norm.weight",
                     ),
                 )
                 self._copy_param(
                     block.pre_feedforward_layernorm.scale,
-                    self._weight(
-                        fetched.weights,
-                        f"{prefix}.pre_feedforward_layernorm.weight",
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.pre_ffn_norm.weight"),
                 )
                 self._copy_param(
                     block.post_feedforward_layernorm.scale,
-                    self._weight(
-                        fetched.weights,
-                        f"{prefix}.post_feedforward_layernorm.weight",
-                    ),
+                    self._dense_weight(ir.weights, f"{prefix}.post_ffn_norm.weight"),
                 )
 
-                self._copy_param(
-                    block.ff.fc1.weight,
-                    self._weight(fetched.weights, f"{prefix}.feed_forward.w1.weight"),
+                self._load_linear_weight(
+                    block.ff,
+                    "fc1",
+                    self._weight(ir.weights, f"{prefix}.feed_forward.gate_proj.weight"),
                 )
-                self._copy_param(
-                    block.ff.fc2.weight,
-                    self._weight(fetched.weights, f"{prefix}.feed_forward.w3.weight"),
+                self._load_linear_weight(
+                    block.ff,
+                    "fc2",
+                    self._weight(ir.weights, f"{prefix}.feed_forward.up_proj.weight"),
                 )
-                self._copy_param(
-                    block.ff.fc3.weight,
-                    self._weight(fetched.weights, f"{prefix}.feed_forward.w2.weight"),
+                self._load_linear_weight(
+                    block.ff,
+                    "fc3",
+                    self._weight(ir.weights, f"{prefix}.feed_forward.down_proj.weight"),
                 )
 
             self._copy_param(
-                self.final_norm.scale, self._weight(fetched.weights, "norm.weight")
+                self.final_norm.scale,
+                self._dense_weight(ir.weights, "final_norm.weight"),
             )
-            self._copy_param(
-                self.out_head.weight, self._lm_head_weight(fetched.weights)
+            self._load_linear_weight(
+                self,
+                "out_head",
+                self._weight(ir.weights, "lm_head.weight"),
             )
         self.eval()
 
@@ -774,6 +720,12 @@ class Gemma3Model(nn.Module):
     def _copy_param(
         param: nn.Parameter | torch.Tensor | None, value: torch.Tensor
     ) -> None:
+        """
+        Copy parameter, verify shape before.
+
+        Args:
+            value: Value to validate, assign, or convert.
+        """
         if param is None:
             raise ValueError("cannot copy into missing parameter")
         if tuple(param.shape) != tuple(value.shape):
@@ -787,6 +739,12 @@ class Gemma3Model(nn.Module):
     def _copy_optional_param(
         param: nn.Parameter | torch.Tensor | None, value: torch.Tensor | None
     ) -> None:
+        """
+        Copy parameter, if exist.
+
+        Args:
+            value: Value to validate, assign, or convert.
+        """
         if param is None:
             return
         if value is None:
@@ -794,114 +752,226 @@ class Gemma3Model(nn.Module):
         Gemma3Model._copy_param(param, value)
 
     @staticmethod
-    def _lm_head_weight(weights: dict[str, Any]) -> torch.Tensor:
-        for name in Gemma3Model._weight_names("output.weight"):
-            value = weights.get(name)
-            if isinstance(value, torch.Tensor):
-                return value
-        return Gemma3Model._weight(weights, "tok_embeddings.weight")
+    def _optional_weight(
+        weights: dict[str, Any], candidate: str
+    ) -> torch.Tensor | None:
+        """
+        Return optional weight data when present.
+        Only Tensor is supported here, raise an error if QuantizedWeight.
 
-    @staticmethod
-    def _optional_weight(weights: dict[str, Any], name: str) -> torch.Tensor | None:
-        for candidate in Gemma3Model._weight_names(name):
-            value = weights.get(candidate)
-            if isinstance(value, torch.Tensor):
-                return value
+        Args:
+            weights: Mapping of tensor names to loaded tensor data.
+            name: Canonical or source field name to resolve.
+        """
+        value = weights.get(candidate)
+        if isinstance(value, torch.Tensor):
+            return value
+        if isinstance(value, QuantizedWeight):
+            raise TypeError(f"Weight {candidate!r} is quantized")
         return None
 
     @staticmethod
-    def _weight(weights: dict[str, Any], name: str) -> torch.Tensor:
-        for candidate in Gemma3Model._weight_names(name):
-            value = weights.get(candidate)
-            if isinstance(value, torch.Tensor):
-                return value
-        names = ", ".join(Gemma3Model._weight_names(name))
-        raise KeyError(f"missing Gemma3 weight {name!r}; tried {names}")
+    def _weight(
+        weights: dict[str, Any], candidate: str
+    ) -> torch.Tensor | QuantizedWeight:
+        """
+        Return weight data. Can be Tensor or QuantizedWeight.
+
+        Args:
+            weights: Mapping of tensor names to loaded tensor data.
+            name: Canonical or source field name to resolve.
+        """
+        value = weights.get(candidate)
+        if isinstance(value, (torch.Tensor, QuantizedWeight)):
+            return value
+        raise KeyError(f"missing Gemma3 weight {candidate!r}")
 
     @staticmethod
-    def _weight_names(name: str) -> list[str]:
-        names = [name]
-        exact_aliases = {
-            "tok_embeddings.weight": "model.embed_tokens.weight",
-            "output.weight": "lm_head.weight",
-            "norm.weight": "model.norm.weight",
-        }
-        if name in exact_aliases:
-            names.append(exact_aliases[name])
-        if name == "tok_embeddings.weight":
-            names.append("model.language_model.embed_tokens.weight")
-        elif name == "norm.weight":
-            names.append("model.language_model.norm.weight")
-        elif name == "output.weight":
-            names.append("model.language_model.embed_tokens.weight")
+    def _dense_weight(weights: dict[str, Any], name: str) -> torch.Tensor:
+        """
+        Return weight data, can only be dense Tensor.
 
-        prefix = "layers."
-        if name.startswith(prefix):
-            parts = name.split(".")
-            if len(parts) == 5:
-                _, layer_idx, group, weight_name, suffix = parts
-                if suffix in {"weight", "bias"}:
-                    layer_aliases = {
-                        ("attention", "wq"): "self_attn.q_proj",
-                        ("attention", "wk"): "self_attn.k_proj",
-                        ("attention", "wv"): "self_attn.v_proj",
-                        ("attention", "wo"): "self_attn.o_proj",
-                        ("attention", "q_norm"): "self_attn.q_norm",
-                        ("attention", "k_norm"): "self_attn.k_norm",
-                        ("feed_forward", "w1"): "mlp.gate_proj",
-                        ("feed_forward", "w2"): "mlp.down_proj",
-                        ("feed_forward", "w3"): "mlp.up_proj",
-                    }
-                    hf_name = layer_aliases.get((group, weight_name))
-                    if hf_name is not None:
-                        names.append(f"model.layers.{layer_idx}.{hf_name}.{suffix}")
-                        names.append(
-                            f"model.language_model.layers.{layer_idx}."
-                            f"{hf_name}.{suffix}"
-                        )
-            elif len(parts) == 4:
-                _, layer_idx, weight_name, suffix = parts
-                if suffix == "weight":
-                    layer_norm_aliases = {
-                        "input_layernorm": "input_layernorm",
-                        "post_attention_layernorm": "post_attention_layernorm",
-                        "pre_feedforward_layernorm": "pre_feedforward_layernorm",
-                        "post_feedforward_layernorm": "post_feedforward_layernorm",
-                    }
-                    hf_name = layer_norm_aliases.get(weight_name)
-                    if hf_name is not None:
-                        names.append(f"model.layers.{layer_idx}.{hf_name}.weight")
-                        names.append(
-                            f"model.language_model.layers.{layer_idx}.{hf_name}.weight"
-                        )
+        Args:
+            weights: Mapping of tensor names to loaded tensor data.
+            name: Canonical or source field name to resolve.
+        """
+        value = Gemma3Model._weight(weights, name)
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"Gemma3 weight {name!r} is not a dense tensor")
+        return value
 
-        return names
+    def _load_linear_weight(
+        self, parent: nn.Module, attr: str, value: torch.Tensor | QuantizedWeight
+    ) -> None:
+        """
+        Copy value into parent.attr. For example parent can be
+        Gemma3GroupedQueryAttention and attr would be "W_query".
+        If QuantizedWeight check that model is quantized too.
+
+        Args:
+            value: Value to validate, assign,
+                or convert.
+        """
+        module = getattr(parent, attr)
+        if not isinstance(module, (nn.Linear, QuantizedLinear)):
+            raise TypeError(f"{attr!r} is not a linear module")
+        in_features = int(module.in_features)
+        out_features = int(module.out_features)
+
+        if isinstance(value, QuantizedWeight):
+            if self.weight_mode != "quantized":
+                raise TypeError(
+                    f"Gemma3 weight for {attr!r} is quantized but model is dense"
+                )
+            bias = None if module.bias is None else module.bias.detach()
+            setattr(
+                parent,
+                attr,
+                QuantizedLinear(
+                    value,
+                    in_features=in_features,
+                    out_features=out_features,
+                    bias=bias,
+                ),
+            )
+            return
+
+        if not isinstance(module, nn.Linear):
+            raise TypeError(f"{attr!r} cannot accept a dense weight")
+        self._copy_param(module.weight, value)
 
 
 class Gemma3Tokenizer:
     """
-    Thin wrapper around a Hugging Face tokenizer JSON file.
+    Thin wrapper around a Hugging Face tokenizer JSON file or GGUF file.
 
     ``encode`` maps text to token IDs and ``decode`` maps token IDs back to text
-    without skipping special tokens.  Gemma3 tokenizer assets are gated for the
-    real model, so tests currently validate the model path independently of this
-    wrapper.
+    without skipping special tokens.  GGUF files commonly embed the Hugging Face
+    tokenizer JSON in metadata, so a ``.gguf`` path can be used directly.
     """
 
     def __init__(self, tokenizer_file_path: str):
         tok_file = Path(tokenizer_file_path)
-        from_file = cast(Callable[[str], Tokenizer], cast(Any, Tokenizer).from_file)
-        self.tok = from_file(str(tok_file))
-        # Attempt to identify EOS and padding tokens
-        eos_token = "<end_of_turn>"
-        self.pad_token_id = eos_token
-        self.eos_token_id = eos_token
+        if tok_file.suffix.lower() == ".gguf":
+            self.tok = self._tokenizer_from_gguf(tok_file)
+        else:
+            from_file = cast(Callable[[str], Tokenizer], cast(Any, Tokenizer).from_file)
+            self.tok = from_file(str(tok_file))
+        self.eos_token_id = self.convert_tokens_to_ids("<end_of_turn>")
+        self.pad_token_id = self.eos_token_id
+
+    @staticmethod
+    def _tokenizer_from_gguf(gguf_path: Path) -> Tokenizer:
+        """Load tokenizer data embedded in a GGUF file."""
+        from gguf import GGUFReader
+
+        from .gguf import find_gguf_file, tokenizer_json_from_gguf
+
+        tokenizer_json = tokenizer_json_from_gguf(gguf_path)
+        if tokenizer_json is None:
+            reader = GGUFReader(find_gguf_file(gguf_path))
+            tokenizer_model = cast(
+                str, reader.fields["tokenizer.ggml.model"].contents()
+            )
+            if tokenizer_model != "llama":
+                raise ValueError(
+                    f"unsupported Gemma3 GGUF tokenizer model {tokenizer_model!r}"
+                )
+
+            tokens = cast(list[str], reader.fields["tokenizer.ggml.tokens"].contents())
+            scores = cast(
+                list[float], reader.fields["tokenizer.ggml.scores"].contents()
+            )
+            unk_id = cast(
+                int, reader.fields["tokenizer.ggml.unknown_token_id"].contents()
+            )
+            tokenizers_models = __import__("tokenizers.models").models
+            tokenizers_decoders = __import__("tokenizers.decoders").decoders
+            tok = Tokenizer(
+                tokenizers_models.Unigram(
+                    list(zip(tokens, scores)),
+                    unk_id=unk_id,
+                    byte_fallback=True,
+                )
+            )
+            tok.decoder = tokenizers_decoders.ByteFallback()
+            return tok
+
+        from_str = cast(Callable[[str], Tokenizer], cast(Any, Tokenizer).from_str)
+        return from_str(tokenizer_json)
+
+    @classmethod
+    def from_gguf(cls, gguf_path: str) -> "Gemma3Tokenizer":
+        """Build a Gemma3 tokenizer from tokenizer data embedded in a GGUF file."""
+        return cls(gguf_path)
 
     def encode(self, text: str) -> list[int]:
+        """
+        Encode text into token ids.
+
+        Args:
+            text: Input text to encode.
+
+        Returns:
+            Encoded token ids.
+        """
         encode = cast(Callable[[str], Any], cast(Any, self.tok).encode)
         encoded = encode(text)
         return cast(list[int], encoded.ids)
 
+    def encode_instruct_prompt(self, user_text: str) -> list[int]:
+        """Encode a minimal Gemma3 user-to-model chat prompt."""
+        encoded = self.apply_chat_template(
+            [{"role": "user", "content": user_text}],
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        if not isinstance(encoded, dict):
+            raise TypeError("expected tokenized chat template output")
+        return encoded["input_ids"]
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+    ) -> dict[str, list[int]] | str:
+        """
+        Apply Gemma's text-only chat wire format.
+
+        This intentionally covers the user/model turns used by the functional
+        tests and eval adapters without depending on ``transformers``.
+        """
+        prompt = "<bos>"
+        for message in messages:
+            role = message["role"]
+            if role == "assistant":
+                role = "model"
+            if role not in {"user", "model"}:
+                raise ValueError(f"unsupported Gemma3 chat role {role!r}")
+            prompt += f"<start_of_turn>{role}\n{message['content']}<end_of_turn>\n"
+        if add_generation_prompt:
+            prompt += "<start_of_turn>model\n"
+        if not tokenize:
+            return prompt
+        return {"input_ids": self.encode(prompt)}
+
+    def convert_tokens_to_ids(self, token: str) -> int | None:
+        """Return the token id for a special token string when known."""
+        token_to_id = cast(Any, self.tok).token_to_id
+        token_id = cast(int | None, token_to_id(token))
+        return token_id
+
     def decode(self, ids: list[int]) -> str:
+        """
+        Decode token ids into text.
+
+        Args:
+            ids: Token ids to decode.
+
+        Returns:
+            Decoded text.
+        """
         decode = cast(Any, self.tok).decode
         return cast(str, decode(ids, skip_special_tokens=False))

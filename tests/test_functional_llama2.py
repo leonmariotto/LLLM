@@ -6,10 +6,10 @@ import pytest
 import torch
 
 from ..LLLM.eval import evaluate_base_model_perplexity
-from ..LLLM.fetch import fetch_hf_model
+from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
 from ..LLLM import llama2 as llama2_module
-from ..LLLM.llama2 import Llama2Model, Llama2Tokenizer, llama2_config_from_fetched
+from ..LLLM.llama2 import Llama2Model, Llama2Tokenizer
 from ..LLLM.rope import apply_rope
 
 """
@@ -26,10 +26,11 @@ LLAMA2_TINYSTORIES_REPO_ID = "0rn0/llama2-15m-tinystories"
 def _load_remote_llama2_tinystories(
     tmp_path: Path,
 ) -> tuple[Llama2Model, Llama2Tokenizer]:
-    fetched = fetch_hf_model(LLAMA2_TINYSTORIES_REPO_ID)
-    tokenizer = Llama2Tokenizer(str(fetched.path / "tokenizer.model"))
-    model = Llama2Model(llama2_config_from_fetched(fetched.config))
-    model.load_fetched_model(fetched)
+    ir = fetch_model_ir(LLAMA2_TINYSTORIES_REPO_ID)
+    path = Path(str(ir.metadata["path"]))
+    tokenizer = Llama2Tokenizer(str(path / "tokenizer.model"))
+    model = Llama2Model(Llama2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
     return model, tokenizer
 
 

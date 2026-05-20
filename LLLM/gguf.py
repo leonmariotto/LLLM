@@ -20,23 +20,8 @@ from gguf.gguf_reader import ReaderField, ReaderTensor
 
 from loguru import logger
 
-from .quantization import DenseOrQuantizedWeight, QuantizedWeight
-
-
-GGUF_WEIGHT_ALIASES = {
-    "token_embd.weight": "model.embed_tokens.weight",
-    "output.weight": "output.weight",
-    "output_norm.weight": "model.norm.weight",
-    "attn_q.weight": "self_attn.q_proj.weight",
-    "attn_k.weight": "self_attn.k_proj.weight",
-    "attn_v.weight": "self_attn.v_proj.weight",
-    "attn_output.weight": "self_attn.o_proj.weight",
-    "attn_norm.weight": "input_layernorm.weight",
-    "ffn_gate.weight": "mlp.gate_proj.weight",
-    "ffn_up.weight": "mlp.up_proj.weight",
-    "ffn_down.weight": "mlp.down_proj.weight",
-    "ffn_norm.weight": "post_attention_layernorm.weight",
-}
+from .model_ir import ArchitectureId, ModelConfigIR, ModelIR, ModelWeightsIR
+from .quantization import QuantizedWeight
 
 
 class GGUFLoadError(ValueError):
@@ -69,149 +54,148 @@ def find_gguf_file(path: str | Path, filename: str | None = None) -> Path:
     return files[0]
 
 
-def load_gguf(
-    path: str | Path, filename: str | None = None
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
-    """
-    Load a GGUF model as Hugging Face-like config plus dequantized tensors.
+def load_gguf_ir(
+    path: str | Path,
+    filename: str | None = None,
+    *,
+    weight_mode: str = "dense",
+) -> ModelIR:
+    """Load a GGUF file into source-independent ``ModelIR``."""
 
-    This is intentionally eager for the first milestone: every GGUF tensor is
-    dequantized into a normal Torch tensor so ``Llama3Model.load_fetched_model``
-    can keep using its existing copy logic.
-    """
     gguf_path = find_gguf_file(path, filename)
     logger.info("Reading GGUF file [%s]" % gguf_path)
     reader = GGUFReader(gguf_path)
-    config = config_from_gguf_reader(reader)
-    logger.info("Config extracted from GGUF file [%s]" % str(config))
-    weights = tensors_from_gguf_reader(reader)
-    logger.info("Weight dequantized")
-    return config, weights
+    architecture, config = config_ir_from_gguf_reader(reader)
+    if weight_mode == "quantized":
+        weights = tensors_ir_from_gguf_reader(reader, quantized=True)
+    elif weight_mode == "dense":
+        weights = tensors_ir_from_gguf_reader(reader, quantized=False)
+    else:
+        raise ValueError(f"unsupported weight_mode {weight_mode!r}")
+    return ModelIR(
+        architecture=architecture,
+        config=ModelConfigIR(config),
+        weights=weights,
+        metadata={
+            "source_format": "gguf",
+            "path": str(gguf_path),
+            "original_architecture": _string_field(reader, "general.architecture"),
+        },
+    )
 
 
-def load_gguf_quantized(
-    path: str | Path, filename: str | None = None
-) -> tuple[dict[str, Any], dict[str, DenseOrQuantizedWeight]]:
-    """
-    Load a GGUF model while preserving quantized linear tensors.
+def config_ir_from_gguf_reader(
+    reader: GGUFReader,
+) -> tuple[ArchitectureId, dict[str, Any]]:
+    """Translate GGUF metadata into normalized IR config fields."""
 
-    Non-linear tensors such as embeddings and norms remain dense for this
-    milestone. Linear tensors can be installed into ``QuantizedLinear`` and
-    dequantized inside their forward pass.
-    """
-    gguf_path = find_gguf_file(path, filename)
-    logger.info("Reading GGUF file [%s]" % gguf_path)
-    reader = GGUFReader(gguf_path)
-    config = config_from_gguf_reader(reader)
-    logger.info("Config extracted from GGUF file [%s]" % str(config))
-    weights = quantized_tensors_from_gguf_reader(reader)
-    logger.info("Weight extracted (with quantization)")
-    return config, weights
-
-
-# TODO I should have an intermediate representation so that
-# Any format -> Intermediate -> Any models.
-# Because here this function translate gguf config into HF (config.json) config.
-def config_from_gguf_reader(reader: GGUFReader) -> dict[str, Any]:
-    """Translate GGUF Llama metadata into the keys ``llama3_config_from_fetched`` expects."""
     architecture = _string_field(reader, "general.architecture")
-    if architecture != "llama":
+    if architecture == "llama":
+        config: dict[str, Any] = {
+            "vocab_size": _vocab_size(reader),
+            "context_length": _int_field(reader, "llama.context_length"),
+            "hidden_size": _int_field(reader, "llama.embedding_length"),
+            "intermediate_size": _int_field(reader, "llama.feed_forward_length"),
+            "num_attention_heads": _int_field(reader, "llama.attention.head_count"),
+            "num_key_value_heads": _int_field(
+                reader,
+                "llama.attention.head_count_kv",
+                default=_int_field(reader, "llama.attention.head_count"),
+            ),
+            "num_hidden_layers": _int_field(reader, "llama.block_count"),
+            "rope_theta": _float_field(reader, "llama.rope.freq_base", default=10000.0),
+            # llama.cpp and HF both store Llama 3 tensors in split-half RoPE layout.
+            "rope_interleaved": False,
+        }
+        rope_scaling = _llama_rope_scaling_from_gguf_reader(reader)
+        if rope_scaling is not None:
+            config["rope_scaling"] = rope_scaling
+        return "llama3", config
+
+    if architecture not in {"gemma", "gemma3"}:
         raise GGUFLoadError(f"unsupported GGUF architecture {architecture!r}")
 
-    config: dict[str, Any] = {
-        "model_type": "llama",
+    prefix = architecture
+    n_layers = _int_field(reader, f"{prefix}.block_count")
+    sliding_window = _int_field(reader, f"{prefix}.attention.sliding_window", default=0)
+    layer_types = _gemma_layer_types(reader, prefix, n_layers, sliding_window)
+    head_dim = _int_field(
+        reader,
+        f"{prefix}.attention.key_length",
+        default=_int_field(reader, f"{prefix}.embedding_length")
+        // _int_field(reader, f"{prefix}.attention.head_count"),
+    )
+    return "gemma3", {
         "vocab_size": _vocab_size(reader),
-        "max_position_embeddings": _int_field(reader, "llama.context_length"),
-        "hidden_size": _int_field(reader, "llama.embedding_length"),
-        "intermediate_size": _int_field(reader, "llama.feed_forward_length"),
-        "num_hidden_layers": _int_field(reader, "llama.block_count"),
-        "num_attention_heads": _int_field(reader, "llama.attention.head_count"),
+        "context_length": _int_field(reader, f"{prefix}.context_length"),
+        "hidden_size": _int_field(reader, f"{prefix}.embedding_length"),
+        "intermediate_size": _int_field(reader, f"{prefix}.feed_forward_length"),
+        "num_attention_heads": _int_field(reader, f"{prefix}.attention.head_count"),
         "num_key_value_heads": _int_field(
             reader,
-            "llama.attention.head_count_kv",
-            default=_int_field(reader, "llama.attention.head_count"),
+            f"{prefix}.attention.head_count_kv",
+            default=_int_field(reader, f"{prefix}.attention.head_count"),
         ),
-        "rope_theta": _float_field(reader, "llama.rope.freq_base", default=10000.0),
-        # llama.cpp and HF both store Llama 3 tensors in split-half RoPE layout.
-        "rope_interleaved": False,
+        "sliding_window": sliding_window,
+        "num_hidden_layers": n_layers,
+        "head_dim": head_dim,
+        "rope_base": _float_field(
+            reader, f"{prefix}.rope.freq_base", default=1000000.0
+        ),
+        "rope_local_base": _float_field(
+            reader, f"{prefix}.rope.local_freq_base", default=10000.0
+        ),
+        "rope_interleaved": True,
+        "layer_types": layer_types,
+        "rms_norm_eps": _float_field(
+            reader, f"{prefix}.attention.layer_norm_rms_epsilon", default=1e-6
+        ),
+        "query_pre_attn_scalar": head_dim,
+        "final_logit_softcapping": _optional_float_field(
+            reader, f"{prefix}.final_logit_softcapping"
+        ),
+        "attn_logit_softcapping": _optional_float_field(
+            reader, f"{prefix}.attention.logit_softcapping"
+        ),
+        "attention_bias": False,
     }
 
-    rope_type = _optional_string_field(reader, "llama.rope.scaling.type")
-    if rope_type is not None and rope_type != "none":
-        if rope_type != "llama3":
-            raise GGUFLoadError(f"unsupported GGUF rope scaling type {rope_type!r}")
-        config["rope_scaling"] = {
-            "rope_type": "llama3",
-            "factor": _float_field(reader, "llama.rope.scaling.factor"),
-            "low_freq_factor": _float_field(
-                reader, "llama.rope.scaling.low_freq_factor"
-            ),
-            "high_freq_factor": _float_field(
-                reader, "llama.rope.scaling.high_freq_factor"
-            ),
-            "original_max_position_embeddings": _int_field(
-                reader, "llama.rope.scaling.original_context_length"
-            ),
-        }
-    elif inferred_rope_scaling := _infer_llama3_rope_scaling(reader, config):
-        config["rope_scaling"] = inferred_rope_scaling
 
-    return config
+def tensors_ir_from_gguf_reader(
+    reader: GGUFReader, *, quantized: bool = False
+) -> ModelWeightsIR:
+    """Expose GGUF tensors with canonical IR names."""
 
-
-def tensors_from_gguf_reader(reader: GGUFReader) -> dict[str, torch.Tensor]:
-    """Dequantize all supported GGUF tensors and expose Hugging Face-style names."""
-    n_heads = _int_field(reader, "llama.attention.head_count")
-    n_kv_heads = _int_field(reader, "llama.attention.head_count_kv", default=n_heads)
+    original_arch = _string_field(reader, "general.architecture")
+    apply_llama_unpermute = original_arch == "llama"
+    prefix = "llama" if original_arch == "llama" else original_arch
+    n_heads = _int_field(reader, f"{prefix}.attention.head_count")
+    n_kv_heads = _int_field(
+        reader, f"{prefix}.attention.head_count_kv", default=n_heads
+    )
     head_dim = _int_field(
         reader,
-        "llama.attention.key_length",
-        default=_int_field(reader, "llama.embedding_length") // n_heads,
+        f"{prefix}.attention.key_length",
+        default=_int_field(reader, f"{prefix}.embedding_length") // n_heads,
     )
 
-    tensors: dict[str, torch.Tensor] = {}
+    tensors: ModelWeightsIR = {}
+    ignored: list[str] = []
     for tensor in reader.tensors:
-        name = _map_tensor_name(tensor.name)
+        name = _map_tensor_name_ir(tensor.name, original_arch)
         if name is None:
-            continue
-        if name in tensors:
-            raise GGUFLoadError(f"duplicate mapped tensor name {name!r}")
-        value = dequantize_gguf_tensor(tensor, dtype=torch.float16)
-        if tensor.name.endswith(".attn_q.weight"):
-            value = _unpermute_llama_attention_weight(value, n_heads, head_dim)
-        elif tensor.name.endswith(".attn_k.weight"):
-            value = _unpermute_llama_attention_weight(value, n_kv_heads, head_dim)
-        tensors[name] = value
-    return tensors
-
-
-def quantized_tensors_from_gguf_reader(
-    reader: GGUFReader,
-) -> dict[str, DenseOrQuantizedWeight]:
-    """Expose GGUF tensors, preserving quantized linear weights when possible."""
-    n_heads = _int_field(reader, "llama.attention.head_count")
-    n_kv_heads = _int_field(reader, "llama.attention.head_count_kv", default=n_heads)
-    head_dim = _int_field(
-        reader,
-        "llama.attention.key_length",
-        default=_int_field(reader, "llama.embedding_length") // n_heads,
-    )
-
-    tensors: dict[str, DenseOrQuantizedWeight] = {}
-    for tensor in reader.tensors:
-        name = _map_tensor_name(tensor.name)
-        if name is None:
+            ignored.append(tensor.name)
             continue
         if name in tensors:
             raise GGUFLoadError(f"duplicate mapped tensor name {name!r}")
 
         transform_heads: int | None = None
-        if tensor.name.endswith(".attn_q.weight"):
+        if apply_llama_unpermute and tensor.name.endswith(".attn_q.weight"):
             transform_heads = n_heads
-        elif tensor.name.endswith(".attn_k.weight"):
+        elif apply_llama_unpermute and tensor.name.endswith(".attn_k.weight"):
             transform_heads = n_kv_heads
 
-        if _is_forward_quantized_linear(name, tensor):
+        if quantized and _is_forward_quantized_linear_ir(name, tensor):
             data = cast(np.ndarray[Any, Any], np.array(tensor.data, copy=True))
             tensors[name] = QuantizedWeight(
                 name=name,
@@ -230,7 +214,46 @@ def quantized_tensors_from_gguf_reader(
         if transform_heads is not None:
             value = _unpermute_llama_attention_weight(value, transform_heads, head_dim)
         tensors[name] = value
+    if "lm_head.weight" not in tensors and "token_embedding.weight" in tensors:
+        tensors["lm_head.weight"] = tensors["token_embedding.weight"]
     return tensors
+
+
+def _llama_rope_scaling_from_gguf_reader(reader: GGUFReader) -> dict[str, Any] | None:
+    """Return normalized Llama rope scaling metadata when present or inferable."""
+    rope_type = _optional_string_field(reader, "llama.rope.scaling.type")
+    if rope_type is not None and rope_type != "none":
+        if rope_type != "llama3":
+            raise GGUFLoadError(f"unsupported GGUF rope scaling type {rope_type!r}")
+        return {
+            "rope_type": "llama3",
+            "factor": _float_field(reader, "llama.rope.scaling.factor"),
+            "low_freq_factor": _float_field(
+                reader, "llama.rope.scaling.low_freq_factor"
+            ),
+            "high_freq_factor": _float_field(
+                reader, "llama.rope.scaling.high_freq_factor"
+            ),
+            "original_max_position_embeddings": _int_field(
+                reader, "llama.rope.scaling.original_context_length"
+            ),
+        }
+
+    inference_config = {
+        "vocab_size": _vocab_size(reader),
+        "max_position_embeddings": _int_field(reader, "llama.context_length"),
+        "hidden_size": _int_field(reader, "llama.embedding_length"),
+        "intermediate_size": _int_field(reader, "llama.feed_forward_length"),
+        "num_hidden_layers": _int_field(reader, "llama.block_count"),
+        "num_attention_heads": _int_field(reader, "llama.attention.head_count"),
+        "num_key_value_heads": _int_field(
+            reader,
+            "llama.attention.head_count_kv",
+            default=_int_field(reader, "llama.attention.head_count"),
+        ),
+        "rope_theta": _float_field(reader, "llama.rope.freq_base", default=10000.0),
+    }
+    return _infer_llama3_rope_scaling(reader, inference_config)
 
 
 def dequantize_gguf_tensor(
@@ -260,17 +283,28 @@ def dequantize_gguf_tensor(
     return torch_tensor
 
 
-def _is_forward_quantized_linear(name: str, tensor: ReaderTensor) -> bool:
+def _is_forward_quantized_linear_ir(name: str, tensor: ReaderTensor) -> bool:
+    """
+    Return whether forward quantized linear ir is true.
+
+    Args:
+        name: Canonical or source field name to resolve.
+        tensor: Tensor or quantized tensor to inspect or transform.
+    """
     if not _is_quantized_tensor(tensor):
         return False
-    if name in {"output.weight", "lm_head.weight"}:
+    if name == "lm_head.weight":
         return True
-    if ".self_attn." in name:
-        return True
-    return ".mlp." in name
+    return ".attention." in name or ".feed_forward." in name
 
 
 def _is_quantized_tensor(tensor: ReaderTensor) -> bool:
+    """
+    Return whether quantized tensor is true.
+
+    Args:
+        tensor: Tensor or quantized tensor to inspect or transform.
+    """
     return tensor.tensor_type not in {
         GGMLQuantizationType.F32,
         GGMLQuantizationType.F16,
@@ -325,8 +359,12 @@ def tokenizer_mergeable_ranks_from_gguf(path: str | Path) -> dict[bytes, int]:
     return ranks
 
 
-def _map_tensor_name(name: str) -> str | None:
-    exact = GGUF_WEIGHT_ALIASES.get(name)
+def _map_tensor_name_ir(name: str, architecture: str) -> str | None:
+    exact = {
+        "token_embd.weight": "token_embedding.weight",
+        "output.weight": "lm_head.weight",
+        "output_norm.weight": "final_norm.weight",
+    }.get(name)
     if exact is not None:
         return exact
 
@@ -334,12 +372,58 @@ def _map_tensor_name(name: str) -> str | None:
     if len(parts) == 4 and parts[0] == "blk":
         layer_idx = parts[1]
         local_name = ".".join(parts[2:])
-        hf_suffix = GGUF_WEIGHT_ALIASES.get(local_name)
-        if hf_suffix is None:
-            return None
-        return f"model.layers.{layer_idx}.{hf_suffix}"
+        layer_aliases = {
+            "attn_q.weight": "attention.q_proj.weight",
+            "attn_k.weight": "attention.k_proj.weight",
+            "attn_v.weight": "attention.v_proj.weight",
+            "attn_output.weight": "attention.o_proj.weight",
+            "attn_q.bias": "attention.q_proj.bias",
+            "attn_k.bias": "attention.k_proj.bias",
+            "attn_v.bias": "attention.v_proj.bias",
+            "attn_output.bias": "attention.o_proj.bias",
+            "attn_q_norm.weight": "attention.q_norm.weight",
+            "attn_k_norm.weight": "attention.k_norm.weight",
+            "attn_norm.weight": "input_norm.weight",
+            "ffn_gate.weight": "feed_forward.gate_proj.weight",
+            "ffn_up.weight": "feed_forward.up_proj.weight",
+            "ffn_down.weight": "feed_forward.down_proj.weight",
+        }
+        if architecture in {"gemma", "gemma3"}:
+            layer_aliases.update(
+                {
+                    "post_attention_norm.weight": "post_attention_norm.weight",
+                    "ffn_norm.weight": "pre_ffn_norm.weight",
+                    "ffn_pre_norm.weight": "pre_ffn_norm.weight",
+                    "post_ffw_norm.weight": "post_ffn_norm.weight",
+                    "ffn_post_norm.weight": "post_ffn_norm.weight",
+                }
+            )
+        else:
+            layer_aliases.update(
+                {
+                    "ffn_norm.weight": "post_attention_norm.weight",
+                    "post_attn_norm.weight": "post_attention_norm.weight",
+                }
+            )
+        canonical = layer_aliases.get(local_name)
+        if canonical is not None:
+            return f"layers.{layer_idx}.{canonical}"
 
     return None
+
+
+def _gemma_layer_types(
+    reader: GGUFReader, prefix: str, n_layers: int, sliding_window: int
+) -> list[str]:
+    field = reader.fields.get(f"{prefix}.attention.layer_types")
+    if field is not None:
+        return [str(item) for item in cast(list[Any], field.contents())]
+    if sliding_window <= 0:
+        return ["full_attention"] * n_layers
+    return [
+        "sliding_attention" if layer_idx % 2 == 0 else "full_attention"
+        for layer_idx in range(n_layers)
+    ]
 
 
 def _unpermute_llama_attention_weight(
@@ -450,6 +534,13 @@ def _optional_string_field(reader: GGUFReader, name: str) -> str | None:
     if field is None:
         return None
     return cast(str, field.contents())
+
+
+def _optional_float_field(reader: GGUFReader, name: str) -> float | None:
+    field = reader.fields.get(name)
+    if field is None:
+        return None
+    return float(field.contents())
 
 
 def _data_gym_byte_decoder() -> dict[str, int]:

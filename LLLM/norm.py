@@ -23,15 +23,20 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(emb_dim)).float()
 
     def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: Input tensor with shape ``[..., emb_dim]``.
+
+        Returns:
+            Normalized tensor with shape ``[..., emb_dim]``.
+        """
         means = x.pow(2).mean(dim=-1, keepdim=True)
         x_normed = x * torch.rsqrt(means + self.eps)
         return (x_normed * self.weight).to(dtype=x.dtype)
 
 
 class LayerNorm(nn.Module):
-    """
-    LayerNorm: normalize output data to have a mean of 0 and a variance of 1.
-    """
+    """LayerNorm: normalize output data to have a mean of 0 and a variance of 1."""
 
     def __init__(self, emb_dim: int, eps: float = 1e-5) -> None:
         super().__init__()
@@ -40,6 +45,13 @@ class LayerNorm(nn.Module):
         self.shift = nn.Parameter(torch.zeros(emb_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor with shape ``[..., emb_dim]``.
+
+        Returns:
+            Normalized tensor with shape ``[..., emb_dim]``.
+        """
         mean = x.mean(dim=-1, keepdim=True)
         var = x.var(dim=-1, keepdim=True, unbiased=False)
         norm_x = (x - mean) / torch.sqrt(var + self.eps)

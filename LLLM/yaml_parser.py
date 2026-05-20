@@ -1,6 +1,4 @@
-"""
-Module YamlParser
-"""
+"""Module YamlParser"""
 
 import logging
 from typing import Any, cast
@@ -14,20 +12,13 @@ logging.basicConfig(
 
 
 class YamlParserError(Exception):
-    """
-    Custom class for yaml parsing error
-    """
+    """Custom class for yaml parsing error"""
 
 
 class YamlParser:
-    """
-    Class YamlParser
-    """
+    """Class YamlParser"""
 
     def __init__(self) -> None:
-        """
-        Init YamlParser
-        """
         self.logger = logging.getLogger(__name__)
         self.data: dict[str, Any] = {}
 
