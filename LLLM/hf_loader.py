@@ -65,7 +65,7 @@ def model_ir_from_hf(
     normalized_config = _normalize_config(config, arch)
     if arch == "gpt2":
         ir_weights = _canonical_gpt2_weights(weights)
-    elif arch in {"llama2", "llama3"}:
+    elif arch in {"llama2", "llama3", "qwen2", "qwen3"}:
         ir_weights = canonical_llama_weights_from_hf(weights)
     elif arch == "gemma3":
         ir_weights = _canonical_gemma3_weights(weights)
@@ -102,6 +102,8 @@ def _infer_architecture(config: dict[str, Any]) -> ArchitectureId:
         return "gemma3"
     if model_type == "gpt2":
         return "gpt2"
+    if model_type in {"qwen2", "qwen3"}:
+        return cast(ArchitectureId, model_type)
     if model_type == "llama":
         rope_scaling = config.get("rope_scaling")
         if isinstance(rope_scaling, dict):
@@ -149,7 +151,7 @@ def _normalize_config(config: dict[str, Any], arch: ArchitectureId) -> dict[str,
             "positional_encoding": "gpt2",
         }
 
-    if arch in {"llama2", "llama3"}:
+    if arch in {"llama2", "llama3", "qwen2", "qwen3"}:
         normalized = {
             "vocab_size": _int(config, "vocab_size"),
             "context_length": _int(
@@ -163,15 +165,26 @@ def _normalize_config(config: dict[str, Any], arch: ArchitectureId) -> dict[str,
             "num_hidden_layers": _int(
                 config, "num_hidden_layers", fallback_key="n_layers"
             ),
-            "rope_theta": _float(config, "rope_theta", default=10000.0),
+            "rope_theta": _rope_theta(config, default=10000.0),
             "rope_interleaved": _bool(config, "rope_interleaved", default=False),
         }
-        if arch == "llama3":
+        if arch in {"llama3", "qwen2", "qwen3"}:
             normalized["num_key_value_heads"] = _int(
                 config, "num_key_value_heads", fallback_key="n_kv_heads"
             )
             if "rope_scaling" in config:
                 normalized["rope_scaling"] = config["rope_scaling"]
+        if arch in {"qwen2", "qwen3"}:
+            normalized["head_dim"] = int(
+                config.get(
+                    "head_dim",
+                    normalized["hidden_size"] // normalized["num_attention_heads"],
+                )
+            )
+            normalized["rms_norm_eps"] = _float(config, "rms_norm_eps", default=1e-6)
+            normalized["attention_bias"] = _bool(
+                config, "attention_bias", default=(arch == "qwen2")
+            )
         return normalized
 
     layer_types = _list_str(
@@ -291,6 +304,8 @@ def canonical_llama_weights_from_hf(weights: dict[str, Any]) -> ModelWeightsIR:
         "self_attn.k_proj": "attention.k_proj",
         "self_attn.v_proj": "attention.v_proj",
         "self_attn.o_proj": "attention.o_proj",
+        "self_attn.q_norm": "attention.q_norm",
+        "self_attn.k_norm": "attention.k_norm",
         "attention_norm": "input_norm",
         "input_layernorm": "input_norm",
         "ffn_norm": "post_attention_norm",
@@ -438,6 +453,28 @@ def _float(config: dict[str, Any], key: str, *, default: float | None = None) ->
     if not isinstance(value, float):
         raise ValueError(f"config value {key!r} must be a float")
     return value
+
+
+def _rope_theta(config: dict[str, Any], *, default: float) -> float:
+    """Return RoPE theta from old ``rope_theta`` or new ``rope_parameters``."""
+    value = config.get("rope_theta")
+    if value is not None:
+        if isinstance(value, int):
+            return float(value)
+        if isinstance(value, float):
+            return value
+        raise ValueError("config value 'rope_theta' must be a float")
+
+    rope_parameters = config.get("rope_parameters")
+    if isinstance(rope_parameters, dict):
+        rope_parameters = cast(dict[str, Any], rope_parameters)
+        theta = rope_parameters.get("rope_theta")
+        if isinstance(theta, int):
+            return float(theta)
+        if isinstance(theta, float):
+            return theta
+
+    return default
 
 
 def _optional_float(config: dict[str, Any], key: str) -> float | None:

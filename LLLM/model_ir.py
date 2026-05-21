@@ -31,6 +31,10 @@ Config fields are normalized by meaning and unit.  Required common fields are
 * ``llama2``: ``rope_theta`` (float)
 * ``llama3``: ``num_key_value_heads``, ``rope_theta``, ``rope_interleaved``,
   optional ``rope_scaling``
+* ``qwen2``: ``num_key_value_heads``, ``head_dim``, ``rope_theta``,
+  ``rope_interleaved``, ``rms_norm_eps``, and ``attention_bias``
+* ``qwen3``: ``num_key_value_heads``, ``head_dim``, ``rope_theta``,
+  ``rope_interleaved``, ``rms_norm_eps``, ``attention_bias``, and Q/K norms
 * ``gemma3``: ``num_key_value_heads``, ``sliding_window``, ``head_dim``,
   ``rope_base``, ``rope_local_base``, ``rope_interleaved``, ``layer_types``,
   ``rms_norm_eps``, ``query_pre_attn_scalar``, optional logit softcapping
@@ -57,7 +61,7 @@ import torch
 from .quantization import QuantizedWeight
 
 
-ArchitectureId = Literal["gpt2", "llama2", "llama3", "gemma3"]
+ArchitectureId = Literal["gpt2", "llama2", "llama3", "qwen2", "qwen3", "gemma3"]
 IRWeight: TypeAlias = torch.Tensor | QuantizedWeight
 ModelWeightsIR: TypeAlias = dict[str, IRWeight]
 
