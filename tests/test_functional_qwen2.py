@@ -27,7 +27,8 @@ def test_functional_qwen2_5_coder_generates_addition_function() -> None:
     )
     prompt_tokens = tokenizer.encode_instruct_prompt(
         "Write a Python function named add that takes two arguments and returns "
-        "their sum. Return only the code."
+        "their sum. Return only the code.",
+        enable_thinking=False,
     )
 
     generated_text = generator.generate_from_tokens(

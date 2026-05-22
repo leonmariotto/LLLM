@@ -517,11 +517,17 @@ class Qwen2Tokenizer:
         encoded = encode(input)
         return cast(list[int], encoded.ids)
 
-    def encode_instruct_prompt(self, user_text: str) -> list[int]:
+    def encode_instruct_prompt(
+        self,
+        user_text: str,
+        *,
+        enable_thinking: bool = True,
+    ) -> list[int]:
         encoded = self.apply_chat_template(
             [{"role": "user", "content": user_text}],
             tokenize=True,
             add_generation_prompt=True,
+            enable_thinking=enable_thinking,
         )
         if not isinstance(encoded, dict):
             raise TypeError("expected tokenized chat template output")
@@ -533,6 +539,7 @@ class Qwen2Tokenizer:
         *,
         tokenize: bool = True,
         add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
     ) -> dict[str, list[int]] | str:
         prompt = ""
         for message in messages:
@@ -542,7 +549,8 @@ class Qwen2Tokenizer:
             prompt += f"<|im_start|>{role}\n{message['content']}<|im_end|>\n"
         if add_generation_prompt:
             prompt += "<|im_start|>assistant\n"
-        # TODO add option for hard thinking disabling.
+            if not enable_thinking:
+                prompt += "<think>\n\n</think>\n\n"
         if not tokenize:
             return prompt
         return {"input_ids": self.encode(prompt)}

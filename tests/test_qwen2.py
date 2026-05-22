@@ -4,7 +4,7 @@ from transformers import Qwen2Config as TransformersQwen2Config
 from transformers import Qwen2ForCausalLM
 
 from ..LLLM.hf_loader import model_ir_from_hf
-from ..LLLM.qwen2 import Qwen2Config, Qwen2Model
+from ..LLLM.qwen2 import Qwen2Config, Qwen2Model, Qwen2Tokenizer
 
 
 def _tiny_hf_qwen2_config() -> dict[str, object]:
@@ -84,3 +84,37 @@ def test_qwen2_tiny_model_matches_transformers_reference_model() -> None:
         expected = reference(idx).logits
 
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+
+
+def test_qwen2_chat_template_can_disable_thinking() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Answer briefly."}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    assert prompt == (
+        "<|im_start|>user\n"
+        "Answer briefly.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n\n</think>\n\n"
+    )
+
+
+def test_qwen2_chat_template_keeps_existing_thinking_default() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Answer briefly."}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    assert prompt == (
+        "<|im_start|>user\n"
+        "Answer briefly.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )

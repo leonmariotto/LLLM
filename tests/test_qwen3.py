@@ -5,7 +5,7 @@ from transformers import Qwen3ForCausalLM
 
 from ..LLLM.hf_loader import model_ir_from_hf
 from ..LLLM.kv_cache import KVCache
-from ..LLLM.qwen3 import Qwen3Config, Qwen3Model
+from ..LLLM.qwen3 import Qwen3Config, Qwen3Model, Qwen3Tokenizer
 
 
 def _tiny_hf_qwen3_config() -> dict[str, object]:
@@ -106,4 +106,22 @@ def test_qwen3_cached_prefill_plus_next_token_matches_full_forward() -> None:
         full_logits[:, -1, :],
         atol=1e-5,
         rtol=1e-5,
+    )
+
+
+def test_qwen3_chat_template_can_disable_thinking() -> None:
+    tokenizer = Qwen3Tokenizer.__new__(Qwen3Tokenizer)
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Answer briefly."}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+    assert prompt == (
+        "<|im_start|>user\n"
+        "Answer briefly.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n\n</think>\n\n"
     )
