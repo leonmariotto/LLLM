@@ -98,7 +98,7 @@ def test_functional_llama3_smol_lm2_wikitext_perplexity() -> None:
         model=model,
         tokenizer=tokenizer,
         limit=10,
-        context_size=128,
+        context_length=128,
     )
 
     # Expected observed result: around 64 perplexity on this bounded WikiText
@@ -138,7 +138,6 @@ def test_functional_llama3_gguf_q4_k_m_runs_instruction_eval() -> None:
         adapter=llama3_boolq_adapter,
         limit=5,
         max_generated_token=3,
-        context_size=1024,
     )
 
     assert math.isfinite(accuracy)
@@ -165,7 +164,6 @@ def test_functional_llama3_gguf_q4_k_m_quantized_runs_instruction_eval() -> None
         adapter=llama3_boolq_adapter,
         limit=2,
         max_generated_token=2,
-        context_size=1024,
     )
 
     assert math.isfinite(accuracy)

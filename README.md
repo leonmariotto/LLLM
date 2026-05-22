@@ -1,12 +1,12 @@
 # Leon's LLM
 
 Based on *Build a Large Language Model from scratch* book by Sebastian Raschka.
+Then on *Build a reasoning model* book from the same author.
 
 ## Wishlist
 
-- WE DONT USE KVCACHE, PERFORMANCE ARE SHIT
+- cache dataset download !! It will speedup a lot the tests.
 - tiny-aya models
-- sliding KV cache to support long session.
 - optimized quantization computation.
 
 The following 2 components are usefull for DeepSeek architecture but low priority:
@@ -24,3 +24,13 @@ space before storing them in the KV cache.
 
 Tokenizer encoding scheme is part of the pre-trained base model contract.
 Some special character can be part of post-training: instructions, reasoning
+
+## Inventory
+
+- RoPE.
+- KV cache with sliding window.
+- Evaluation setup : WikiText-2, BoolQ, gsm8k and squad.
+- Quantization support.
+- GGUF loading.
+- HF's hub loading.
+

@@ -331,7 +331,7 @@ class GeneratorGPT2(Generator):
         stop_at_eos: bool,
         max_generated_token: int,
         eos: int | None,
-        context_size: int,
+        cache_length: int,
         temperature: float,
         top_k: int | None,
     ) -> tuple[list[int], int]:
@@ -344,7 +344,7 @@ class GeneratorGPT2(Generator):
         generated_token_count = 0
 
         for _ in range(max_generated_token):
-            idx_cond = idx[:, -context_size:]
+            idx_cond = idx[:, -cache_length:]
             with torch.no_grad():
                 logits = self.model(idx_cond)
 

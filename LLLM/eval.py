@@ -117,7 +117,7 @@ def evaluate_instructions_model(
     adapter: DatasetAdapter[TExpected, TPrediction],
     limit: int = 20,
     max_generated_token: int = 20,
-    context_size: int = 1024,
+    cache_length: int = 4096,
 ) -> float:
     """
     Evaluate an instruction-style model on a Hugging Face dataset.
@@ -128,7 +128,7 @@ def evaluate_instructions_model(
         adapter: Dataset adapter defining prompt construction and scoring.
         limit: Maximum number of dataset rows to evaluate.
         max_generated_token: Maximum number of completion tokens per row.
-        context_size: Context window passed to the generator.
+        cache_length: KV cache length passed to the generator.
 
     Returns:
         Accuracy as ``correct / total``. The evaluator prints each prompt,
@@ -142,7 +142,7 @@ def evaluate_instructions_model(
     dataset = dataset.select(range(min(limit, len(dataset))))
 
     model.eval()
-    generator = Generator(model, tokenizer, context_size=context_size)
+    generator = Generator(model, tokenizer, cache_length=cache_length)
 
     correct = 0
     total = 0
@@ -278,7 +278,7 @@ def evaluate_base_model_perplexity(
     model: TensorModel,
     tokenizer: Tokenizer,
     limit: int = 100,
-    context_size: int = 1024,
+    context_length: int = 1024,
 ) -> float:
     """
     Evaluate next-token perplexity on WikiText-2 validation text.
@@ -287,7 +287,7 @@ def evaluate_base_model_perplexity(
         model: Autoregressive model returning logits for token ids.
         tokenizer: Tokenizer paired with the model.
         limit: Maximum number of non-empty dataset rows to evaluate.
-        context_size: Maximum token window evaluated from each row.
+        context_length: Maximum token window evaluated from each row.
 
     Returns:
         Perplexity, computed as ``exp(mean_cross_entropy_loss)`` over target
@@ -316,7 +316,7 @@ def evaluate_base_model_perplexity(
         inputs = tokenizer.encode(text.strip())
         if len(inputs) < 2:
             continue
-        inputs = inputs[-context_size:]
+        inputs = inputs[-context_length:]
         input_idx = torch.tensor(
             [inputs],
             dtype=torch.long,

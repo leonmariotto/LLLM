@@ -111,13 +111,13 @@ class Qwen3GroupedQueryAttention(nn.Module):
         queries = self.q_norm(queries)
         keys_new = self.k_norm(keys_new)
 
-        past_tokens = 0
+        next_pos = 0
         if kv_cache is not None:
             if layer_idx is None:
                 raise ValueError("layer_idx is required when kv_cache is provided")
-            past_tokens = kv_cache.layer_seq_len(layer_idx)
+            next_pos = kv_cache.layer_next_pos(layer_idx)
 
-        start_pos = past_tokens if pos is None else pos
+        start_pos = next_pos if pos is None else pos
         position_ids = torch.arange(
             start_pos,
             start_pos + num_tokens,
@@ -143,9 +143,14 @@ class Qwen3GroupedQueryAttention(nn.Module):
 
         if kv_cache is None:
             keys, values = keys_new, values_new
+            key_start_pos = start_pos
         else:
             assert layer_idx is not None
-            keys, values = kv_cache.update(layer_idx, keys_new, values_new)
+            cache_view = kv_cache.update(
+                layer_idx, keys_new, values_new, start_pos=start_pos
+            )
+            keys, values = cache_view.keys, cache_view.values
+            key_start_pos = cache_view.start_pos
 
         keys = keys.repeat_interleave(self.kv_group_size, dim=1)
         values = values.repeat_interleave(self.kv_group_size, dim=1)
@@ -153,10 +158,14 @@ class Qwen3GroupedQueryAttention(nn.Module):
         attn_scores = queries @ keys.transpose(2, 3)
         num_tokens_q = queries.shape[-2]
         num_tokens_k = keys.shape[-2]
-        key_positions = torch.arange(num_tokens_k, device=x.device)
+        key_positions = torch.arange(
+            key_start_pos,
+            key_start_pos + num_tokens_k,
+            device=x.device,
+        )
         query_positions = torch.arange(
-            num_tokens_k - num_tokens_q,
-            num_tokens_k,
+            start_pos,
+            start_pos + num_tokens_q,
             device=x.device,
         )
         mask_bool = key_positions[None, :] > query_positions[:, None]

@@ -123,7 +123,7 @@ def test_functional_qwen3_06b_base_wikitext_perplexity() -> None:
         model=model,
         tokenizer=tokenizer,
         limit=10,
-        context_size=128,
+        context_length=128,
     )
 
     assert math.isfinite(perplexity)
@@ -152,7 +152,6 @@ def test_functional_qwen3_06b_runs_instruction_eval(
         adapter=adapter,
         limit=1,
         max_generated_token=max_generated_token,
-        context_size=2048,
     )
 
     assert math.isfinite(accuracy)

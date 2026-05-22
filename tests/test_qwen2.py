@@ -4,6 +4,7 @@ from transformers import Qwen2Config as TransformersQwen2Config
 from transformers import Qwen2ForCausalLM
 
 from ..LLLM.hf_loader import model_ir_from_hf
+from ..LLLM.kv_cache import KVCache
 from ..LLLM.qwen2 import Qwen2Config, Qwen2Model, Qwen2Tokenizer
 
 
@@ -84,6 +85,23 @@ def test_qwen2_tiny_model_matches_transformers_reference_model() -> None:
         expected = reference(idx).logits
 
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+
+
+def test_qwen2_sliding_cache_uses_absolute_rope_positions() -> None:
+    manual_seed = cast(Callable[[int], Any], cast(Any, torch).manual_seed)
+    manual_seed(123)
+    model = Qwen2Model(_tiny_qwen2_config()).eval()
+    idx = torch.tensor([[1, 2, 3, 4]])
+    cache = KVCache(cache_length=2)
+
+    with torch.no_grad():
+        model(idx[:, :2], kv_cache=cache)
+        model(idx[:, 2:3], kv_cache=cache)
+        model(idx[:, 3:], kv_cache=cache)
+
+    assert cache.layer_seq_len(0) == 2
+    assert cache.layer_start_pos(0) == 2
+    assert cache.layer_next_pos(0) == 4
 
 
 def test_qwen2_chat_template_can_disable_thinking() -> None:

@@ -211,6 +211,37 @@ def test_multi_head_attention_with_kv_cache_matches_full_attention_last_token() 
     torch.testing.assert_close(cached_outputs, full_outputs[:, 2:, :])
 
 
+def test_multi_head_attention_sliding_cache_uses_absolute_rope_positions() -> None:
+    attention = Llama2MultiHeadAttention(
+        d_in=2,
+        d_out=2,
+        context_length=4,
+        num_heads=1,
+        dropout=0.0,
+        qkv_bias=False,
+        use_rope=True,
+    )
+
+    with torch.no_grad():
+        identity = torch.eye(2)
+        attention.W_query.weight.copy_(identity)
+        attention.W_key.weight.copy_(identity)
+        attention.W_value.weight.copy_(identity)
+        attention.out_proj.weight.copy_(identity)
+
+    inputs = torch.tensor([[[1.0, 0.0], [0.0, 2.0], [1.0, 1.0]]])
+    cache = KVCache(cache_length=2)
+
+    attention(inputs[:, :2, :], kv_cache=cache, layer_idx=0)
+    cached_outputs = attention(inputs[:, 2:, :], kv_cache=cache, layer_idx=0)
+    expected_outputs = attention(inputs[:, 1:, :], pos=1)
+
+    assert cache.layer_seq_len(0) == 2
+    assert cache.layer_start_pos(0) == 1
+    assert cache.layer_next_pos(0) == 3
+    torch.testing.assert_close(cached_outputs, expected_outputs[:, -1:, :])
+
+
 def test_multi_head_attention_scaled_shape() -> None:
     d_in = 16
     d_out = 16

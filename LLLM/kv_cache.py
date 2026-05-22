@@ -1,8 +1,27 @@
-"""Reusable key/value cache primitives for autoregressive attention."""
+"""
+Reusable key/value cache primitives for autoregressive attention.
+Support for cache sliding window.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
+
+
+@dataclass(frozen=True)
+class KVCacheView:
+    """Keys/values retained for attention plus their absolute start position."""
+
+    keys: torch.Tensor
+    values: torch.Tensor
+    start_pos: int
+
+    def __iter__(self):
+        """Allow legacy tuple-unpacking as ``keys, values = cache.update(...)``."""
+        yield self.keys
+        yield self.values
 
 
 class KVCache:
@@ -13,53 +32,94 @@ class KVCache:
     ``[batch, heads, tokens, head_dim]``.
     """
 
-    def __init__(self, max_seq_len: int | None = None) -> None:
-        self.max_seq_len = max_seq_len
-        self._layers: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+    def __init__(
+        self, cache_length: int | None = None, *, sliding: bool = True
+    ) -> None:
+        if cache_length is not None and cache_length <= 0:
+            raise ValueError("cache_length must be positive")
+        self.cache_length = cache_length
+        self.sliding = sliding
+        self._layers: dict[int, KVCacheView] = {}
+        self._next_pos: dict[int, int] = {}
 
     def reset(self) -> None:
         """Drop all cached layer state."""
         self._layers.clear()
+        self._next_pos.clear()
 
     def layer_seq_len(self, layer_idx: int) -> int:
-        """Return the number of cached tokens for one layer."""
+        """Return the retained cache length for one layer."""
         cached = self._layers.get(layer_idx)
         if cached is None:
             return 0
-        keys, _ = cached
-        return int(keys.shape[-2])
+        return int(cached.keys.shape[-2])
+
+    def layer_start_pos(self, layer_idx: int) -> int:
+        """Return the absolute position of the first retained token."""
+        cached = self._layers.get(layer_idx)
+        if cached is None:
+            return self.layer_next_pos(layer_idx)
+        return cached.start_pos
+
+    def layer_next_pos(self, layer_idx: int) -> int:
+        """Return the absolute position for the next token appended to a layer."""
+        return self._next_pos.get(layer_idx, 0)
 
     def get(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Return cached ``(keys, values)`` for a layer, if present."""
-        return self._layers.get(layer_idx)
+        cached = self._layers.get(layer_idx)
+        if cached is None:
+            return None
+        return cached.keys, cached.values
 
     def update(
         self,
         layer_idx: int,
         keys: torch.Tensor,
         values: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Append new key/value tensors and return the complete layer cache."""
+        *,
+        start_pos: int | None = None,
+    ) -> KVCacheView:
+        """Append new key/value tensors and return the retained layer cache."""
         self._validate_new_tensors(keys, values)
+        if start_pos is None:
+            start_pos = self.layer_next_pos(layer_idx)
+        if start_pos < 0:
+            raise ValueError("start_pos must be non-negative")
+
+        expected_pos = self.layer_next_pos(layer_idx)
+        if start_pos != expected_pos:
+            raise ValueError(
+                f"cannot append KV cache at absolute position {start_pos}; "
+                f"expected {expected_pos}"
+            )
 
         cached = self._layers.get(layer_idx)
         if cached is None:
             keys_all = keys
             values_all = values
+            cache_start_pos = start_pos
         else:
-            keys_cached, values_cached = cached
-            self._validate_cached_tensors(keys_cached, values_cached, keys, values)
-            keys_all = torch.cat((keys_cached, keys), dim=-2)
-            values_all = torch.cat((values_cached, values), dim=-2)
+            self._validate_cached_tensors(cached.keys, cached.values, keys, values)
+            keys_all = torch.cat((cached.keys, keys), dim=-2)
+            values_all = torch.cat((cached.values, values), dim=-2)
+            cache_start_pos = cached.start_pos
 
-        if self.max_seq_len is not None and keys_all.shape[-2] > self.max_seq_len:
-            raise ValueError(
-                f"KV cache length {keys_all.shape[-2]} exceeds max_seq_len "
-                f"{self.max_seq_len}"
-            )
+        next_pos = start_pos + int(keys.shape[-2])
+        if self.cache_length is not None and keys_all.shape[-2] > self.cache_length:
+            if not self.sliding:
+                raise ValueError(
+                    f"KV cache length {keys_all.shape[-2]} exceeds cache_length "
+                    f"{self.cache_length}"
+                )
+            keys_all = keys_all[:, :, -self.cache_length :, :]
+            values_all = values_all[:, :, -self.cache_length :, :]
+            cache_start_pos = next_pos - int(keys_all.shape[-2])
 
-        self._layers[layer_idx] = (keys_all, values_all)
-        return keys_all, values_all
+        view = KVCacheView(keys=keys_all, values=values_all, start_pos=cache_start_pos)
+        self._layers[layer_idx] = view
+        self._next_pos[layer_idx] = next_pos
+        return view
 
     @staticmethod
     def _validate_new_tensors(keys: torch.Tensor, values: torch.Tensor) -> None:

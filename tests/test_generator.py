@@ -34,7 +34,7 @@ class RecordingGreedyModel(nn.Module):
 
 def test_generator_prefills_prompt_then_uses_one_token_steps() -> None:
     model = RecordingGreedyModel()
-    generator = Generator(model=model, tokenizer=DigitTokenizer(), context_size=2)
+    generator = Generator(model=model, tokenizer=DigitTokenizer(), cache_length=2)
 
     generated = generator.generate("456", max_generated_token=3)
 
@@ -42,14 +42,14 @@ def test_generator_prefills_prompt_then_uses_one_token_steps() -> None:
     seen_contexts = [
         cast(list[list[int]], cast(Any, ctx).tolist()) for ctx in model.seen_contexts
     ]
-    assert seen_contexts == [[[4, 5, 6]], [[7]], [[8]]]
+    assert seen_contexts == [[[4, 5]], [[6]], [[7]], [[8]]]
 
 
 def test_generator_can_return_completion_only() -> None:
     generator = Generator(
         model=RecordingGreedyModel(),
         tokenizer=DigitTokenizer(),
-        context_size=2,
+        cache_length=2,
     )
 
     generated = generator.generate(
@@ -65,7 +65,7 @@ def test_generator_stops_before_eos_token() -> None:
     generator = Generator(
         model=RecordingGreedyModel(),
         tokenizer=DigitTokenizer(),
-        context_size=2,
+        cache_length=2,
     )
 
     generated = generator.generate(
@@ -82,7 +82,7 @@ def test_generator_can_continue_through_eos_token() -> None:
     generator = Generator(
         model=RecordingGreedyModel(),
         tokenizer=DigitTokenizer(),
-        context_size=2,
+        cache_length=2,
     )
 
     generated = generator.generate(
@@ -100,7 +100,7 @@ def test_generator_exposes_and_logs_throughput_metrics(caplog) -> None:
     generator = Generator(
         model=RecordingGreedyModel(),
         tokenizer=DigitTokenizer(),
-        context_size=2,
+        cache_length=2,
     )
 
     with caplog.at_level(logging.INFO, logger=generator.logger.name):
@@ -116,11 +116,11 @@ def test_generator_exposes_and_logs_throughput_metrics(caplog) -> None:
 
 def test_generator_with_tiny_cached_model_is_deterministic() -> None:
     model_a = RecordingGreedyModel()
-    generator_a = Generator(model_a, DigitTokenizer(), context_size=8)
+    generator_a = Generator(model_a, DigitTokenizer(), cache_length=8)
     generated_a = generator_a.generate("01", max_generated_token=4)
 
     model_b = RecordingGreedyModel()
-    generator_b = Generator(model_b, DigitTokenizer(), context_size=8)
+    generator_b = Generator(model_b, DigitTokenizer(), cache_length=8)
     generated_b = generator_b.generate("01", max_generated_token=4)
 
     assert generated_a == "012345"

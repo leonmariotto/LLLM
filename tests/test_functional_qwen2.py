@@ -23,7 +23,6 @@ def test_functional_qwen2_5_coder_generates_addition_function() -> None:
     generator = Generator(
         model=model,
         tokenizer=tokenizer,
-        context_size=cfg["context_length"],
     )
     prompt_tokens = tokenizer.encode_instruct_prompt(
         "Write a Python function named add that takes two arguments and returns "

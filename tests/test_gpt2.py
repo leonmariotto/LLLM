@@ -495,7 +495,7 @@ def test_gpt_rejects_sequences_longer_than_context_length() -> None:
 
 def test_generator_gpt2_appends_greedy_tokens_and_crops_context() -> None:
     model = RecordingGreedyModel()
-    generator = GeneratorGPT2(model=model, tokenizer=DigitTokenizer(), context_size=2)
+    generator = GeneratorGPT2(model=model, tokenizer=DigitTokenizer(), cache_length=2)
 
     generated = generator.generate("456", max_generated_token=3)
 
@@ -514,7 +514,7 @@ def test_generator_gpt2_with_tiny_gpt_is_deterministic() -> None:
     generator_a = GeneratorGPT2(
         model_a,
         DigitTokenizer(),
-        context_size=cfg["context_length"],
+        cache_length=cfg["context_length"],
     )
     generated_a = generator_a.generate("01", max_generated_token=4)
 
@@ -523,7 +523,7 @@ def test_generator_gpt2_with_tiny_gpt_is_deterministic() -> None:
     generator_b = GeneratorGPT2(
         model_b,
         DigitTokenizer(),
-        context_size=cfg["context_length"],
+        cache_length=cfg["context_length"],
     )
     generated_b = generator_b.generate("01", max_generated_token=4)
 

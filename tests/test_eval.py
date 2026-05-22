@@ -103,7 +103,7 @@ def test_evaluate_instructions_model_scores_generated_completion_only(
         adapter=adapter,
         limit=1,
         max_generated_token=1,
-        context_size=8,
+        cache_length=8,
     )
 
     assert accuracy == 1.0
@@ -135,7 +135,7 @@ def test_evaluate_instructions_model_uses_adapter_prompt_encoder(
         adapter=adapter,
         limit=1,
         max_generated_token=1,
-        context_size=8,
+        cache_length=8,
     )
 
     assert accuracy == 1.0
@@ -156,7 +156,7 @@ def test_evaluate_base_model_perplexity_uses_next_token_cross_entropy(
         model=UniformLogitModel(vocab_size=4),
         tokenizer=DigitTokenizer(),
         limit=3,
-        context_size=8,
+        context_length=8,
     )
 
     assert perplexity == pytest.approx(4.0)

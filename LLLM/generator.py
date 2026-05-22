@@ -33,11 +33,11 @@ class Generator:
         self,
         model: TensorModel,
         tokenizer: Tokenizer,
-        context_size: int = 1024,
+        cache_length: int = 4096,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
-        self.context_size = context_size
+        self.cache_length = cache_length
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.generated_token_count: List[int] = []
         self.generation_seconds: List[float] = []
@@ -50,7 +50,7 @@ class Generator:
         stop_at_eos: bool = True,
         max_generated_token: int = 20,
         eos: int | None = None,
-        context_size: int | None = None,
+        cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
         include_prompt: bool = True,
@@ -65,7 +65,7 @@ class Generator:
             max_generated_token: Maximum number of new tokens to generate.
             eos: Token id treated as end-of-sequence when ``stop_at_eos`` is
                 enabled. If ``None``, no EOS stopping is applied.
-            context_size: Optional per-call context window override. When not
+            cache_length: Optional per-call KV cache length override. When not
                 provided, the generator default from ``__init__`` is used.
             temperature: Sampling temperature. ``0.0`` uses deterministic greedy
                 argmax decoding; values above zero sample from the scaled
@@ -88,7 +88,7 @@ class Generator:
             stop_at_eos=stop_at_eos,
             max_generated_token=max_generated_token,
             eos=eos,
-            context_size=context_size,
+            cache_length=cache_length,
             temperature=temperature,
             top_k=top_k,
             include_prompt=include_prompt,
@@ -101,7 +101,7 @@ class Generator:
         stop_at_eos: bool = True,
         max_generated_token: int = 20,
         eos: int | None = None,
-        context_size: int | None = None,
+        cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
         include_prompt: bool = True,
@@ -118,7 +118,7 @@ class Generator:
             stop_at_eos=stop_at_eos,
             max_generated_token=max_generated_token,
             eos=eos,
-            context_size=self.context_size if context_size is None else context_size,
+            cache_length=self.cache_length if cache_length is None else cache_length,
             temperature=temperature,
             top_k=top_k,
         )
@@ -138,7 +138,7 @@ class Generator:
         stop_at_eos: bool,
         max_generated_token: int,
         eos: int | None,
-        context_size: int,
+        cache_length: int,
         temperature: float,
         top_k: int | None,
     ) -> tuple[list[int], int]:
@@ -149,32 +149,52 @@ class Generator:
             temperature: Sampling temperature.
             top_k: Optional top-k sampling cutoff.
         """
+        if cache_length <= 0:
+            raise ValueError("cache_length must be positive")
         self.model.eval()
         idx = torch.tensor(
             [input_tokens],
             dtype=torch.long,
             device=self._model_device(),
         )
-        kv_cache = KVCache(max_seq_len=context_size)
+        kv_cache = KVCache(cache_length=cache_length)
         generated_token_count = 0
-        idx_next_input = idx
+        logits = self._prefill(idx, kv_cache, cache_length)
 
-        for _ in range(max_generated_token):
-            with torch.no_grad():
-                logits = self.model(idx_next_input, kv_cache=kv_cache)
-
+        for step in range(max_generated_token):
             logits = logits[:, -1, :]
             logits = self._filter_logits(logits, top_k)
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 break
             idx = torch.cat((idx, idx_next), dim=1)
-            idx_next_input = idx_next
             generated_token_count += int(idx_next.shape[0])
+            if step + 1 < max_generated_token:
+                with torch.no_grad():
+                    logits = self.model(idx_next, kv_cache=kv_cache)
 
         return cast(
             list[int], cast(Any, idx.squeeze(0)).tolist()
         ), generated_token_count
+
+    def _prefill(
+        self,
+        idx: torch.Tensor,
+        kv_cache: KVCache,
+        cache_length: int,
+    ) -> torch.Tensor:
+        """Run prompt prefill in chunks bounded by the retained cache length."""
+        if idx.shape[1] == 0:
+            raise ValueError("input_tokens must contain at least one token")
+
+        logits: torch.Tensor | None = None
+        for start in range(0, idx.shape[1], cache_length):
+            chunk = idx[:, start : start + cache_length]
+            with torch.no_grad():
+                logits = self.model(chunk, kv_cache=kv_cache)
+
+        assert logits is not None
+        return logits
 
     def _record_metrics(self, generated_token_count: int, elapsed: float) -> None:
         """Record generation performance metrics."""

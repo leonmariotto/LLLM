@@ -45,7 +45,6 @@ def test_functional_llama2_fetch_load_generate(
     generator = Generator(
         model=model,
         tokenizer=tokenizer,
-        context_size=model.context_length,
     )
     generated_text = generator.generate(
         prompt,
@@ -121,7 +120,6 @@ def test_functional_llama2_compare_rope_layout_logits_and_generation(
         generator = Generator(
             model=model,
             tokenizer=tokenizer,
-            context_size=model.context_length,
         )
         return generator.generate(
             prompt,
@@ -168,7 +166,7 @@ def test_functional_llama2_fetch_load_generate_raw_evaluate(
         model=model,
         tokenizer=tokenizer,
         limit=2,
-        context_size=64,
+        context_length=64,
     )
 
     assert math.isfinite(perplexity)

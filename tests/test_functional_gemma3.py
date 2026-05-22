@@ -151,7 +151,6 @@ def test_functional_gemma3_1b_it_runs_instruction_eval(
         adapter=adapter,
         limit=5,
         max_generated_token=max_generated_token,
-        context_size=2048,
     )
 
     assert math.isfinite(accuracy)
@@ -209,7 +208,6 @@ def test_functional_gemma3_qat_gguf_q4_quantized_it_runs_instruction_eval(
         adapter=adapter,
         limit=5,
         max_generated_token=max_generated_token,
-        context_size=2048,
     )
 
     assert math.isfinite(accuracy)

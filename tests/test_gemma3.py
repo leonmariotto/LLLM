@@ -11,6 +11,7 @@ from ..LLLM.gemma3 import (
     Gemma3TransformerBlock,
 )
 from ..LLLM.hf_loader import model_ir_from_hf
+from ..LLLM.kv_cache import KVCache
 from ..LLLM.rope import precompute_rope_cache
 
 
@@ -116,6 +117,22 @@ def test_gemma3_attention_supports_head_dim_different_from_embedding_split() -> 
     out = attention(x, cos, sin)
 
     assert out.shape == (2, 3, 8)
+
+
+def test_gemma3_sliding_cache_uses_absolute_rope_positions() -> None:
+    torch.manual_seed(123)
+    model = Gemma3Model(_tiny_gemma3_config()).eval()
+    idx = torch.tensor([[1, 2, 3, 4]])
+    cache = KVCache(cache_length=2)
+
+    with torch.no_grad():
+        model(idx[:, :2], kv_cache=cache)
+        model(idx[:, 2:3], kv_cache=cache)
+        model(idx[:, 3:], kv_cache=cache)
+
+    assert cache.layer_seq_len(0) == 2
+    assert cache.layer_start_pos(0) == 2
+    assert cache.layer_next_pos(0) == 4
 
 
 def test_gemma3_load_ir_weights_copies_hugging_face_weights() -> None:

@@ -32,7 +32,7 @@ def test_functional_gpt_eval_runs_wikitext_perplexity_against_local_model(
         model=model,
         tokenizer=tokenizer,
         limit=10,
-        context_size=64,
+        context_length=64,
     )
 
     assert math.isfinite(perplexity)
@@ -52,7 +52,7 @@ def _generate_20_tokens_from_fetched_model(repo_id: str) -> str:
     generator = GeneratorGPT2(
         model=model,
         tokenizer=tokenizer,
-        context_size=model.pos_emb.num_embeddings if model.pos_emb else 1024,
+        cache_length=model.pos_emb.num_embeddings if model.pos_emb else 1024,
     )
     generated_text = generator.generate(prompt, max_generated_token=20)
     print("Generated text : [" + generated_text + "]\n")

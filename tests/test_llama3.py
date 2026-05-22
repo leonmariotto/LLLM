@@ -300,6 +300,53 @@ def test_grouped_query_attention_with_kv_cache_matches_full_attention_last_token
     torch.testing.assert_close(cached_outputs, full_outputs[:, 2:, :])
 
 
+def test_grouped_query_attention_sliding_cache_uses_absolute_rope_positions() -> None:
+    attention = Llama3GroupedQueryAttention(
+        d_in=4,
+        d_out=4,
+        context_length=4,
+        num_heads=2,
+        num_kv_groups=1,
+        dropout=0.0,
+        qkv_bias=False,
+    )
+
+    with torch.no_grad():
+        attention.W_query.weight.copy_(torch.eye(4))
+        attention.W_key.weight.copy_(
+            torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                ]
+            )
+        )
+        attention.W_value.weight.copy_(
+            torch.tensor(
+                [
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            )
+        )
+        attention.out_proj.weight.copy_(torch.eye(4))
+
+    inputs = torch.tensor(
+        [[[1.0, 0.0, 0.5, 0.0], [0.0, 2.0, 1.0, 1.0], [1.0, 1.0, 0.0, 2.0]]]
+    )
+    cos, sin = precompute_rope_cache(seq_len=4, head_dim=2)
+    cache = KVCache(cache_length=2)
+
+    attention(inputs[:, :2, :], cos, sin, kv_cache=cache, layer_idx=0)
+    cached_outputs = attention(inputs[:, 2:, :], cos, sin, kv_cache=cache, layer_idx=0)
+    expected_outputs = attention(inputs[:, 1:, :], cos, sin, pos=1)
+
+    assert cache.layer_seq_len(0) == 2
+    assert cache.layer_start_pos(0) == 1
+    assert cache.layer_next_pos(0) == 3
+    torch.testing.assert_close(cached_outputs, expected_outputs[:, -1:, :])
+
+
 def test_grouped_query_attention_rejects_invalid_dimensions() -> None:
     with pytest.raises(AssertionError, match="num_head shall not be 0"):
         Llama3GroupedQueryAttention(

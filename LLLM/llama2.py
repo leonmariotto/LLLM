@@ -172,25 +172,22 @@ class Llama2MultiHeadAttention(nn.Module):
         queries = queries.transpose(1, 2)
         values_new = values_new.transpose(1, 2)
 
-        # Get the cache length for the current layer.
-        past_tokens = 0
+        # Get the absolute position for the current layer.
+        next_pos = 0
         if kv_cache is not None:
             if self.use_rope is False:
                 raise ValueError("RoPE must be enabled for using KVCache")
             if layer_idx is None:
                 raise ValueError("layer_idx is required when kv_cache is provided")
-            past_tokens = kv_cache.layer_seq_len(layer_idx)
+            next_pos = kv_cache.layer_next_pos(layer_idx)
 
+        start_pos = next_pos if pos is None else pos
         if self.use_rope:
             # Add RoPE after Q/K projection and head reshaping and before computing
             # attention scores.
             # We pass to apply_rope only sin/cos for the current position. Compute each index
             # position from a pos offset.
-            # If pos is None we infer from cache length.
-            if pos is None:
-                start_pos = past_tokens
-            else:
-                start_pos = pos
+            # If pos is None we infer from the cache absolute next position.
             position_ids = torch.arange(
                 start_pos,
                 start_pos + num_tokens,
@@ -206,9 +203,14 @@ class Llama2MultiHeadAttention(nn.Module):
 
         if kv_cache is None:
             keys, values = keys_new, values_new
+            key_start_pos = start_pos if self.use_rope else 0
         else:
             assert layer_idx is not None
-            keys, values = kv_cache.update(layer_idx, keys_new, values_new)
+            cache_view = kv_cache.update(
+                layer_idx, keys_new, values_new, start_pos=start_pos
+            )
+            keys, values = cache_view.keys, cache_view.values
+            key_start_pos = cache_view.start_pos
 
         # Compute scaled dot-product attention (aka self-attention) with a causal mask
         attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
@@ -217,10 +219,14 @@ class Llama2MultiHeadAttention(nn.Module):
         # So shape[-2] is the query-token dimension.
         num_tokens_Q = queries.shape[-2]
         num_tokens_K = keys.shape[-2]
-        key_positions = torch.arange(num_tokens_K, device=x.device)
+        key_positions = torch.arange(
+            key_start_pos,
+            key_start_pos + num_tokens_K,
+            device=x.device,
+        )
         query_positions = torch.arange(
-            num_tokens_K - num_tokens_Q,
-            num_tokens_K,
+            start_pos,
+            start_pos + num_tokens_Q,
             device=x.device,
         )
         mask_bool = key_positions[None, :] > query_positions[:, None]

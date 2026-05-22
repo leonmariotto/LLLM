@@ -109,6 +109,23 @@ def test_qwen3_cached_prefill_plus_next_token_matches_full_forward() -> None:
     )
 
 
+def test_qwen3_sliding_cache_uses_absolute_rope_positions() -> None:
+    manual_seed = cast(Callable[[int], Any], cast(Any, torch).manual_seed)
+    manual_seed(123)
+    model = Qwen3Model(_tiny_qwen3_config()).eval()
+    idx = torch.tensor([[1, 2, 3, 4]])
+    cache = KVCache(cache_length=2)
+
+    with torch.no_grad():
+        model(idx[:, :2], kv_cache=cache)
+        model(idx[:, 2:3], kv_cache=cache)
+        model(idx[:, 3:], kv_cache=cache)
+
+    assert cache.layer_seq_len(0) == 2
+    assert cache.layer_start_pos(0) == 2
+    assert cache.layer_next_pos(0) == 4
+
+
 def test_qwen3_chat_template_can_disable_thinking() -> None:
     tokenizer = Qwen3Tokenizer.__new__(Qwen3Tokenizer)
 
