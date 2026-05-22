@@ -8,6 +8,7 @@ from ..LLLM.eval import (
     DatasetAdapter,
     evaluate_base_model_perplexity,
     evaluate_instructions_model,
+    strip_think_blocks,
 )
 
 
@@ -45,7 +46,9 @@ class MockModel(torch.nn.Module):
         super().__init__()
         self.param = torch.nn.Parameter(torch.zeros(1))
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, idx: torch.Tensor, *, kv_cache: object | None = None
+    ) -> torch.Tensor:
         logits = torch.zeros((*idx.shape, 3), device=idx.device)
         logits[:, -1, 1] = 1.0
         return logits
@@ -157,3 +160,21 @@ def test_evaluate_base_model_perplexity_uses_next_token_cross_entropy(
     )
 
     assert perplexity == pytest.approx(4.0)
+
+
+def test_strip_think_blocks_removes_complete_single_line_block() -> None:
+    assert strip_think_blocks("<think>hidden</think>answer") == "answer"
+
+
+def test_strip_think_blocks_removes_complete_multiline_block() -> None:
+    text = "before\n<think>line 1\nline 2</think>\nafter"
+
+    assert strip_think_blocks(text) == "before\n\nafter"
+
+
+def test_strip_think_blocks_removes_unterminated_trailing_block() -> None:
+    assert strip_think_blocks("answer<think>unfinished") == "answer"
+
+
+def test_strip_think_blocks_leaves_normal_answer_unchanged() -> None:
+    assert strip_think_blocks("answer") == "answer"

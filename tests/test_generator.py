@@ -1,14 +1,10 @@
 import logging
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 import torch
 from torch import nn
 
 from ..LLLM.generator import Generator
-from ..LLLM.gpt2 import GPT2Config, GPT2Model
-
-
-_manual_seed = cast(Callable[[int], torch.Generator], cast(Any, torch).manual_seed)
 
 
 class DigitTokenizer:
@@ -24,7 +20,9 @@ class RecordingGreedyModel(nn.Module):
         super().__init__()
         self.seen_contexts: list[torch.Tensor] = []
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, idx: torch.Tensor, *, kv_cache: object | None = None
+    ) -> torch.Tensor:
         self.seen_contexts.append(idx.clone())
         batch_size, seq_len = idx.shape
         logits = torch.zeros(batch_size, seq_len, 10, device=idx.device)
@@ -34,20 +32,7 @@ class RecordingGreedyModel(nn.Module):
         return logits
 
 
-def _tiny_gpt_config() -> GPT2Config:
-    return {
-        "vocab_size": 5,
-        "context_length": 4,
-        "emb_dim": 3,
-        "n_heads": 1,
-        "n_layers": 0,
-        "drop_rate": 0.0,
-        "qkv_bias": False,
-        "positional_encoding": "gpt2",
-    }
-
-
-def test_generator_appends_greedy_tokens_and_crops_context() -> None:
+def test_generator_prefills_prompt_then_uses_one_token_steps() -> None:
     model = RecordingGreedyModel()
     generator = Generator(model=model, tokenizer=DigitTokenizer(), context_size=2)
 
@@ -57,7 +42,7 @@ def test_generator_appends_greedy_tokens_and_crops_context() -> None:
     seen_contexts = [
         cast(list[list[int]], cast(Any, ctx).tolist()) for ctx in model.seen_contexts
     ]
-    assert seen_contexts == [[[5, 6]], [[6, 7]], [[7, 8]]]
+    assert seen_contexts == [[[4, 5, 6]], [[7]], [[8]]]
 
 
 def test_generator_can_return_completion_only() -> None:
@@ -129,18 +114,14 @@ def test_generator_exposes_and_logs_throughput_metrics(caplog) -> None:
     assert "tokens/s" in caplog.text
 
 
-def test_generator_with_tiny_gpt_is_deterministic() -> None:
-    cfg = _tiny_gpt_config()
-
-    _manual_seed(123)
-    model_a = GPT2Model(cfg)
-    generator_a = Generator(model_a, DigitTokenizer(), context_size=cfg["context_length"])
+def test_generator_with_tiny_cached_model_is_deterministic() -> None:
+    model_a = RecordingGreedyModel()
+    generator_a = Generator(model_a, DigitTokenizer(), context_size=8)
     generated_a = generator_a.generate("01", max_generated_token=4)
 
-    _manual_seed(123)
-    model_b = GPT2Model(cfg)
-    generator_b = Generator(model_b, DigitTokenizer(), context_size=cfg["context_length"])
+    model_b = RecordingGreedyModel()
+    generator_b = Generator(model_b, DigitTokenizer(), context_size=8)
     generated_b = generator_b.generate("01", max_generated_token=4)
 
-    assert generated_a == "011344"
-    assert generated_b == "011344"
+    assert generated_a == "012345"
+    assert generated_b == "012345"

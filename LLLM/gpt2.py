@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast, TypeAlias, Dict, Optional
+from typing import Any, TYPE_CHECKING, cast, TypeAlias, Dict, Optional
 from typing import TypedDict, Literal
 
 import torch
@@ -14,6 +14,7 @@ from tiktoken_ext.openai_public import gpt2 as gpt2_tiktoken_base_args
 
 from .norm import LayerNorm
 from .rope import apply_rope, precompute_rope_cache
+from .generator import Generator
 
 if TYPE_CHECKING:
     from .model_ir import ModelIR, ModelWeightsIR
@@ -318,6 +319,46 @@ class GPT2Tokenizer:
             in_str: Input string to encode.
         """
         return len(self.encode(in_str))
+
+
+class GeneratorGPT2(Generator):
+    """GPT-2 text generator using the legacy full-context, cache-less path."""
+
+    def _generate_tokens(
+        self,
+        input_tokens: list[int],
+        *,
+        stop_at_eos: bool,
+        max_generated_token: int,
+        eos: int | None,
+        context_size: int,
+        temperature: float,
+        top_k: int | None,
+    ) -> tuple[list[int], int]:
+        self.model.eval()
+        idx = torch.tensor(
+            [input_tokens],
+            dtype=torch.long,
+            device=self._model_device(),
+        )
+        generated_token_count = 0
+
+        for _ in range(max_generated_token):
+            idx_cond = idx[:, -context_size:]
+            with torch.no_grad():
+                logits = self.model(idx_cond)
+
+            logits = logits[:, -1, :]
+            logits = self._filter_logits(logits, top_k)
+            idx_next = self._select_next_token(logits, temperature)
+            if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
+                break
+            idx = torch.cat((idx, idx_next), dim=1)
+            generated_token_count += int(idx_next.shape[0])
+
+        return cast(
+            list[int], cast(Any, idx.squeeze(0)).tolist()
+        ), generated_token_count
 
 
 class GPT2MultiHeadAttention(nn.Module):

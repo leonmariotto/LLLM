@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from .generator import Generator
+from .kv_cache import KVCache
 
 # Make pyright happy
 load_dataset = cast(
@@ -29,6 +30,16 @@ class TensorModel(Protocol):
     def eval(self) -> Any: ...
 
     def __call__(self, idx: torch.Tensor) -> torch.Tensor: ...
+
+
+class CachedTensorModel(Protocol):
+    """Model contract used by cached instruction generation."""
+
+    def eval(self) -> Any: ...
+
+    def __call__(
+        self, idx: torch.Tensor, *, kv_cache: KVCache | None = None
+    ) -> torch.Tensor: ...
 
 
 class Tokenizer(Protocol):
@@ -88,8 +99,20 @@ def extract_last_number(text: str) -> str:
     return numbers[-1] if numbers else ""
 
 
+def strip_think_blocks(text: str) -> str:
+    """
+    Remove Qwen-style hidden thinking spans from generated text.
+
+    Complete ``<think>...</think>`` blocks are stripped across lines. If a model
+    starts a trailing ``<think>`` block and never closes it, the trailing content
+    is dropped.
+    """
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+
+
 def evaluate_instructions_model(
-    model: TensorModel,
+    model: CachedTensorModel,
     tokenizer: Tokenizer,
     adapter: DatasetAdapter[TExpected, TPrediction],
     limit: int = 20,
@@ -144,7 +167,8 @@ def evaluate_instructions_model(
                 include_prompt=False,
             )
 
-        prediction = adapter.extract_prediction(raw_prediction_text)
+        prediction_text = strip_think_blocks(raw_prediction_text)
+        prediction = adapter.extract_prediction(prediction_text)
         expected = adapter.extract_expected(row)
 
         ok = adapter.score(prediction, expected)
@@ -156,7 +180,7 @@ def evaluate_instructions_model(
         print("Prompt:", prompt)
         print("Expected:", expected)
         print("Prediction:", prediction)
-        print("Raw output:", raw_prediction_text)
+        print("Raw output:", prediction_text)
         print("Correct:", ok)
 
     accuracy = correct / total if total else 0

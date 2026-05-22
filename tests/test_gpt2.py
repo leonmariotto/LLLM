@@ -10,6 +10,7 @@ from ..LLLM.gpt2 import (
     GPT2Model,
     GPT2MultiHeadAttention,
     GPT2TransformerBlock,
+    GeneratorGPT2,
 )
 from ..LLLM.hf_loader import model_ir_from_hf
 from ..LLLM.norm import LayerNorm
@@ -30,6 +31,29 @@ def _tiny_gpt_config() -> GPT2Config:
         "qkv_bias": False,
         "positional_encoding": "gpt2",
     }
+
+
+class DigitTokenizer:
+    def encode(self, input: str) -> list[int]:
+        return [int(char) for char in input]
+
+    def decode(self, tok: list[int]) -> str:
+        return "".join(str(token) for token in tok)
+
+
+class RecordingGreedyModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_contexts: list[torch.Tensor] = []
+
+    def forward(self, idx: torch.Tensor) -> torch.Tensor:
+        self.seen_contexts.append(idx.clone())
+        batch_size, seq_len = idx.shape
+        logits = torch.zeros(batch_size, seq_len, 10, device=idx.device)
+
+        next_token = (idx[:, -1] + 1) % 10
+        logits[torch.arange(batch_size), -1, next_token] = 1.0
+        return logits
 
 
 def _tiny_transformer_gpt_config() -> GPT2Config:
@@ -467,3 +491,41 @@ def test_gpt_rejects_sequences_longer_than_context_length() -> None:
 
     with pytest.raises(AssertionError):
         model(in_idx)
+
+
+def test_generator_gpt2_appends_greedy_tokens_and_crops_context() -> None:
+    model = RecordingGreedyModel()
+    generator = GeneratorGPT2(model=model, tokenizer=DigitTokenizer(), context_size=2)
+
+    generated = generator.generate("456", max_generated_token=3)
+
+    assert generated == "456789"
+    seen_contexts = [
+        cast(list[list[int]], cast(Any, ctx).tolist()) for ctx in model.seen_contexts
+    ]
+    assert seen_contexts == [[[5, 6]], [[6, 7]], [[7, 8]]]
+
+
+def test_generator_gpt2_with_tiny_gpt_is_deterministic() -> None:
+    cfg = _tiny_gpt_config()
+
+    _manual_seed(123)
+    model_a = GPT2Model(cfg)
+    generator_a = GeneratorGPT2(
+        model_a,
+        DigitTokenizer(),
+        context_size=cfg["context_length"],
+    )
+    generated_a = generator_a.generate("01", max_generated_token=4)
+
+    _manual_seed(123)
+    model_b = GPT2Model(cfg)
+    generator_b = GeneratorGPT2(
+        model_b,
+        DigitTokenizer(),
+        context_size=cfg["context_length"],
+    )
+    generated_b = generator_b.generate("01", max_generated_token=4)
+
+    assert generated_a == "011344"
+    assert generated_b == "011344"

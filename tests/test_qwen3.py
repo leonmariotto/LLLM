@@ -4,6 +4,7 @@ from transformers import Qwen3Config as TransformersQwen3Config
 from transformers import Qwen3ForCausalLM
 
 from ..LLLM.hf_loader import model_ir_from_hf
+from ..LLLM.kv_cache import KVCache
 from ..LLLM.qwen3 import Qwen3Config, Qwen3Model
 
 
@@ -86,3 +87,23 @@ def test_qwen3_tiny_model_matches_transformers_reference_model() -> None:
         expected = reference(idx).logits
 
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+
+
+def test_qwen3_cached_prefill_plus_next_token_matches_full_forward() -> None:
+    manual_seed = cast(Callable[[int], Any], cast(Any, torch).manual_seed)
+    manual_seed(123)
+    model = Qwen3Model(_tiny_qwen3_config()).eval()
+    idx = torch.tensor([[1, 2, 3, 4]])
+    cache = KVCache()
+
+    with torch.no_grad():
+        full_logits = model(idx)
+        model(idx[:, :-1], kv_cache=cache)
+        cached_next_logits = model(idx[:, -1:], kv_cache=cache)
+
+    torch.testing.assert_close(
+        cached_next_logits[:, -1, :],
+        full_logits[:, -1, :],
+        atol=1e-5,
+        rtol=1e-5,
+    )

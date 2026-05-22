@@ -9,11 +9,15 @@ from typing import Any, Protocol, cast, List
 
 import torch
 
+from .kv_cache import KVCache
+
 
 class TensorModel(Protocol):
     def eval(self) -> Any: ...
 
-    def __call__(self, idx: torch.Tensor) -> torch.Tensor: ...
+    def __call__(
+        self, idx: torch.Tensor, *, kv_cache: KVCache | None = None
+    ) -> torch.Tensor: ...
 
 
 class Tokenizer(Protocol):
@@ -151,12 +155,13 @@ class Generator:
             dtype=torch.long,
             device=self._model_device(),
         )
+        kv_cache = KVCache(max_seq_len=context_size)
         generated_token_count = 0
+        idx_next_input = idx
 
         for _ in range(max_generated_token):
-            idx_cond = idx[:, -context_size:]
             with torch.no_grad():
-                logits = self.model(idx_cond)
+                logits = self.model(idx_next_input, kv_cache=kv_cache)
 
             logits = logits[:, -1, :]
             logits = self._filter_logits(logits, top_k)
@@ -164,6 +169,7 @@ class Generator:
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 break
             idx = torch.cat((idx, idx_next), dim=1)
+            idx_next_input = idx_next
             generated_token_count += int(idx_next.shape[0])
 
         return cast(
