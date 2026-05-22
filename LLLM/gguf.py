@@ -112,6 +112,11 @@ def config_ir_from_gguf_reader(
             config["rope_scaling"] = rope_scaling
         return "llama3", config
 
+    if architecture in {"qwen2", "qwen3"}:
+        return cast(ArchitectureId, architecture), _qwen_config_from_gguf_reader(
+            reader, architecture
+        )
+
     if architecture not in {"gemma", "gemma3"}:
         raise GGUFLoadError(f"unsupported GGUF architecture {architecture!r}")
 
@@ -217,6 +222,51 @@ def tensors_ir_from_gguf_reader(
     if "lm_head.weight" not in tensors and "token_embedding.weight" in tensors:
         tensors["lm_head.weight"] = tensors["token_embedding.weight"]
     return tensors
+
+
+def _qwen_config_from_gguf_reader(
+    reader: GGUFReader, architecture: str
+) -> dict[str, Any]:
+    """Translate Qwen-family GGUF metadata into normalized config fields."""
+    n_heads = _int_field(reader, f"{architecture}.attention.head_count")
+    hidden_size = _int_field(reader, f"{architecture}.embedding_length")
+    head_dim = _int_field(
+        reader,
+        f"{architecture}.attention.key_length",
+        default=hidden_size // n_heads,
+    )
+    return {
+        "vocab_size": _vocab_size(reader),
+        "context_length": _int_field(reader, f"{architecture}.context_length"),
+        "hidden_size": hidden_size,
+        "intermediate_size": _int_field(reader, f"{architecture}.feed_forward_length"),
+        "num_attention_heads": n_heads,
+        "num_key_value_heads": _int_field(
+            reader,
+            f"{architecture}.attention.head_count_kv",
+            default=n_heads,
+        ),
+        "num_hidden_layers": _int_field(reader, f"{architecture}.block_count"),
+        "head_dim": head_dim,
+        "rope_theta": _float_field(
+            reader, f"{architecture}.rope.freq_base", default=10000.0
+        ),
+        "rope_interleaved": False,
+        "rms_norm_eps": _float_field(
+            reader,
+            f"{architecture}.attention.layer_norm_rms_epsilon",
+            default=1e-6,
+        ),
+        "attention_bias": _qwen_attention_bias(reader),
+    }
+
+
+def _qwen_attention_bias(reader: GGUFReader) -> bool:
+    """Return whether the GGUF tensors include Q/K/V attention biases."""
+    return any(
+        tensor.name.endswith((".attn_q.bias", ".attn_k.bias", ".attn_v.bias"))
+        for tensor in reader.tensors
+    )
 
 
 def _llama_rope_scaling_from_gguf_reader(reader: GGUFReader) -> dict[str, Any] | None:

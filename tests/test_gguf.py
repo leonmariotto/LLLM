@@ -55,6 +55,47 @@ def test_gguf_reader_translates_llama_metadata_and_tensor_names(tmp_path: Path) 
     )
 
 
+def test_gguf_reader_translates_qwen3_metadata_and_tensor_names(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tiny-qwen3.gguf"
+    writer = gguf.GGUFWriter(path, "qwen3")
+    writer.add_token_list(["a", "b", "c", "d"])
+    writer.add_context_length(8)
+    writer.add_embedding_length(4)
+    writer.add_feed_forward_length(12)
+    writer.add_block_count(1)
+    writer.add_head_count(2)
+    writer.add_head_count_kv(1)
+    writer.add_key_length(2)
+    writer.add_rope_freq_base(1000000.0)
+    writer.add_layer_norm_rms_eps(1e-6)
+    writer.add_tensor(
+        "token_embd.weight",
+        np.arange(16, dtype=np.float32).reshape(4, 4),
+    )
+    writer.add_tensor("blk.0.attn_q.weight", np.eye(4, dtype=np.float32))
+    writer.add_tensor("blk.0.attn_q_norm.weight", np.ones(2, dtype=np.float32))
+    writer.add_tensor("blk.0.attn_k_norm.weight", np.ones(2, dtype=np.float32))
+    writer.add_tensor("blk.0.ffn_norm.weight", np.ones(4, dtype=np.float32))
+    writer.add_tensor("output_norm.weight", np.ones(4, dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+
+    ir = load_gguf_ir(path)
+
+    assert ir.architecture == "qwen3"
+    assert ir.config.get("vocab_size") == 4
+    assert ir.config.get("context_length") == 8
+    assert ir.config.get("head_dim") == 2
+    assert ir.config.get("rope_theta") == 1000000.0
+    assert ir.config.get("attention_bias") is False
+    assert ir.weights["layers.0.attention.q_norm.weight"].shape == (2,)
+    assert ir.weights["layers.0.post_attention_norm.weight"].shape == (4,)
+
+
 def test_dequantize_gguf_tensor_supports_quantized_blocks() -> None:
     source = np.linspace(-1.0, 1.0, 32, dtype=np.float32).reshape(1, 32)
     quantized = gguf.quantize(source, gguf.GGMLQuantizationType.Q4_0)

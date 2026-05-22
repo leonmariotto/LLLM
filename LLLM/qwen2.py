@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict, cast
 
+import tiktoken
 import torch
 import torch.nn as nn
 from tokenizers import Tokenizer
@@ -455,16 +456,63 @@ class Qwen2Model(nn.Module):
 
 
 class Qwen2Tokenizer:
-    """Thin wrapper around Qwen2 Hugging Face tokenizer.json."""
+    """Thin wrapper around Qwen2 Hugging Face tokenizer.json or GGUF tokenizer."""
 
     def __init__(self, tokenizer_file_path: str):
         tok_file = Path(tokenizer_file_path)
-        from_file = cast(Callable[[str], Tokenizer], cast(Any, Tokenizer).from_file)
-        self.tok = from_file(str(tok_file))
+        self.tok: Tokenizer | None = None
+        self.tiktok: tiktoken.Encoding | None = None
+        self.special: dict[str, int] = {}
+        if tok_file.suffix.lower() == ".gguf":
+            self.tiktok = self._tiktoken_from_gguf(tok_file)
+        else:
+            from_file = cast(Callable[[str], Tokenizer], cast(Any, Tokenizer).from_file)
+            self.tok = from_file(str(tok_file))
         self.eos_token_id = self.convert_tokens_to_ids("<|im_end|>")
         self.pad_token_id = self.convert_tokens_to_ids("<|endoftext|>")
 
+    @staticmethod
+    def _qwen2_pat_str() -> str:
+        """Return Qwen2's GPT-2 BPE pre-tokenization regex."""
+        return (
+            r"(?i:'s|'t|'re|'ve|'m|'ll|'d)"
+            r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+            r"|\p{N}"
+            r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+            r"|\s*[\r\n]+"
+            r"|\s+(?!\S)"
+            r"|\s+"
+        )
+
+    def _tiktoken_from_gguf(self, gguf_path: Path) -> tiktoken.Encoding:
+        """Build a tiktoken tokenizer from Qwen GGUF GPT-2 BPE fields."""
+        from gguf import GGUFReader
+
+        from .gguf import find_gguf_file, tokenizer_mergeable_ranks_from_gguf
+
+        gguf_file = find_gguf_file(gguf_path)
+        reader = GGUFReader(gguf_file)
+        tokens = cast(list[str], reader.fields["tokenizer.ggml.tokens"].contents())
+        token_types = cast(
+            list[int], reader.fields["tokenizer.ggml.token_type"].contents()
+        )
+        self.special = {
+            token: token_id
+            for token_id, (token, token_type) in enumerate(zip(tokens, token_types))
+            if token_type != 1
+        }
+        return tiktoken.Encoding(
+            name=gguf_file.name,
+            pat_str=self._qwen2_pat_str(),
+            mergeable_ranks=tokenizer_mergeable_ranks_from_gguf(gguf_file),
+            special_tokens=self.special,
+        )
+
     def encode(self, input: str) -> list[int]:
+        if self.tiktok is not None:
+            return self.tiktok.encode(input)
+        if self.tok is None:
+            raise ValueError("Qwen2 tokenizer is not initialized")
         encode = cast(Callable[[str], Any], cast(Any, self.tok).encode)
         encoded = encode(input)
         return cast(list[int], encoded.ids)
@@ -494,14 +542,23 @@ class Qwen2Tokenizer:
             prompt += f"<|im_start|>{role}\n{message['content']}<|im_end|>\n"
         if add_generation_prompt:
             prompt += "<|im_start|>assistant\n"
+        # TODO add option for hard thinking disabling.
         if not tokenize:
             return prompt
         return {"input_ids": self.encode(prompt)}
 
     def convert_tokens_to_ids(self, token: str) -> int | None:
+        if self.tiktok is not None:
+            return self.special.get(token)
+        if self.tok is None:
+            raise ValueError("Qwen2 tokenizer is not initialized")
         token_to_id = cast(Any, self.tok).token_to_id
         return cast(int | None, token_to_id(token))
 
     def decode(self, tok: list[int]) -> str:
+        if self.tiktok is not None:
+            return self.tiktok.decode(tok)
+        if self.tok is None:
+            raise ValueError("Qwen2 tokenizer is not initialized")
         decode = cast(Any, self.tok).decode
         return cast(str, decode(tok, skip_special_tokens=False))
