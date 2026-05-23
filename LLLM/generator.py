@@ -55,6 +55,7 @@ class Generator:
         cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
+        top_p: float | None = None,
         include_prompt: bool = True,
     ) -> str:
         """
@@ -71,7 +72,11 @@ class Generator:
                 argmax decoding; values above zero sample from the scaled
                 probability distribution.
             top_k: If set, restrict each next-token choice to the ``top_k``
-                highest-logit tokens before decoding.
+                highest-logit tokens before decoding. Ignored when ``top_p`` is
+                set.
+            top_p: If set, restrict each next-token choice to the smallest set
+                of high-probability tokens whose cumulative probability is at
+                least ``top_p``. Uses top-p instead of top-k.
             include_prompt: When ``True``, return prompt plus generated text.
                 When ``False``, return only the generated completion.
 
@@ -90,6 +95,7 @@ class Generator:
             cache_length=cache_length,
             temperature=temperature,
             top_k=top_k,
+            top_p=top_p,
             include_prompt=include_prompt,
         )
 
@@ -102,6 +108,7 @@ class Generator:
         cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
+        top_p: float | None = None,
         include_prompt: bool = True,
     ) -> str:
         """
@@ -118,6 +125,7 @@ class Generator:
             cache_length=self.cache_length if cache_length is None else cache_length,
             temperature=temperature,
             top_k=top_k,
+            top_p=top_p,
         )
         self._record_metrics(generated_token_count, time.perf_counter() - start_time)
 
@@ -137,13 +145,15 @@ class Generator:
         cache_length: int,
         temperature: float,
         top_k: int | None,
+        top_p: float | None,
     ) -> tuple[list[int], int]:
         """
-        Implement top-k sampling and temperature.
+        Implement top-k/top-p sampling and temperature.
 
         Args:
             temperature: Sampling temperature.
             top_k: Optional top-k sampling cutoff.
+            top_p: Optional top-p sampling cutoff. Takes precedence over top-k.
         """
         if cache_length <= 0:
             raise ValueError("cache_length must be positive")
@@ -160,7 +170,7 @@ class Generator:
 
         for step in range(max_generated_token):
             logits = logits[:, -1, :]
-            logits = self._filter_logits(logits, top_k)
+            logits = self._filter_logits(logits, top_k, top_p)
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 loguru_logger.info("Model generate an EOS, stop")
@@ -218,15 +228,24 @@ class Generator:
             self.mean_token_per_second,
         )
 
-    def _filter_logits(self, logits: torch.Tensor, top_k: int | None) -> torch.Tensor:
+    def _filter_logits(
+        self,
+        logits: torch.Tensor,
+        top_k: int | None,
+        top_p: float | None = None,
+    ) -> torch.Tensor:
         """
-        Filter logits to select only top_k logits. This is done before selecting
-        the logit with temperature.
+        Filter logits using top-p when set, otherwise top-k. This is done before
+        selecting the logit with temperature.
 
         Args:
             logits: Model logits to filter or sample from.
             top_k: Optional top-k sampling cutoff.
+            top_p: Optional top-p sampling cutoff. Takes precedence over top-k.
         """
+        if top_p is not None:
+            return self._filter_top_p_logits(logits, top_p)
+
         if top_k is None:
             return logits
 
@@ -237,6 +256,27 @@ class Generator:
             torch.tensor(float("-inf"), device=logits.device),
             logits,
         )
+
+    def _filter_top_p_logits(self, logits: torch.Tensor, top_p: float) -> torch.Tensor:
+        """Filter logits to the nucleus whose cumulative probability reaches top_p."""
+        if top_p <= 0.0 or top_p > 1.0:
+            raise ValueError("top_p must be in the interval (0.0, 1.0]")
+
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+        sorted_probs = torch.softmax(sorted_logits, dim=-1)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = False
+
+        indices_to_remove = torch.zeros_like(sorted_indices_to_remove)
+        indices_to_remove.scatter_(
+            dim=-1,
+            index=sorted_indices,
+            src=sorted_indices_to_remove,
+        )
+        return logits.masked_fill(indices_to_remove, float("-inf"))
 
     def _select_next_token(
         self, logits: torch.Tensor, temperature: float

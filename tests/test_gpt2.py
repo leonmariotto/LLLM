@@ -509,6 +509,14 @@ def test_generator_gpt2_appends_greedy_tokens_and_crops_context() -> None:
     assert seen_contexts == [[[5, 6]], [[6, 7]], [[7, 8]]]
 
 
+def test_generator_gpt2_rejects_top_p_sampling() -> None:
+    model = RecordingGreedyModel()
+    generator = GeneratorGPT2(model=model, tokenizer=DigitTokenizer(), cache_length=2)
+
+    with pytest.raises(NotImplementedError, match="top_p"):
+        generator.generate("456", max_generated_token=3, top_p=0.9)
+
+
 def test_generator_gpt2_with_tiny_gpt_is_deterministic() -> None:
     cfg = _tiny_gpt_config()
 

@@ -29,11 +29,10 @@ def test_functional_qwen2_5_coder_generates_addition_function() -> None:
             prompt,
             enable_thinking=False,
         ),
+        top_p = 0.90,
     )
     coder = Coder(generator)
     task = (
-        #"Write a C program that print 42 on stdout."
-        #"Write a C program that print it's own source code (quine)."
         "Write a C program that print the number of ac arguments."
     )
 

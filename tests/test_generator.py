@@ -1,6 +1,7 @@
 import logging
 from typing import Any, cast
 
+import pytest
 import torch
 from torch import nn
 
@@ -36,6 +37,17 @@ class RecordingGreedyModel(nn.Module):
         next_token = (idx[:, -1] + 1) % 10
         logits[torch.arange(batch_size), -1, next_token] = 1.0
         return logits
+
+
+class FilterProbeGenerator(Generator):
+    def filter_logits_for_test(
+        self,
+        logits: torch.Tensor,
+        *,
+        top_k: int | None,
+        top_p: float | None = None,
+    ) -> torch.Tensor:
+        return self._filter_logits(logits, top_k, top_p)
 
 
 def test_generator_prefills_prompt_then_uses_one_token_steps() -> None:
@@ -129,3 +141,41 @@ def test_generator_with_tiny_cached_model_is_deterministic() -> None:
 
     assert generated_a == "012345"
     assert generated_b == "012345"
+
+
+def test_filter_logits_uses_top_k_by_default() -> None:
+    generator = FilterProbeGenerator(
+        model=RecordingGreedyModel(),
+        tokenizer=DigitTokenizer(),
+        cache_length=2,
+    )
+    logits = torch.tensor([[1.0, 4.0, 3.0, 2.0]])
+
+    filtered = generator.filter_logits_for_test(logits, top_k=2)
+
+    is_finite = cast(list[list[bool]], cast(Any, torch.isfinite(filtered)).tolist())
+    assert is_finite == [[False, True, True, False]]
+
+
+def test_filter_logits_uses_top_p_instead_of_top_k_when_enabled() -> None:
+    generator = FilterProbeGenerator(
+        model=RecordingGreedyModel(),
+        tokenizer=DigitTokenizer(),
+        cache_length=2,
+    )
+    logits = torch.zeros(1, 4)
+
+    filtered = generator.filter_logits_for_test(logits, top_k=1, top_p=0.74)
+
+    assert torch.isfinite(filtered).sum().item() == 3
+
+
+def test_filter_logits_rejects_invalid_top_p() -> None:
+    generator = FilterProbeGenerator(
+        model=RecordingGreedyModel(),
+        tokenizer=DigitTokenizer(),
+        cache_length=2,
+    )
+
+    with pytest.raises(ValueError, match="top_p"):
+        generator.filter_logits_for_test(torch.zeros(1, 4), top_k=None, top_p=0.0)

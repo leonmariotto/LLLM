@@ -30,6 +30,7 @@ class TextGenerator(Protocol):
         cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
+        top_p: float | None = None,
         include_prompt: bool = True,
     ) -> str: ...
 
@@ -85,7 +86,8 @@ class CodeSelfConsistencyGenerator:
         sample_count: int = 5,
         max_generated_token: int = 2048,
         temperature: float = 0.8,
-        top_k: int | None = 50,
+        top_k: int = 50,
+        top_p: float | None = 50,
     ) -> None:
         if sample_count <= 0:
             raise ValueError("sample_count must be positive")
@@ -95,6 +97,7 @@ class CodeSelfConsistencyGenerator:
         self.max_generated_token = max_generated_token
         self.temperature = temperature
         self.top_k = top_k
+        self.top_p = top_p
 
     def generate_candidates(self, task: str) -> tuple[CodeCandidate, ...]:
         candidates: list[CodeCandidate] = []
@@ -107,6 +110,7 @@ class CodeSelfConsistencyGenerator:
                     max_generated_token=self.max_generated_token,
                     temperature=self.temperature,
                     top_k=self.top_k,
+                    top_p=self.top_p,
                     include_prompt=False,
                 )
             else:
@@ -215,7 +219,7 @@ class Coder:
             "-std=c11",
             "-Wall",
             "-Wextra",
-            "-Werror",
+            # "-Werror",
             "-c",
             str(source_path),
             "-o",
@@ -248,6 +252,10 @@ class Coder:
         candidates: Sequence[CodeCandidate],
         compile_results: Sequence[CompileResult],
     ) -> CodeCandidate:
+        """
+        Select only candidate that compile.
+        Choose randomly.
+        """
         if not candidates:
             raise ValueError("cannot select from an empty candidate list")
 

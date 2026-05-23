@@ -336,7 +336,13 @@ class GeneratorGPT2(Generator):
         cache_length: int,
         temperature: float,
         top_k: int | None,
+        top_p: float | None,
     ) -> tuple[list[int], int]:
+        if top_p is not None:
+            raise NotImplementedError(
+                "top_p sampling is not supported by GeneratorGPT2"
+            )
+
         self.model.eval()
         idx = torch.tensor(
             [input_tokens],
