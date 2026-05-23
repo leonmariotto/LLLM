@@ -21,6 +21,7 @@ def _load_local_gpt2(tmp_path: Path) -> tuple[GPT2Model, GPT2Tokenizer]:
     return model, tokenizer
 
 
+@pytest.mark.slow
 def test_functional_gpt_eval_runs_wikitext_perplexity_against_local_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
