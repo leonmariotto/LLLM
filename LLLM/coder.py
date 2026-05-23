@@ -12,7 +12,7 @@ It intentionally does not execute produced code.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -20,7 +20,7 @@ import random
 import re
 import subprocess
 import tempfile
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from loguru import logger
 
@@ -182,7 +182,7 @@ class _CodeSelfConsistencyGenerator:
             "Read the program text literally. Do not guess behavior that is not "
             "present in the code.\n"
             "Return only valid JSON with exactly this shape:\n"
-            '{"judging": "<brief comparison>", "select": "<choose between A and B>"}\n'
+            '{"judging": "<brief comparison>", "select": "<A or B>"}\n'
         )
 
 
@@ -365,7 +365,6 @@ class Coder:
             raw_output = _generate_instruct(
                 self.judge_generator,
                 prompt,
-                # enable_thinking=True, # TODO whats better ?
                 enable_thinking=False,
                 max_generated_token=self.judge_max_generated_token,
                 temperature=self.judge_temperature,
@@ -473,9 +472,9 @@ class Coder:
         return "A"
 
     @staticmethod
-    def _iter_json_objects(text: str) -> Sequence[Any]:
+    def _iter_json_objects(text: str) -> Sequence[object]:
         decoder = json.JSONDecoder()
-        payloads: list[Any] = []
+        payloads: list[object] = []
         for index, char in enumerate(text):
             if char != "{":
                 continue
@@ -487,20 +486,21 @@ class Coder:
         return tuple(payloads)
 
     @staticmethod
-    def _validated_judge_select(payload: Any, raw_output: str) -> str | None:
+    def _validated_judge_select(payload: object, raw_output: str) -> str | None:
         if not isinstance(payload, dict):
             logger.warning("Judge JSON must be an object, ignore: {}", raw_output)
             return None
 
-        judging = payload.get("judging")
-        winner = payload.get("select")
+        payload_object = cast(Mapping[str, object], payload)
+        judging = payload_object.get("judging")
+        winner = payload_object.get("select")
         if not isinstance(judging, str):
             logger.warning(
                 "Judge JSON missing string judging field, ignore: {}",
                 raw_output,
             )
             return None
-        if winner not in {"A", "B"}:
+        if not isinstance(winner, str) or winner not in {"A", "B"}:
             logger.warning(
                 "Judge JSON has invalid select field, ignore: {}", raw_output
             )
