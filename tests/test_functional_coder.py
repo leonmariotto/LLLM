@@ -23,10 +23,18 @@ def test_functional_qwen2_5_coder_generates_addition_function() -> None:
         model=model,
         tokenizer=tokenizer,
     )
-    generator = CodeSelfConsistencyGenerator(generator_base)
+    generator = CodeSelfConsistencyGenerator(
+        generator_base,
+        encode_prompt=lambda prompt: tokenizer.encode_instruct_prompt(
+            prompt,
+            enable_thinking=False,
+        ),
+    )
     coder = Coder(generator)
     task = (
-        "Write a C program that print 42 on stdout."
+        #"Write a C program that print 42 on stdout."
+        #"Write a C program that print it's own source code (quine)."
+        "Write a C program that print the number of ac arguments."
     )
 
     result = coder.solve(task)
@@ -34,4 +42,3 @@ def test_functional_qwen2_5_coder_generates_addition_function() -> None:
     assert result is not None
 
     print("Generated and selected Qwen2 program:\n" + result.selected_candidate.source)
-

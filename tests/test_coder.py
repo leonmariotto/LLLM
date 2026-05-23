@@ -14,6 +14,7 @@ class FakeTextGenerator:
     def __init__(self, outputs: Sequence[str]) -> None:
         self.outputs = list(outputs)
         self.prompts: list[str] = []
+        self.prompt_tokens: list[list[int]] = []
 
     def generate(
         self,
@@ -28,6 +29,20 @@ class FakeTextGenerator:
     ) -> str:
         self.prompts.append(prompt)
         return self.outputs[len(self.prompts) - 1]
+
+    def generate_from_tokens(
+        self,
+        prompt_tokens: list[int],
+        *,
+        stop_at_eos: bool = True,
+        max_generated_token: int = 20,
+        cache_length: int | None = None,
+        temperature: float = 0.0,
+        top_k: int | None = None,
+        include_prompt: bool = True,
+    ) -> str:
+        self.prompt_tokens.append(prompt_tokens)
+        return self.outputs[len(self.prompt_tokens) - 1]
 
 
 @dataclass(frozen=True)
@@ -55,6 +70,22 @@ def test_self_consistency_generator_requests_five_candidates() -> None:
     assert len(base.prompts) == 5
     assert candidates[0].source == "int main(void) { return 0; }"
     assert "Candidate number: 5" in base.prompts[4]
+    assert "Do not include markdown fences" in base.prompts[0]
+
+
+def test_self_consistency_generator_can_use_encoded_prompts() -> None:
+    base = FakeTextGenerator(["int main(void) { return 0; }"])
+    generator = CodeSelfConsistencyGenerator(
+        base,
+        encode_prompt=lambda prompt: [len(prompt)],
+        sample_count=1,
+    )
+
+    candidates = generator.generate_candidates("return a status code")
+
+    assert candidates[0].source == "int main(void) { return 0; }"
+    assert base.prompts == []
+    assert base.prompt_tokens == [[len(candidates[0].prompt)]]
 
 
 def test_extract_c_source_prefers_fenced_c_block() -> None:

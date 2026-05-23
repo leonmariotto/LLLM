@@ -81,6 +81,7 @@ class CodeSelfConsistencyGenerator:
         self,
         base: TextGenerator,
         *,
+        encode_prompt: Callable[[str], list[int]] | None = None,
         sample_count: int = 5,
         max_generated_token: int = 2048,
         temperature: float = 0.8,
@@ -89,6 +90,7 @@ class CodeSelfConsistencyGenerator:
         if sample_count <= 0:
             raise ValueError("sample_count must be positive")
         self.base = base
+        self.encode_prompt = encode_prompt
         self.sample_count = sample_count
         self.max_generated_token = max_generated_token
         self.temperature = temperature
@@ -99,13 +101,16 @@ class CodeSelfConsistencyGenerator:
         for index in range(self.sample_count):
             prompt = self.build_prompt(task, index)
             logger.info("Generating C candidate {}/{}", index + 1, self.sample_count)
-            raw_output = self.base.generate(
-                prompt,
-                max_generated_token=self.max_generated_token,
-                temperature=self.temperature,
-                top_k=self.top_k,
-                include_prompt=False,
-            )
+            if self.encode_prompt is None:
+                raw_output = self.base.generate(
+                    prompt,
+                    max_generated_token=self.max_generated_token,
+                    temperature=self.temperature,
+                    top_k=self.top_k,
+                    include_prompt=False,
+                )
+            else:
+                raw_output = self._generate_from_encoded_prompt(prompt)
             source = self.extract_c_source(raw_output)
             logger.info(
                 "Generated C candidate {} with {} source bytes: {}",
@@ -123,12 +128,28 @@ class CodeSelfConsistencyGenerator:
             )
         return tuple(candidates)
 
+    def _generate_from_encoded_prompt(self, prompt: str) -> str:
+        if not hasattr(self.base, "generate_from_tokens"):
+            raise TypeError("base generator must implement generate_from_tokens")
+        if self.encode_prompt is None:
+            raise TypeError("encode_prompt must not be None")
+        base = self.base
+        generate_from_tokens = getattr(base, "generate_from_tokens")
+        return generate_from_tokens(
+            self.encode_prompt(prompt),
+            max_generated_token=self.max_generated_token,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            include_prompt=False,
+        )
+
     @staticmethod
     def build_prompt(task: str, sample_index: int) -> str:
         return (
             "Write one complete, self-contained C11 source file for the task below.\n"
-            "Return only C code, preferably in a single fenced ```c code block.\n"
-            "Do not include shell commands, explanations, or tests outside the C file.\n"
+            "Return only raw C code.\n"
+            "Do not include markdown fences, shell commands, explanations, or tests "
+            "outside the C file.\n"
             f"Candidate number: {sample_index + 1}\n\n"
             f"Task:\n{task.strip()}\n"
         )
