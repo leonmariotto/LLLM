@@ -272,6 +272,9 @@ class GPT2Tokenizer:
             },
         )
 
+    def get_eos(self) -> int | None:
+        return self.tiktok.eot_token
+
     @property
     def vocabulary_size(self) -> int:
         """Surface encoder capacity directly from tiktoken for quick inspection."""
@@ -330,7 +333,6 @@ class GeneratorGPT2(Generator):
         *,
         stop_at_eos: bool,
         max_generated_token: int,
-        eos: int | None,
         cache_length: int,
         temperature: float,
         top_k: int | None,
@@ -342,6 +344,7 @@ class GeneratorGPT2(Generator):
             device=self._model_device(),
         )
         generated_token_count = 0
+        eos = self.tokenizer.get_eos()
 
         for _ in range(max_generated_token):
             idx_cond = idx[:, -cache_length:]

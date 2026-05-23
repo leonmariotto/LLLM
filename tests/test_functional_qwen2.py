@@ -33,7 +33,6 @@ def test_functional_qwen2_5_coder_generates_addition_function() -> None:
     generated_text = generator.generate_from_tokens(
         prompt_tokens,
         max_generated_token=80,
-        eos=tokenizer.eos_token_id,
         include_prompt=False,
     )
     print("Generated Qwen2 addition function:\n" + generated_text)

@@ -44,7 +44,6 @@ qwen3_boolq_adapter = DatasetAdapter(
     extract_prediction=boolq_prediction,
     score=boolq_adapter.score,
     encode_prompt=_qwen3_encode_instruction_prompt,
-    eos_token=_qwen3_eos_token,
 )
 
 
@@ -63,7 +62,6 @@ qwen3_squad_adapter = DatasetAdapter(
     extract_prediction=lambda text: text.strip(),
     score=squad_score,
     encode_prompt=_qwen3_encode_instruction_prompt,
-    eos_token=_qwen3_eos_token,
 )
 
 
@@ -80,7 +78,6 @@ qwen3_gsm8k_adapter = DatasetAdapter(
     extract_prediction=extract_last_number,
     score=gsm8k_adapter.score,
     encode_prompt=_qwen3_encode_instruction_prompt,
-    eos_token=_qwen3_eos_token,
 )
 
 

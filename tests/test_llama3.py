@@ -9,6 +9,7 @@ from ..LLLM.llama3 import (
     Llama3Config,
     Llama3GroupedQueryAttention,
     Llama3Model,
+    Llama3Tokenizer,
     Llama3TransformerBlock,
 )
 from ..LLLM.hf_loader import model_ir_from_hf
@@ -50,6 +51,14 @@ def _tiny_transformer_llama3_config() -> Llama3Config:
     cfg = _tiny_llama3_config().copy()
     cfg["n_layers"] = 1
     return cfg
+
+
+def test_llama3_tokenizer_stops_generation_at_end_of_turn() -> None:
+    tokenizer = Llama3Tokenizer.__new__(Llama3Tokenizer)
+    tokenizer.special = tokenizer._llama3_special_tokens()
+
+    assert tokenizer.get_eos() == tokenizer.special["<|eot_id|>"]
+    assert tokenizer.get_eos() != tokenizer.special["<|end_of_text|>"]
 
 
 def test_llama3_config_from_ir_translates_hugging_face_names() -> None:

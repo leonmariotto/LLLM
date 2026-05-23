@@ -40,6 +40,9 @@ class MockTokenizer:
         }
         return "".join(values.get(token, "") for token in tok)
 
+    def get_eos(self) -> int | None:
+        return None
+
 
 class MockModel(torch.nn.Module):
     def __init__(self) -> None:
@@ -60,6 +63,9 @@ class DigitTokenizer:
 
     def decode(self, tok: list[int]) -> str:
         return "".join(str(token) for token in tok)
+
+    def get_eos(self) -> int | None:
+        return None
 
 
 class UniformLogitModel(torch.nn.Module):

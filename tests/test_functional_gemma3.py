@@ -1,9 +1,9 @@
 import math
-from typing import Any, cast
+from pathlib import Path
+from typing import Any
 
 import pytest
 import torch
-from transformers import AutoTokenizer
 
 from ..LLLM.eval import (
     DatasetAdapter,
@@ -25,23 +25,7 @@ GEMMA3_1B_IT_QAT_Q4_FILE = "gemma-3-1B-it-QAT-Q4_0.gguf"
 
 
 def _gemma3_encode_instruction_prompt(tokenizer: Any, prompt: str) -> list[int]:
-    encoded = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
-        tokenize=True,
-        add_generation_prompt=True,
-    )
-    input_ids = encoded["input_ids"]
-    if isinstance(input_ids, torch.Tensor):
-        return cast(list[int], input_ids.squeeze(0).tolist())
-    return cast(list[int], input_ids)
-
-
-def _gemma3_eos_token(tokenizer: Any) -> int | None:
-    end_of_turn = tokenizer.convert_tokens_to_ids("<end_of_turn>")
-    if isinstance(end_of_turn, int) and end_of_turn >= 0:
-        return end_of_turn
-    eos_token_id = tokenizer.eos_token_id
-    return eos_token_id if isinstance(eos_token_id, int) else None
+    return tokenizer.encode_instruct_prompt(prompt)
 
 
 gemma3_boolq_adapter = DatasetAdapter(
@@ -58,7 +42,6 @@ gemma3_boolq_adapter = DatasetAdapter(
     extract_prediction=boolq_prediction,
     score=boolq_adapter.score,
     encode_prompt=_gemma3_encode_instruction_prompt,
-    eos_token=_gemma3_eos_token,
 )
 
 
@@ -77,7 +60,6 @@ gemma3_squad_adapter = DatasetAdapter(
     extract_prediction=lambda text: text.strip(),
     score=squad_score,
     encode_prompt=_gemma3_encode_instruction_prompt,
-    eos_token=_gemma3_eos_token,
 )
 
 
@@ -94,17 +76,15 @@ gemma3_gsm8k_adapter = DatasetAdapter(
     extract_prediction=extract_last_number,
     score=gsm8k_adapter.score,
     encode_prompt=_gemma3_encode_instruction_prompt,
-    eos_token=_gemma3_eos_token,
 )
 
 
 @pytest.fixture(scope="module")
-def gemma3_1b_it_model_and_tokenizer() -> tuple[Gemma3Model, Any]:
+def gemma3_1b_it_model_and_tokenizer() -> tuple[Gemma3Model, Gemma3Tokenizer]:
     ir = fetch_model_ir(GEMMA3_1B_IT_REPO_ID)
     cfg = Gemma3Model.config_from_ir(ir)
-    tokenizer = cast(Any, AutoTokenizer).from_pretrained(
-        ir.metadata["path"], local_files_only=True
-    )
+    path = Path(str(ir.metadata["path"]))
+    tokenizer = Gemma3Tokenizer(str(path / "tokenizer.json"))
     model = Gemma3Model(cfg)
     model.load_ir_weights(ir)
     del ir
@@ -113,14 +93,13 @@ def gemma3_1b_it_model_and_tokenizer() -> tuple[Gemma3Model, Any]:
 
 @pytest.mark.slow
 def test_functional_gemma3_1b_it_loads_and_runs_real_hf_checkpoint(
-    gemma3_1b_it_model_and_tokenizer: tuple[Gemma3Model, Any],
+    gemma3_1b_it_model_and_tokenizer: tuple[Gemma3Model, Gemma3Tokenizer],
 ) -> None:
     model, tokenizer = gemma3_1b_it_model_and_tokenizer
-    encoded = tokenizer(
-        "What is 2 + 2? Answer with one number.",
-        return_tensors="pt",
+    input_ids = torch.tensor(
+        [tokenizer.encode("What is 2 + 2? Answer with one number.")],
+        dtype=torch.long,
     )
-    input_ids = cast(torch.Tensor, encoded["input_ids"])
 
     with torch.no_grad():
         logits = model(input_ids)
@@ -139,7 +118,7 @@ def test_functional_gemma3_1b_it_loads_and_runs_real_hf_checkpoint(
     ],
 )
 def test_functional_gemma3_1b_it_runs_instruction_eval(
-    gemma3_1b_it_model_and_tokenizer: tuple[Gemma3Model, Any],
+    gemma3_1b_it_model_and_tokenizer: tuple[Gemma3Model, Gemma3Tokenizer],
     adapter: DatasetAdapter[Any, Any],
     max_generated_token: int,
 ) -> None:
@@ -196,7 +175,7 @@ def test_functional_gemma3_qat_gguf_q4_quantized_loads_tokenizer_and_runs() -> N
     ],
 )
 def test_functional_gemma3_qat_gguf_q4_quantized_it_runs_instruction_eval(
-    gemma3_1b_it_model_and_tokenizer: tuple[Gemma3Model, Any],
+    gemma3_1b_it_model_and_tokenizer: tuple[Gemma3Model, Gemma3Tokenizer],
     adapter: DatasetAdapter[Any, Any],
     max_generated_token: int,
 ) -> None:
@@ -212,4 +191,3 @@ def test_functional_gemma3_qat_gguf_q4_quantized_it_runs_instruction_eval(
 
     assert math.isfinite(accuracy)
     assert 0.0 <= accuracy <= 1.0
-

@@ -3,10 +3,11 @@ High-Level Generator class that provide text generation function
 from a raw model.
 """
 
-import logging
 import time
+import logging
 from typing import Any, Protocol, cast, List
 
+from loguru import logger as loguru_logger
 import torch
 
 from .kv_cache import KVCache
@@ -25,6 +26,8 @@ class Tokenizer(Protocol):
 
     def decode(self, tok: list[int]) -> str: ...
 
+    def get_eos(self) -> int | None: ...
+
 
 class Generator:
     """High level text generation class."""
@@ -38,10 +41,10 @@ class Generator:
         self.model = model
         self.tokenizer = tokenizer
         self.cache_length = cache_length
-        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.generated_token_count: List[int] = []
         self.generation_seconds: List[float] = []
         self.mean_token_per_second = 0.0
+        self.logger = logging.getLogger(__name__)
 
     def generate(
         self,
@@ -49,7 +52,6 @@ class Generator:
         *,
         stop_at_eos: bool = True,
         max_generated_token: int = 20,
-        eos: int | None = None,
         cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
@@ -63,8 +65,6 @@ class Generator:
             stop_at_eos: When ``True``, stop generation before appending ``eos``
                 if the next predicted token is the EOS token.
             max_generated_token: Maximum number of new tokens to generate.
-            eos: Token id treated as end-of-sequence when ``stop_at_eos`` is
-                enabled. If ``None``, no EOS stopping is applied.
             cache_length: Optional per-call KV cache length override. When not
                 provided, the generator default from ``__init__`` is used.
             temperature: Sampling temperature. ``0.0`` uses deterministic greedy
@@ -87,7 +87,6 @@ class Generator:
             prompt_tokens,
             stop_at_eos=stop_at_eos,
             max_generated_token=max_generated_token,
-            eos=eos,
             cache_length=cache_length,
             temperature=temperature,
             top_k=top_k,
@@ -100,7 +99,6 @@ class Generator:
         *,
         stop_at_eos: bool = True,
         max_generated_token: int = 20,
-        eos: int | None = None,
         cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
@@ -117,7 +115,6 @@ class Generator:
             prompt_tokens,
             stop_at_eos=stop_at_eos,
             max_generated_token=max_generated_token,
-            eos=eos,
             cache_length=self.cache_length if cache_length is None else cache_length,
             temperature=temperature,
             top_k=top_k,
@@ -137,7 +134,6 @@ class Generator:
         *,
         stop_at_eos: bool,
         max_generated_token: int,
-        eos: int | None,
         cache_length: int,
         temperature: float,
         top_k: int | None,
@@ -160,12 +156,14 @@ class Generator:
         kv_cache = KVCache(cache_length=cache_length)
         generated_token_count = 0
         logits = self._prefill(idx, kv_cache, cache_length)
+        eos = self.tokenizer.get_eos()
 
         for step in range(max_generated_token):
             logits = logits[:, -1, :]
             logits = self._filter_logits(logits, top_k)
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
+                loguru_logger.info("Model generate an EOS, stop")
                 break
             idx = torch.cat((idx, idx_next), dim=1)
             generated_token_count += int(idx_next.shape[0])
@@ -207,8 +205,14 @@ class Generator:
             c_seconds += s
         if c_count != 0:
             self.mean_token_per_second = float(c_count) / c_seconds
-        self.logger.info(
-            "Generated %s tokens in %.4fs (mean: %.2f tokens/s)",
+        message = "Generated {} tokens in {} (mean: {} tokens/s)".format(
+            generated_token_count,
+            elapsed,
+            self.mean_token_per_second,
+        )
+        self.logger.info(message)
+        loguru_logger.info(
+            "Generated {} tokens in {} (mean: {} tokens/s)",
             generated_token_count,
             elapsed,
             self.mean_token_per_second,

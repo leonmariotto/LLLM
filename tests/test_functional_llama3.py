@@ -36,11 +36,6 @@ llama3_boolq_adapter = DatasetAdapter(
         if isinstance(tokenizer, Llama3Tokenizer)
         else tokenizer.encode(prompt)
     ),
-    eos_token=lambda tokenizer: (
-        tokenizer.special["<|eot_id|>"]
-        if isinstance(tokenizer, Llama3Tokenizer)
-        else None
-    ),
 )
 
 

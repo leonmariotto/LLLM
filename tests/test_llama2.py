@@ -91,6 +91,9 @@ class FakeSentencePieceProcessor:
     def decode(self, ids: Sequence[int]) -> str:
         return "".join(chr(idx) for idx in ids)
 
+    def eos_id(self) -> int:
+        return 2
+
 
 def test_feed_forward_matches_manual_swiglu_computation() -> None:
     feed_forward = Llama2FeedForward(emb_dim=2, hidden_dim=3, dtype=None)
@@ -435,4 +438,5 @@ def test_llama_tokenizer_wraps_sentencepiece_processor(monkeypatch: pytest.Monke
 
     assert tokenizer.encode("Az") == [65, 122]
     assert tokenizer.decode([65, 122]) == "Az"
+    assert tokenizer.get_eos() == 2
     assert tokenizer.tokenizer.loaded_path == "tokenizer.model"

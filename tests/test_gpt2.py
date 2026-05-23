@@ -40,6 +40,9 @@ class DigitTokenizer:
     def decode(self, tok: list[int]) -> str:
         return "".join(str(token) for token in tok)
 
+    def get_eos(self) -> int | None:
+        return None
+
 
 class RecordingGreedyModel(nn.Module):
     def __init__(self) -> None:

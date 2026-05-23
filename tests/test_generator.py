@@ -8,11 +8,17 @@ from ..LLLM.generator import Generator
 
 
 class DigitTokenizer:
+    def __init__(self, eos: int | None = None) -> None:
+        self.eos = eos
+
     def encode(self, input: str) -> list[int]:
         return [int(char) for char in input]
 
     def decode(self, tok: list[int]) -> str:
         return "".join(str(token) for token in tok)
+
+    def get_eos(self) -> int | None:
+        return self.eos
 
 
 class RecordingGreedyModel(nn.Module):
@@ -64,14 +70,13 @@ def test_generator_can_return_completion_only() -> None:
 def test_generator_stops_before_eos_token() -> None:
     generator = Generator(
         model=RecordingGreedyModel(),
-        tokenizer=DigitTokenizer(),
+        tokenizer=DigitTokenizer(eos=7),
         cache_length=2,
     )
 
     generated = generator.generate(
         "456",
         max_generated_token=3,
-        eos=7,
         include_prompt=False,
     )
 
@@ -81,14 +86,13 @@ def test_generator_stops_before_eos_token() -> None:
 def test_generator_can_continue_through_eos_token() -> None:
     generator = Generator(
         model=RecordingGreedyModel(),
-        tokenizer=DigitTokenizer(),
+        tokenizer=DigitTokenizer(eos=7),
         cache_length=2,
     )
 
     generated = generator.generate(
         "456",
         max_generated_token=3,
-        eos=7,
         stop_at_eos=False,
         include_prompt=False,
     )

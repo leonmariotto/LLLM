@@ -866,6 +866,9 @@ class Gemma3Tokenizer:
         self.eos_token_id = self.convert_tokens_to_ids("<end_of_turn>")
         self.pad_token_id = self.eos_token_id
 
+    def get_eos(self) -> int | None:
+        return self.eos_token_id
+
     @staticmethod
     def _tokenizer_from_gguf(gguf_path: Path) -> Tokenizer:
         """Load tokenizer data embedded in a GGUF file."""

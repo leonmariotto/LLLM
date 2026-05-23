@@ -301,6 +301,11 @@ class Llama2Tokenizer:
         load(tokenizer_file)
         self.tokenizer = sp
 
+    def get_eos(self) -> int | None:
+        eos_id = cast(Callable[[], int], getattr(self.tokenizer, "eos_id"))
+        eos = eos_id()
+        return eos if eos >= 0 else None
+
     def encode(self, input: str) -> list[int]:
         encode = cast(
             Callable[..., list[int]],

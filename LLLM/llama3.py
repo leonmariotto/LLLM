@@ -758,6 +758,9 @@ class Llama3Tokenizer:
         )
         return special
 
+    def get_eos(self) -> int | None:
+        return self.special["<|eot_id|>"]
+
     def encode(self, input: str, bos: bool = False, eos: bool = False) -> list[int]:
         if self.hf_tokenizer is not None:
             ids = cast(list[int], self.hf_tokenizer.encode(input).ids)

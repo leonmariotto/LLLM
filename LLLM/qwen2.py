@@ -480,6 +480,9 @@ class Qwen2Tokenizer:
         self.eos_token_id = self.convert_tokens_to_ids("<|im_end|>")
         self.pad_token_id = self.convert_tokens_to_ids("<|endoftext|>")
 
+    def get_eos(self) -> int | None:
+        return self.eos_token_id
+
     @staticmethod
     def _qwen2_pat_str() -> str:
         """Return Qwen2's GPT-2 BPE pre-tokenization regex."""
