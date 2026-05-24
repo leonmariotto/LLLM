@@ -5,7 +5,7 @@ Then on *Build a reasoning model* book from the same author.
 
 ## Coder
 
-This repo export a script via uv : coder.  Coder is a tool used to generate C code. 
+Coder is a tool used to generate C code. 
 It use (by default) Qwen2.5 0.6B for generation and Qwen3 0.6B for judging. 
 For a given task, 5 candidates are generated, compilation is checked, then among 
 the successfull candidates we choose the best by doing a judge tournament.
@@ -15,6 +15,16 @@ Run:
 $> uv run coder --help
 $> echo "task" | uv run coder
 ```
+
+## Chat
+
+Chat can be used to ask a question to a model.
+
+Run:
+```
+$> echo "question" | uv run coder
+```
+WIP: no conversation, no fancy terminal prompt.
 
 ## Wishlist
 
@@ -31,8 +41,6 @@ space before storing them in the KV cache.
 - Improve output metrics. Use sklearn/evaluate to add metrics.
 - Add an optional cache to detect specialized neural regions activated for tasks.
 - bitsandbytes for memory pressure
-
-- Top-P filtering.
 
 - Do a pass of documentation on docstring models because some has been dropped by refactor.
 
