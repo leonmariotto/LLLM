@@ -30,8 +30,8 @@ dependencies = [
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-# [project.scripts]
-# LLLM = "LLLM.LLLM:main"
+[project.scripts]
+coder = "LLLM.coder:coder_cli"
 # 
 # [tool.uv]
 # package = true

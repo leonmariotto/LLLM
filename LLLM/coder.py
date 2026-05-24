@@ -1,7 +1,7 @@
 """
 Self-consistency loop for code production.
 
-Coder currently targets self-contained C programs only.
+Coder currently targets C programs only.
 It generates several candidate files, then check compilation.
 Use Qwen2.5-coder 0.5B.
 Then select the best candidate by doing a judging tournament
@@ -19,10 +19,19 @@ from pathlib import Path
 import random
 import re
 import subprocess
+import sys
 import tempfile
 from typing import Any, Protocol, cast
 
 from loguru import logger
+
+import click
+
+
+DEFAULT_CODE_MODEL_REPO_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
+DEFAULT_JUDGE_MODEL_REPO_ID = "Qwen/Qwen3-0.6B"
+DEFAULT_CACHE_LENGTH = 16384
+LOG_LEVELS = ("trace", "debug", "info", "success", "warning", "error", "critical")
 
 
 class TextGenerator(Protocol):
@@ -506,3 +515,177 @@ class Coder:
             )
             return None
         return winner
+
+
+def _build_qwen2_generator(
+    repo_id: str,
+    *,
+    cache_length: int,
+    local_files_only: bool,
+) -> TextGenerator:
+    from .fetch import fetch_model_ir
+    from .generator import Generator
+    from .qwen2 import Qwen2Model, Qwen2Tokenizer
+
+    ir = fetch_model_ir(repo_id, local_files_only=local_files_only)
+    cfg = Qwen2Model.config_from_ir(ir)
+    path = Path(str(ir.metadata["path"]))
+
+    tokenizer = Qwen2Tokenizer(str(path / "tokenizer.json"))
+    model = Qwen2Model(cfg)
+    model.load_ir_weights(ir)
+
+    return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
+
+
+def _build_qwen3_generator(
+    repo_id: str,
+    *,
+    cache_length: int,
+    local_files_only: bool,
+) -> TextGenerator:
+    from .fetch import fetch_model_ir
+    from .generator import Generator
+    from .qwen3 import Qwen3Model, Qwen3Tokenizer
+
+    ir = fetch_model_ir(repo_id, local_files_only=local_files_only)
+    cfg = Qwen3Model.config_from_ir(ir)
+    path = Path(str(ir.metadata["path"]))
+
+    tokenizer = Qwen3Tokenizer(str(path / "tokenizer.json"))
+    model = Qwen3Model(cfg)
+    model.load_ir_weights(ir)
+
+    return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
+
+
+def _build_cli_coder(
+    *,
+    code_model: str,
+    judge_model: str,
+    sample_count: int,
+    max_generated_token: int,
+    judge_max_generated_token: int,
+    cache_length: int,
+    code_top_p: float | None,
+    local_files_only: bool,
+) -> Coder:
+    code_generator = _build_qwen2_generator(
+        code_model,
+        cache_length=cache_length,
+        local_files_only=local_files_only,
+    )
+    judge_generator = _build_qwen3_generator(
+        judge_model,
+        cache_length=cache_length,
+        local_files_only=local_files_only,
+    )
+    return Coder(
+        code_generator,
+        judge_generator,
+        sample_count=sample_count,
+        max_generated_token=max_generated_token,
+        judge_max_generated_token=judge_max_generated_token,
+        code_top_p=code_top_p,
+    )
+
+
+def _configure_cli_logging(verbosity: str) -> None:
+    logger.remove()
+    logger.add(sys.stderr, level=verbosity.upper())
+
+
+@click.command(
+    help=(
+        "Read a coding instruction from stdin, generate C candidates, compile "
+        'them, then use another "judge" LLM to choose the best in a tournament. '
+        "Print the selected C source to stdout."
+    )
+)
+@click.option(
+    "--code-model",
+    default=DEFAULT_CODE_MODEL_REPO_ID,
+    show_default=True,
+    help="Hugging Face repo id or local path for the Qwen2-compatible coder model.",
+)
+@click.option(
+    "--judge-model",
+    default=DEFAULT_JUDGE_MODEL_REPO_ID,
+    show_default=True,
+    help="Hugging Face repo id or local path for the Qwen3-compatible judge model.",
+)
+@click.option(
+    "--sample-count",
+    default=5,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Number of candidate programs to generate.",
+)
+@click.option(
+    "--max-generated-token",
+    default=4096,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Maximum tokens to generate for each C candidate.",
+)
+@click.option(
+    "--judge-max-generated-token",
+    default=2048,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Maximum tokens to generate for each judge decision.",
+)
+@click.option(
+    "--cache-length",
+    default=DEFAULT_CACHE_LENGTH,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="KV cache length used by both generators.",
+)
+@click.option(
+    "--code-top-p",
+    default=0.90,
+    show_default=True,
+    type=float,
+    help="Top-p sampling value for candidate generation.",
+)
+@click.option(
+    "--local-files-only",
+    is_flag=True,
+    help="Only use models already present in the local Hugging Face cache.",
+)
+@click.option(
+    "--verbosity",
+    default="info",
+    show_default=True,
+    type=click.Choice(LOG_LEVELS, case_sensitive=False),
+    help="Log verbosity.",
+)
+def coder_cli(
+    code_model: str,
+    judge_model: str,
+    sample_count: int,
+    max_generated_token: int,
+    judge_max_generated_token: int,
+    cache_length: int,
+    code_top_p: float,
+    local_files_only: bool,
+    verbosity: str,
+) -> None:
+    _configure_cli_logging(verbosity)
+    instruction = click.get_text_stream("stdin").read()
+    if not instruction.strip():
+        raise click.UsageError("expected a coding instruction on stdin")
+
+    coder = _build_cli_coder(
+        code_model=code_model,
+        judge_model=judge_model,
+        sample_count=sample_count,
+        max_generated_token=max_generated_token,
+        judge_max_generated_token=judge_max_generated_token,
+        cache_length=cache_length,
+        code_top_p=code_top_p,
+        local_files_only=local_files_only,
+    )
+    result = coder.solve(instruction)
+    click.echo(result.selected_candidate.source)

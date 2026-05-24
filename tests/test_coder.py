@@ -2,10 +2,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import random
 
+from click.testing import CliRunner
+import pytest
+
+from ..LLLM import coder as coder_module
 from ..LLLM.coder import (
     CodeCandidate,
     CompileResult,
     Coder,
+    CoderResult,
     JudgeResult,
 )
 
@@ -242,6 +247,47 @@ def test_coder_selects_from_successes_with_seeded_rng() -> None:
     selected = coder.select_candidate(candidates, compile_results)
 
     assert selected.index == 2
+
+
+def test_coder_cli_reads_stdin_and_prints_selected_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_candidate = CodeCandidate(
+        0,
+        "prompt",
+        "raw",
+        "int main(void) { return 0; }",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeCliCoder:
+        def solve(self, instruction: str) -> CoderResult:
+            captured["instruction"] = instruction
+            return CoderResult(
+                task=instruction,
+                candidates=(selected_candidate,),
+                compile_results=(),
+                judge_results=(),
+                selected_candidate=selected_candidate,
+            )
+
+    def fake_build_cli_coder(**kwargs: object) -> FakeCliCoder:
+        captured["kwargs"] = kwargs
+        return FakeCliCoder()
+
+    monkeypatch.setattr(coder_module, "_build_cli_coder", fake_build_cli_coder)
+
+    result = CliRunner().invoke(
+        coder_module.coder_cli,
+        ["--sample-count", "1", "--verbosity", "debug"],
+        input="write a tiny program\n",
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "int main(void) { return 0; }\n"
+    assert captured["instruction"] == "write a tiny program\n"
+    assert isinstance(captured["kwargs"], dict)
+    assert captured["kwargs"]["sample_count"] == 1
 
 
 def test_coder_runs_tournament_over_successful_candidates() -> None:
