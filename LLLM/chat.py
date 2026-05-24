@@ -45,6 +45,7 @@ class ChatGenerationOptions:
     temperature: float
     top_k: int | None
     top_p: float | None
+    enable_thinking: bool
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,10 @@ def _build_qwen3_generator(
 
 
 def _encode_chat_messages(
-    generator: TextGenerator, messages: list[ChatMessage]
+    generator: TextGenerator,
+    messages: list[ChatMessage],
+    *,
+    enable_thinking: bool = True,
 ) -> list[int]:
     """Encode full chat history with the tokenizer's chat template."""
     tokenizer = getattr(generator, "tokenizer", None)
@@ -101,7 +105,7 @@ def _encode_chat_messages(
         messages,
         tokenize=True,
         add_generation_prompt=True,
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
     )
     if not isinstance(encoded, dict):
         raise TypeError("expected tokenized chat template output")
@@ -123,9 +127,14 @@ def _generate_chat_messages_response(
     temperature: float,
     top_k: int | None,
     top_p: float | None,
+    enable_thinking: bool = True,
 ) -> str:
     """Generate one assistant response from the complete structured history."""
-    prompt_tokens = _encode_chat_messages(generator, messages)
+    prompt_tokens = _encode_chat_messages(
+        generator,
+        messages,
+        enable_thinking=enable_thinking,
+    )
     _raise_if_context_overflows(generator, len(prompt_tokens))
     response = generator.generate_from_tokens(
         prompt_tokens,
@@ -146,6 +155,7 @@ def generate_chat_response(
     temperature: float,
     top_k: int | None,
     top_p: float | None,
+    enable_thinking: bool = True,
 ) -> str:
     """Generate a one-shot response from a single user prompt string."""
     tokenizer = getattr(generator, "tokenizer", None)
@@ -153,7 +163,7 @@ def generate_chat_response(
     if encode_prompt is None:
         raise TypeError("generator tokenizer must implement encode_instruct_prompt")
 
-    prompt_tokens = encode_prompt(prompt, enable_thinking=False)
+    prompt_tokens = encode_prompt(prompt, enable_thinking=enable_thinking)
     response = generator.generate_from_tokens(
         prompt_tokens,
         max_generated_token=max_generated_token,
@@ -260,10 +270,19 @@ def _chat_status(
     messages: list[ChatMessage],
     *,
     cache_length: int,
+    enable_thinking: bool = True,
 ) -> ChatStatus:
     """Build the status-bar metrics from current history and model structure."""
     absolute_position = (
-        len(_encode_chat_messages(generator, messages)) if messages else 0
+        len(
+            _encode_chat_messages(
+                generator,
+                messages,
+                enable_thinking=enable_thinking,
+            )
+        )
+        if messages
+        else 0
     )
     return ChatStatus(
         model_bytes=_estimate_model_bytes(generator),
@@ -426,6 +445,7 @@ def _run_textual_chat_app(
                     temperature=options.temperature,
                     top_k=options.top_k,
                     top_p=options.top_p,
+                    enable_thinking=options.enable_thinking,
                 )
             except Exception as exc:  # pragma: no cover - visible in app.
                 self.call_from_thread(self._finish_response, f"Error: {exc}", True)
@@ -451,6 +471,7 @@ def _run_textual_chat_app(
                     generator,
                     self.messages,
                     cache_length=cache_length,
+                    enable_thinking=options.enable_thinking,
                 )
                 self.status_widget.update(_format_status(status))
 
@@ -553,6 +574,11 @@ def _message_renderable(message: ChatMessage) -> Text:
     help="Only use models already present in the local Hugging Face cache.",
 )
 @click.option(
+    "--no-think",
+    is_flag=True,
+    help="Disable Qwen thinking mode in chat prompts.",
+)
+@click.option(
     "--verbosity",
     default="warning",
     show_default=True,
@@ -567,6 +593,7 @@ def chat_cli(
     top_k: int | None,
     top_p: float | None,
     local_files_only: bool,
+    no_think: bool,
     verbosity: str,
 ) -> None:
     _configure_cli_logging(verbosity)
@@ -585,6 +612,7 @@ def chat_cli(
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
+                enable_thinking=not no_think,
             ),
         )
         return
@@ -600,5 +628,6 @@ def chat_cli(
         temperature=temperature,
         top_k=top_k,
         top_p=top_p,
+        enable_thinking=not no_think,
     )
     click.echo(response)

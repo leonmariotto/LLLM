@@ -14,6 +14,7 @@ class FakeTokenizer:
         self.prompts: list[str] = []
         self.enable_thinking: list[bool] = []
         self.messages: list[list[chat_module.ChatMessage]] = []
+        self.chat_enable_thinking: list[bool] = []
 
     def encode_instruct_prompt(
         self,
@@ -33,6 +34,7 @@ class FakeTokenizer:
         add_generation_prompt: bool = False,
         enable_thinking: bool = True,
     ) -> dict[str, list[int]] | str:
+        self.chat_enable_thinking.append(enable_thinking)
         self.messages.append(
             [
                 {"role": message["role"], "content": message["content"]}
@@ -119,7 +121,7 @@ class FakeGeneratorWithModel(FakeGenerator):
         self.cache_length = 8
 
 
-def test_generate_chat_response_disables_and_strips_thinking() -> None:
+def test_generate_chat_response_enables_and_strips_thinking_by_default() -> None:
     generator = FakeGenerator(["<think>hidden</think>\nHello"])
 
     response = chat_module.generate_chat_response(
@@ -133,10 +135,10 @@ def test_generate_chat_response_disables_and_strips_thinking() -> None:
 
     assert response == "Hello"
     assert generator.tokenizer.prompts == ["Say hello"]
-    assert generator.tokenizer.enable_thinking == [False]
+    assert generator.tokenizer.enable_thinking == [True]
     assert generator.calls == [
         {
-            "prompt_tokens": [9, 0],
+            "prompt_tokens": [9, 1],
             "max_generated_token": 32,
             "temperature": 0.0,
             "top_k": None,
@@ -144,6 +146,24 @@ def test_generate_chat_response_disables_and_strips_thinking() -> None:
             "include_prompt": False,
         }
     ]
+
+
+def test_generate_chat_response_can_disable_thinking() -> None:
+    generator = FakeGenerator(["<think>hidden</think>\nHello"])
+
+    response = chat_module.generate_chat_response(
+        generator,
+        "Say hello",
+        max_generated_token=32,
+        temperature=0.0,
+        top_k=None,
+        top_p=None,
+        enable_thinking=False,
+    )
+
+    assert response == "Hello"
+    assert generator.tokenizer.enable_thinking == [False]
+    assert generator.calls[0]["prompt_tokens"] == [9, 0]
 
 
 def test_generate_chat_messages_response_keeps_full_history() -> None:
@@ -165,6 +185,7 @@ def test_generate_chat_messages_response_keeps_full_history() -> None:
 
     assert response == "answer"
     assert generator.tokenizer.messages == [messages]
+    assert generator.tokenizer.chat_enable_thinking == [True]
     assert len(generator.calls[0]["prompt_tokens"]) == 49
     assert generator.calls[0]["include_prompt"] is False
 
@@ -246,6 +267,35 @@ def test_chat_cli_reads_stdin_and_prints_response(
     assert captured["repo_id"] == chat_module.DEFAULT_CHAT_MODEL_REPO_ID
     assert isinstance(captured["kwargs"], dict)
     assert captured["kwargs"]["cache_length"] == chat_module.DEFAULT_CACHE_LENGTH
+    assert generator.tokenizer.enable_thinking == [True]
+
+
+def test_chat_cli_no_think_disables_stdin_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = FakeGenerator(["answer"])
+
+    def fake_build_qwen3_generator(
+        repo_id: str,
+        **kwargs: object,
+    ) -> FakeGenerator:
+        return generator
+
+    monkeypatch.setattr(
+        chat_module,
+        "_build_qwen3_generator",
+        fake_build_qwen3_generator,
+    )
+
+    result = CliRunner().invoke(
+        chat_module.chat_cli,
+        ["--no-think"],
+        input="question\n",
+    )
+
+    assert result.exit_code == 0
+    assert result.output == "answer\n"
+    assert generator.tokenizer.enable_thinking == [False]
 
 
 def test_chat_cli_launches_textual_app_for_interactive_stdin(
@@ -299,3 +349,44 @@ def test_chat_cli_launches_textual_app_for_interactive_stdin(
     options = captured["options"]
     assert isinstance(options, chat_module.ChatGenerationOptions)
     assert options.max_generated_token == 8
+    assert options.enable_thinking is True
+
+
+def test_chat_cli_no_think_reaches_textual_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = FakeGenerator(["unused"])
+    captured: dict[str, object] = {}
+
+    def fake_build_qwen3_generator(
+        repo_id: str,
+        **kwargs: object,
+    ) -> FakeGenerator:
+        return generator
+
+    def fake_run_textual_chat_app(
+        app_generator: chat_module.TextGenerator,
+        *,
+        cache_length: int,
+        options: chat_module.ChatGenerationOptions,
+    ) -> None:
+        captured["options"] = options
+
+    monkeypatch.setattr(
+        chat_module,
+        "_build_qwen3_generator",
+        fake_build_qwen3_generator,
+    )
+    monkeypatch.setattr(chat_module, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        chat_module,
+        "_run_textual_chat_app",
+        fake_run_textual_chat_app,
+    )
+
+    result = CliRunner().invoke(chat_module.chat_cli, ["--no-think"])
+
+    assert result.exit_code == 0
+    options = captured["options"]
+    assert isinstance(options, chat_module.ChatGenerationOptions)
+    assert options.enable_thinking is False
