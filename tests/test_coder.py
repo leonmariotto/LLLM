@@ -11,6 +11,7 @@ from ..LLLM.coder import (
     CompileResult,
     Coder,
     CoderResult,
+    JudgeScore,
     JudgeResult,
 )
 
@@ -182,6 +183,26 @@ def test_build_judge_prompt_contains_task_and_both_candidates() -> None:
     assert '"select": "<your choice between A and B>"' in prompt
 
 
+def test_build_score_prompt_contains_original_task_and_selected_program() -> None:
+    candidate = CodeCandidate(
+        2,
+        "candidate prompt",
+        "raw",
+        "int main(void) { return 0; }",
+    )
+    coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]))
+
+    prompt = coder._candidate_generator.build_score_prompt(
+        "return success",
+        candidate,
+    )
+
+    assert "return success" in prompt
+    assert "int main(void) { return 0; }" in prompt
+    assert '"judging": "<brief analysis, pros and cons>"' in prompt
+    assert '"score": <integer from 0 to 100>' in prompt
+
+
 def test_coder_compiles_every_candidate_without_running_code() -> None:
     candidates = (
         CodeCandidate(0, "prompt", "raw", "int main(void) { return 0; }"),
@@ -306,7 +327,12 @@ def test_coder_solve_accepts_per_call_sample_count() -> None:
     )
     coder = Coder(
         code_generator,
-        FakeTextGenerator(['{"judging": "candidate 0 wins", "select": "A"}']),
+        FakeTextGenerator(
+            [
+                '{"judging": "candidate 0 wins", "select": "A"}',
+                '{"judging": "solves the task", "score": 88}',
+            ]
+        ),
         sample_count=5,
         compile_runner=lambda _command: FakeCompileProcess(returncode=0),
         rng=random.Random(0),
@@ -316,6 +342,68 @@ def test_coder_solve_accepts_per_call_sample_count() -> None:
 
     assert len(result.candidates) == 2
     assert len(code_generator.tokenizer.prompts) == 2
+
+
+def test_coder_scores_selected_candidate_after_selection() -> None:
+    code_generator = FakeTextGenerator(
+        [
+            "int main(void) { return 0; }",
+            "int main(void) { return 1; }",
+        ]
+    )
+    judge_generator = FakeTextGenerator(
+        [
+            '{"judging": "candidate 1 wins", "select": "B"}',
+            '{"judging": "handles the requested status", "score": 91}',
+        ]
+    )
+    coder = Coder(
+        code_generator,
+        judge_generator,
+        sample_count=2,
+        compile_runner=lambda _command: FakeCompileProcess(returncode=0),
+    )
+
+    result = coder.solve("return a status code")
+
+    assert result.selected_candidate.index == 1
+    assert len(judge_generator.tokenizer.prompts) == 2
+    assert "Program A:" in judge_generator.tokenizer.prompts[0]
+    assert "Program:" in judge_generator.tokenizer.prompts[1]
+    assert "return a status code" in judge_generator.tokenizer.prompts[1]
+    assert "int main(void) { return 1; }" in judge_generator.tokenizer.prompts[1]
+    assert judge_generator.tokenizer.enable_thinking == [False, False]
+
+
+def test_score_selected_candidate_returns_parsed_score() -> None:
+    judge_generator = FakeTextGenerator(
+        ['{"judging": "mostly correct", "score": 73}']
+    )
+    coder = Coder(
+        FakeTextGenerator([]),
+        judge_generator,
+        judge_max_generated_token=77,
+    )
+    candidate = CodeCandidate(
+        0,
+        "prompt",
+        "raw",
+        "int main(void) { return 0; }",
+    )
+
+    judge_score = coder.score_selected_candidate("return success", candidate)
+
+    assert judge_score == JudgeScore(reason="mostly correct", score=73)
+    assert judge_generator.tokenizer.enable_thinking == [False]
+    assert judge_generator.calls == [
+        {
+            "max_generated_token": 77,
+            "temperature": 0.0,
+            "top_k": None,
+            "top_p": None,
+            "include_prompt": False,
+        }
+    ]
 
 
 def test_coder_runs_tournament_over_successful_candidates() -> None:
@@ -553,3 +641,28 @@ def test_parse_judge_winner_falls_back_to_a_for_invalid_json() -> None:
     assert Coder.parse_judge_winner('{"judging": "B is better", "select": "C"}') == "A"
     assert Coder.parse_judge_winner('{"select": "B"}') == "A"
     assert Coder.parse_judge_winner('["B"]') == "A"
+
+
+def test_parse_judge_score_accepts_valid_json() -> None:
+    assert Coder.parse_judge_score(
+        '{"judging": "bad", "score": 0}'
+    ) == JudgeScore(reason="bad", score=0)
+    assert Coder.parse_judge_score(
+        '{"judging": "perfect", "score": 100}'
+    ) == JudgeScore(reason="perfect", score=100)
+    assert (
+        Coder.parse_judge_score(
+            '{"judging": "draft", "score": 12}\n'
+            '{"judging": "final", "score": 87}'
+        )
+        == JudgeScore(reason="final", score=87)
+    )
+
+
+def test_parse_judge_score_rejects_invalid_json() -> None:
+    assert Coder.parse_judge_score("score: 50") is None
+    assert Coder.parse_judge_score('{"judging": "bad", "score": -1}') is None
+    assert Coder.parse_judge_score('{"judging": "bad", "score": 101}') is None
+    assert Coder.parse_judge_score('{"judging": "bad", "score": true}') is None
+    assert Coder.parse_judge_score('{"score": 50}') is None
+    assert Coder.parse_judge_score('{"judging": "missing"}') is None
