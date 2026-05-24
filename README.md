@@ -29,6 +29,9 @@ $> echo "question" | uv run chat
 $> uv run chat
 ```
 
+<img width="1920" height="1080" alt="Screenshot from 2026-05-24 16-23-11" src="https://github.com/user-attachments/assets/9df05958-152d-4df4-999e-9a78c1b218cb" />
+
+
 ## Wishlist
 
 - Mixture of Experts (MoE): replace each feed-forward module in a transformer block with multiple
