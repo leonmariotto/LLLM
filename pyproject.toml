@@ -24,6 +24,7 @@ dependencies = [
     "sentencepiece", # LLama2 tokenizer
     "gguf",
     "loguru",
+    "textual>=8.2.7",
 ]
 
 [build-system]

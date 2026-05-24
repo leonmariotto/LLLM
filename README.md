@@ -19,12 +19,15 @@ $> echo "task" | uv run coder
 ## Chat
 
 Chat can be used to ask a question to a model.
+If called without piping, start a fancy terminal prompt.
+The history is kept in context.
 
 Run:
 ```
-$> echo "question" | uv run coder
+$> uv run chat --help
+$> echo "question" | uv run chat
+$> uv run chat
 ```
-WIP: no conversation, no fancy terminal prompt.
 
 ## Wishlist
 
