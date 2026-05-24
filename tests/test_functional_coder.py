@@ -87,7 +87,7 @@ int main(void) {
 #include <stdio.h>
 
 int main(void) {
-    printf("goodbye\\n");
+    printf("wrong message\\n");
     return 0;
 }
 """,
@@ -98,7 +98,7 @@ int main(void) {
 #include <stdio.h>
 
 int main(void) {
-    printf("goodbye\\n");
+    printf("wrong message\\n");
     return 0;
 }
 """,

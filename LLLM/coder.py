@@ -182,7 +182,7 @@ class _CodeSelfConsistencyGenerator:
             "Read the program text literally. Do not guess behavior that is not "
             "present in the code.\n"
             "Return only valid JSON with exactly this shape:\n"
-            '{"judging": "<brief comparison>", "select": "<A or B>"}\n'
+            '{"judging": "<brief comparison, pros and cons>", "select": "<your choice between A and B>"}\n'
         )
 
 
