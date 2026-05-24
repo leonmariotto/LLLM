@@ -295,7 +295,8 @@ def _format_bytes(byte_count: int) -> str:
 def _format_status(status: ChatStatus) -> str:
     return (
         f"Model {_format_bytes(status.model_bytes)} | "
-        f"cache_length {status.cache_length} | "
+        f"history_length/cache_length : "
+        f"{status.absolute_position}/{status.cache_length} | "
         f"Context {status.absolute_position} tok abs / "
         f"{_format_bytes(status.context_bytes)} est"
     )

@@ -1,13 +1,15 @@
 """
 High-Level Generator class that provide text generation function
 from a raw model.
+Manage KVCache: KVCache is created and destroyed in a single generation.
+(_generate_tokens).
 """
 
 import time
 import logging
 from typing import Any, Protocol, cast, List
 
-from loguru import logger as loguru_logger
+from loguru import logger
 import torch
 
 from .kv_cache import KVCache
@@ -157,6 +159,17 @@ class Generator:
         """
         if cache_length <= 0:
             raise ValueError("cache_length must be positive")
+        logger.info(
+            "input_length={} cache_length={} max_generated_token={} "
+            "temperature={} top_k={} top_p={} stop_at_eos={}",
+            len(input_tokens),
+            cache_length,
+            max_generated_token,
+            temperature,
+            top_k,
+            top_p,
+            stop_at_eos,
+        )
         self.model.eval()
         idx = torch.tensor(
             [input_tokens],
@@ -173,7 +186,10 @@ class Generator:
             logits = self._filter_logits(logits, top_k, top_p)
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
-                loguru_logger.info("Model generate an EOS, stop")
+                logger.info(
+                    "Model generate an EOS, stop, generated_token_count={}",
+                    generated_token_count,
+                )
                 break
             idx = torch.cat((idx, idx_next), dim=1)
             generated_token_count += int(idx_next.shape[0])
@@ -221,7 +237,7 @@ class Generator:
             self.mean_token_per_second,
         )
         self.logger.info(message)
-        loguru_logger.info(
+        logger.info(
             "Generated {} tokens in {} (mean: {} tokens/s)",
             generated_token_count,
             elapsed,

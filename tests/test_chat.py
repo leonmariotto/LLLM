@@ -181,6 +181,21 @@ def test_chat_status_estimates_model_and_context_memory() -> None:
     assert status.context_bytes == 3 * 2 * 8 * 2 * 4 * 4
 
 
+def test_format_status_includes_history_length_over_cache_length() -> None:
+    status = chat_module.ChatStatus(
+        model_bytes=60,
+        cache_length=8,
+        absolute_position=21,
+        context_bytes=768,
+    )
+
+    assert (
+        chat_module._format_status(status)
+        == "Model 60 B | history_length/cache_length : 21/8 | "
+        "Context 21 tok abs / 768 B est"
+    )
+
+
 def test_generate_chat_messages_response_rejects_context_overflow() -> None:
     generator = FakeGeneratorWithModel(["unused"])
     generator.model.context_length = 4

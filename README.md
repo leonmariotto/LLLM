@@ -7,8 +7,9 @@ Then on *Build a reasoning model* book from the same author.
 
 Coder is a tool used to generate C code. 
 It use (by default) Qwen2.5 0.6B for generation and Qwen3 0.6B for judging. 
-For a given task, 5 candidates are generated, compilation is checked, then among 
-the successfull candidates we choose the best by doing a judge tournament.
+Implement code-spcific self-consistency:
+For a given task, X candidates are generated, compilation is checked, then among 
+the successfull (compiled) candidates we choose the best by doing a judge tournament.
 
 Run:
 ```
@@ -16,11 +17,14 @@ $> uv run coder --help
 $> echo "task" | uv run coder
 ```
 
+Even with very small models, it manage to produce compilable and functionaly correct 
+C code for simple tasks.
+
 ## Chat
 
 Chat can be used to ask a question to a model.
 If called without piping, start a fancy terminal prompt.
-The history is kept in context.
+The chat history is re-injected at every new request.
 
 Run:
 ```
@@ -49,17 +53,6 @@ space before storing them in the KV cache.
 - bitsandbytes for memory pressure
 
 - Do a pass of documentation on docstring models because some has been dropped by refactor.
-
-### Role-local self-consistency:
-
-Part of inference-time reasoning technics: the model output N answer, then it choose one, or create one from the Ns.
-Self-consistency criterium depends highly on the task.
-Self-consistency for a coding task is quite different than self consistency for a summary/plan task.
-It should be part of the role class: Coder, Planer, ...
-- Coder: we may need to restrict what the agent can do. If it can produce only self-contained, compilable code
-it greatly simplify the verification/evaluation design. Or we could work in a controlled environment, with a
-known way to compile and execute. That sound better but is a lot more complex because the model need to be able to
-read and modify existing files, that introduce tools in the loop.
 
 ## Inventory
 

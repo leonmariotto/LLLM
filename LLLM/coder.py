@@ -505,7 +505,6 @@ class Coder:
 
     @staticmethod
     def parse_judge_winner(text: str) -> str:
-        logger.info("Raw judge output: {}", text)
         last_winner: str | None = None
         for payload in Coder._iter_json_objects(text):
             winner = Coder._validated_judge_select(payload, text)
