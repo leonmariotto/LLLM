@@ -45,6 +45,7 @@ class Generator:
         self.cache_length = cache_length
         self.generated_token_count: List[int] = []
         self.generation_seconds: List[float] = []
+        self.generated_sequence_logprob: List[float] = []
         self.mean_token_per_second = 0.0
         self.logger = logging.getLogger(__name__)
 
@@ -120,7 +121,11 @@ class Generator:
         structural token ids that should not be represented as ordinary text.
         """
         start_time = time.perf_counter()
-        generated_tokens, generated_token_count = self._generate_tokens(
+        (
+            generated_tokens,
+            generated_token_count,
+            generated_sequence_logprob,
+        ) = self._generate_tokens(
             prompt_tokens,
             stop_at_eos=stop_at_eos,
             max_generated_token=max_generated_token,
@@ -129,7 +134,11 @@ class Generator:
             top_k=top_k,
             top_p=top_p,
         )
-        self._record_metrics(generated_token_count, time.perf_counter() - start_time)
+        self._record_metrics(
+            generated_token_count,
+            time.perf_counter() - start_time,
+            generated_sequence_logprob,
+        )
 
         output_tokens = (
             generated_tokens
@@ -148,7 +157,7 @@ class Generator:
         temperature: float,
         top_k: int | None,
         top_p: float | None,
-    ) -> tuple[list[int], int]:
+    ) -> tuple[list[int], int, float]:
         """
         Implement top-k/top-p sampling and temperature.
 
@@ -178,6 +187,7 @@ class Generator:
         )
         kv_cache = KVCache(cache_length=cache_length)
         generated_token_count = 0
+        generated_sequence_logprob = 0.0
         logits = self._prefill(idx, kv_cache, cache_length)
         eos = self.tokenizer.get_eos()
 
@@ -191,15 +201,22 @@ class Generator:
                     generated_token_count,
                 )
                 break
+            generated_sequence_logprob += self._selected_token_logprob(
+                logits,
+                idx_next,
+                temperature,
+            )
             idx = torch.cat((idx, idx_next), dim=1)
             generated_token_count += int(idx_next.shape[0])
             if step + 1 < max_generated_token:
                 with torch.no_grad():
                     logits = self.model(idx_next, kv_cache=kv_cache)
 
-        return cast(
-            list[int], cast(Any, idx.squeeze(0)).tolist()
-        ), generated_token_count
+        return (
+            cast(list[int], cast(Any, idx.squeeze(0)).tolist()),
+            generated_token_count,
+            generated_sequence_logprob,
+        )
 
     def _prefill(
         self,
@@ -220,10 +237,16 @@ class Generator:
         assert logits is not None
         return logits
 
-    def _record_metrics(self, generated_token_count: int, elapsed: float) -> None:
+    def _record_metrics(
+        self,
+        generated_token_count: int,
+        elapsed: float,
+        generated_sequence_logprob: float,
+    ) -> None:
         """Record generation performance metrics."""
         self.generated_token_count += [generated_token_count]
         self.generation_seconds += [elapsed]
+        self.generated_sequence_logprob += [generated_sequence_logprob]
         c_count: int = 0
         c_seconds: float = 0.0
         for c, s in zip(self.generated_token_count, self.generation_seconds):
@@ -231,17 +254,19 @@ class Generator:
             c_seconds += s
         if c_count != 0:
             self.mean_token_per_second = float(c_count) / c_seconds
-        message = "Generated {} tokens in {} (mean: {} tokens/s)".format(
+        message = "Generated {} tokens in {} (mean: {} tokens/s, logprob: {})".format(
             generated_token_count,
             elapsed,
             self.mean_token_per_second,
+            generated_sequence_logprob,
         )
         self.logger.info(message)
         logger.info(
-            "Generated {} tokens in {} (mean: {} tokens/s)",
+            "Generated {} tokens in {} (mean: {} tokens/s, logprob: {})",
             generated_token_count,
             elapsed,
             self.mean_token_per_second,
+            generated_sequence_logprob,
         )
 
     def _filter_logits(
@@ -311,6 +336,20 @@ class Generator:
             return torch.multinomial(probs, num_samples=1)
 
         return torch.argmax(logits, dim=-1, keepdim=True)
+
+    def _selected_token_logprob(
+        self,
+        logits: torch.Tensor,
+        idx_next: torch.Tensor,
+        temperature: float,
+    ) -> float:
+        """Return summed log probability of the selected next token batch."""
+        if temperature > 0.0:
+            logits = logits / temperature
+
+        logprobs = torch.log_softmax(logits, dim=-1)
+        selected_logprobs = logprobs.gather(dim=-1, index=idx_next)
+        return float(selected_logprobs.sum().item())
 
     def _model_device(self) -> torch.device:
         """Gedt the device where the model sit."""

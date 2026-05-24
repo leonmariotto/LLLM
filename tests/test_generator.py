@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Any, cast
 
 import pytest
@@ -124,10 +125,48 @@ def test_generator_exposes_and_logs_throughput_metrics(caplog) -> None:
 
     assert generated == "456789"
     assert generator.generated_token_count == [3]
+    assert generator.generated_sequence_logprob[0] == pytest.approx(
+        3.0 * (1.0 - math.log(math.e + 9.0))
+    )
     assert generator.generation_seconds[0] > 0.0
     assert generator.mean_token_per_second > 0.0
     assert "Generated 3 tokens" in caplog.text
+    assert "logprob" in caplog.text
     assert "tokens/s" in caplog.text
+
+
+def test_generator_logprob_excludes_prompt_tokens() -> None:
+    generator = Generator(
+        model=RecordingGreedyModel(),
+        tokenizer=DigitTokenizer(),
+        cache_length=8,
+    )
+
+    generated = generator.generate("123456", max_generated_token=1)
+
+    assert generated == "1234567"
+    assert generator.generated_token_count == [1]
+    assert generator.generated_sequence_logprob[0] == pytest.approx(
+        1.0 - math.log(math.e + 9.0)
+    )
+
+
+def test_generator_excludes_stopping_eos_from_logprob_metric() -> None:
+    generator = Generator(
+        model=RecordingGreedyModel(),
+        tokenizer=DigitTokenizer(eos=7),
+        cache_length=2,
+    )
+
+    generated = generator.generate(
+        "456",
+        max_generated_token=3,
+        include_prompt=False,
+    )
+
+    assert generated == ""
+    assert generator.generated_token_count == [0]
+    assert generator.generated_sequence_logprob == [0.0]
 
 
 def test_generator_with_tiny_cached_model_is_deterministic() -> None:
