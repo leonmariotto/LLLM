@@ -178,8 +178,8 @@ def test_build_judge_prompt_contains_task_and_both_candidates() -> None:
     assert "return success" in prompt
     assert "int main(void) { return 0; }" in prompt
     assert "int main(void) { return 1; }" in prompt
-    assert '"judging": "<brief comparison>"' in prompt
-    assert '"select": "<A or B>"' in prompt
+    assert '"judging": "<brief comparison, pros and cons>"' in prompt
+    assert '"select": "<your choice between A and B>"' in prompt
 
 
 def test_coder_compiles_every_candidate_without_running_code() -> None:
@@ -261,8 +261,14 @@ def test_coder_cli_reads_stdin_and_prints_selected_source(
     captured: dict[str, object] = {}
 
     class FakeCliCoder:
-        def solve(self, instruction: str) -> CoderResult:
+        def solve(
+            self,
+            instruction: str,
+            *,
+            sample_count: int | None = None,
+        ) -> CoderResult:
             captured["instruction"] = instruction
+            captured["solve_sample_count"] = sample_count
             return CoderResult(
                 task=instruction,
                 candidates=(selected_candidate,),
@@ -286,8 +292,30 @@ def test_coder_cli_reads_stdin_and_prints_selected_source(
     assert result.exit_code == 0
     assert result.output == "int main(void) { return 0; }\n"
     assert captured["instruction"] == "write a tiny program\n"
+    assert captured["solve_sample_count"] == 1
     assert isinstance(captured["kwargs"], dict)
-    assert captured["kwargs"]["sample_count"] == 1
+    assert "sample_count" not in captured["kwargs"]
+
+
+def test_coder_solve_accepts_per_call_sample_count() -> None:
+    code_generator = FakeTextGenerator(
+        [
+            "int main(void) { return 0; }",
+            "int main(void) { return 1; }",
+        ]
+    )
+    coder = Coder(
+        code_generator,
+        FakeTextGenerator(['{"judging": "candidate 0 wins", "select": "A"}']),
+        sample_count=5,
+        compile_runner=lambda _command: FakeCompileProcess(returncode=0),
+        rng=random.Random(0),
+    )
+
+    result = coder.solve("return a status code", sample_count=2)
+
+    assert len(result.candidates) == 2
+    assert len(code_generator.tokenizer.prompts) == 2
 
 
 def test_coder_runs_tournament_over_successful_candidates() -> None:
@@ -369,7 +397,7 @@ def test_coder_runs_tournament_over_successful_candidates() -> None:
     assert "source 3" in judge_results[1].prompt
     assert selected.index == 2
     assert code_generator.tokenizer.prompts == []
-    assert judge_generator.tokenizer.enable_thinking == [True, True]
+    assert judge_generator.tokenizer.enable_thinking == [False, False]
     assert judge_generator.calls == [
         {
             "max_generated_token": 77,
@@ -386,6 +414,55 @@ def test_coder_runs_tournament_over_successful_candidates() -> None:
             "include_prompt": False,
         },
     ]
+
+
+def test_coder_tournament_pairs_candidates_by_round() -> None:
+    candidates = (
+        CodeCandidate(0, "prompt", "raw", "source 0"),
+        CodeCandidate(1, "prompt", "raw", "source 1"),
+        CodeCandidate(2, "prompt", "raw", "source 2"),
+        CodeCandidate(3, "prompt", "raw", "source 3"),
+    )
+    judge_generator = FakeTextGenerator(
+        [
+            '{"judging": "candidate 1 wins", "select": "B"}',
+            '{"judging": "candidate 2 wins", "select": "A"}',
+            '{"judging": "candidate 2 wins final", "select": "B"}',
+        ]
+    )
+    coder = Coder(FakeTextGenerator([]), judge_generator)
+    compile_results = tuple(
+        CompileResult(
+            candidate_index=candidate.index,
+            success=True,
+            command=("gcc",),
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        for candidate in candidates
+    )
+
+    judge_results = coder.judge_successful_candidate_tournament(
+        "write a program",
+        candidates,
+        compile_results,
+    )
+    selected = coder.select_candidate(candidates, compile_results, judge_results)
+
+    assert [
+        (
+            result.candidate_a_index,
+            result.candidate_b_index,
+            result.winner_candidate_index,
+        )
+        for result in judge_results
+    ] == [
+        (0, 1, 1),
+        (2, 3, 2),
+        (1, 2, 2),
+    ]
+    assert selected.index == 2
 
 
 def test_coder_selects_last_tournament_winner() -> None:

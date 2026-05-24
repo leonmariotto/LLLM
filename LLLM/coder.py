@@ -123,11 +123,21 @@ class _CodeSelfConsistencyGenerator:
         self.top_k = top_k
         self.top_p = top_p
 
-    def generate_candidates(self, task: str) -> tuple[CodeCandidate, ...]:
+    def generate_candidates(
+        self,
+        task: str,
+        *,
+        sample_count: int | None = None,
+    ) -> tuple[CodeCandidate, ...]:
+        if sample_count is None:
+            sample_count = self.sample_count
+        if sample_count <= 0:
+            raise ValueError("sample_count must be positive")
+
         candidates: list[CodeCandidate] = []
-        for index in range(self.sample_count):
+        for index in range(sample_count):
             prompt = self.build_prompt(task, index)
-            logger.info("Generating C candidate {}/{}", index + 1, self.sample_count)
+            logger.info("Generating C candidate {}/{}", index + 1, sample_count)
             raw_output = _generate_instruct(
                 self.base,
                 prompt,
@@ -267,9 +277,15 @@ class Coder:
             compile_runner if compile_runner is not None else self._run_compile
         )
 
-    def solve(self, task: str) -> CoderResult:
+    def solve(self, task: str, *, sample_count: int | None = None) -> CoderResult:
+        if sample_count is not None and sample_count <= 0:
+            raise ValueError("sample_count must be positive")
+
         logger.info("Coder solve started")
-        candidates = self._candidate_generator.generate_candidates(task)
+        candidates = self._candidate_generator.generate_candidates(
+            task,
+            sample_count=sample_count,
+        )
         compile_results = self.compile_candidates(candidates)
         judge_results = self.judge_successful_candidate_tournament(
             task,
@@ -358,52 +374,74 @@ class Coder:
             return ()
 
         judge_results: list[JudgeResult] = []
-        winner = successful_candidates[0]
+        round_candidates = successful_candidates
 
-        for challenger in successful_candidates[1:]:
-            prompt = self._candidate_generator.build_judge_prompt(
-                task,
-                winner,
-                challenger,
-            )
-            logger.info(
-                "Judging C candidates {} vs {}",
-                winner.index,
-                challenger.index,
-            )
-            raw_output = _generate_instruct(
-                self.judge_generator,
-                prompt,
-                enable_thinking=False,
-                max_generated_token=self.judge_max_generated_token,
-                temperature=self.judge_temperature,
-                top_k=self.judge_top_k,
-                top_p=self.judge_top_p,
-            )
-            winner_side = self.parse_judge_winner(raw_output)
-            if winner_side == "B":
-                match_winner = challenger
-            else:
-                match_winner = winner
-            logger.info(
-                "Judged C candidates {} vs {}; winner is {}: {}",
-                winner.index,
-                challenger.index,
-                match_winner.index,
-                raw_output,
-            )
-            judge_results.append(
-                JudgeResult(
-                    candidate_a_index=winner.index,
-                    candidate_b_index=challenger.index,
-                    winner_candidate_index=match_winner.index,
-                    raw_output=raw_output,
-                    prompt=prompt,
+        while len(round_candidates) > 1:
+            next_round: list[CodeCandidate] = []
+            for offset in range(0, len(round_candidates), 2):
+                if offset + 1 >= len(round_candidates):
+                    next_round.append(round_candidates[offset])
+                    continue
+
+                candidate_a = round_candidates[offset]
+                candidate_b = round_candidates[offset + 1]
+                match_winner = self._judge_candidate_pair(
+                    task, candidate_a, candidate_b
                 )
-            )
-            winner = match_winner
+                judge_results.append(match_winner[0])
+                next_round.append(match_winner[1])
+
+            round_candidates = next_round
 
         return tuple(judge_results)
+
+    def _judge_candidate_pair(
+        self,
+        task: str,
+        candidate_a: CodeCandidate,
+        candidate_b: CodeCandidate,
+    ) -> tuple[JudgeResult, CodeCandidate]:
+        prompt = self._candidate_generator.build_judge_prompt(
+            task,
+            candidate_a,
+            candidate_b,
+        )
+        logger.info(
+            "Judging C candidates {} vs {}",
+            candidate_a.index,
+            candidate_b.index,
+        )
+        raw_output = _generate_instruct(
+            self.judge_generator,
+            prompt,
+            enable_thinking=False,
+            max_generated_token=self.judge_max_generated_token,
+            temperature=self.judge_temperature,
+            top_k=self.judge_top_k,
+            top_p=self.judge_top_p,
+        )
+        winner_side = self.parse_judge_winner(raw_output)
+        if winner_side == "B":
+            selected_candidate = candidate_b
+        else:
+            selected_candidate = candidate_a
+        logger.info(
+            "Judged C candidates {} vs {}; winner is {}: {}",
+            candidate_a.index,
+            candidate_b.index,
+            selected_candidate.index,
+            raw_output,
+        )
+        return (
+            JudgeResult(
+                candidate_a_index=candidate_a.index,
+                candidate_b_index=candidate_b.index,
+                winner_candidate_index=selected_candidate.index,
+                raw_output=raw_output,
+                prompt=prompt,
+            ),
+            selected_candidate,
+        )
 
     def select_candidate(
         self,
@@ -563,7 +601,6 @@ def _build_cli_coder(
     *,
     code_model: str,
     judge_model: str,
-    sample_count: int,
     max_generated_token: int,
     judge_max_generated_token: int,
     cache_length: int,
@@ -583,7 +620,6 @@ def _build_cli_coder(
     return Coder(
         code_generator,
         judge_generator,
-        sample_count=sample_count,
         max_generated_token=max_generated_token,
         judge_max_generated_token=judge_max_generated_token,
         code_top_p=code_top_p,
@@ -680,12 +716,11 @@ def coder_cli(
     coder = _build_cli_coder(
         code_model=code_model,
         judge_model=judge_model,
-        sample_count=sample_count,
         max_generated_token=max_generated_token,
         judge_max_generated_token=judge_max_generated_token,
         cache_length=cache_length,
         code_top_p=code_top_p,
         local_files_only=local_files_only,
     )
-    result = coder.solve(instruction)
+    result = coder.solve(instruction, sample_count=sample_count)
     click.echo(result.selected_candidate.source)

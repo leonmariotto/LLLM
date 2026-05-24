@@ -3,6 +3,19 @@
 Based on *Build a Large Language Model from scratch* book by Sebastian Raschka.
 Then on *Build a reasoning model* book from the same author.
 
+## Coder
+
+This repo export a script via uv : coder.  Coder is a tool used to generate C code. 
+It use (by default) Qwen2.5 0.6B for generation and Qwen3 0.6B for judging. 
+For a given task, 5 candidates are generated, compilation is checked, then among 
+the successfull candidates we choose the best by doing a judge tournament.
+
+Run:
+```
+$> uv run coder --help
+$> echo "task" | uv run coder
+```
+
 ## Wishlist
 
 - Mixture of Experts (MoE): replace each feed-forward module in a transformer block with multiple
