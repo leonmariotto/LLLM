@@ -13,7 +13,7 @@ It intentionally does not execute produced code.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import random
@@ -32,6 +32,7 @@ DEFAULT_CODE_MODEL_REPO_ID = "Qwen/Qwen2.5-Coder-0.5B-Instruct"
 DEFAULT_JUDGE_MODEL_REPO_ID = "Qwen/Qwen3-0.6B"
 DEFAULT_CACHE_LENGTH = 16384
 LOG_LEVELS = ("trace", "debug", "info", "success", "warning", "error", "critical")
+DEFAULT_SELF_REFINMENT_MAX_ITERATION = 3
 
 
 class TextGenerator(Protocol):
@@ -71,11 +72,11 @@ class CodeCandidate:
     prompt: str
     raw_output: str
     source: str
+    compile_result: CompileResult | None = None
 
 
 @dataclass(frozen=True)
 class CompileResult:
-    candidate_index: int
     success: bool
     command: tuple[str, ...]
     returncode: int
@@ -96,7 +97,6 @@ class JudgeResult:
 class CoderResult:
     task: str
     candidates: tuple[CodeCandidate, ...]
-    compile_results: tuple[CompileResult, ...]
     judge_results: tuple[JudgeResult, ...]
     selected_candidate: CodeCandidate
 
@@ -176,9 +176,67 @@ class _CodeSelfConsistencyGenerator:
         )
 
     @staticmethod
+    def build_refinement_prompt(
+        candidate: CodeCandidate,
+    ) -> str:
+        if candidate.compile_result is None:
+            raise ValueError("candidate has not been compiled")
+        correction_goal = "Corrected complete C program:\n"
+        if "unused variable" in candidate.compile_result.stderr.lower():
+            correction_goal = (
+                "Corrected complete C program with the unused declaration removed:\n"
+            )
+        return (
+            "Revise the C11 program below to resolve all compiler warnings while "
+            "preserving behavior.\n"
+            "Do not return the program unchanged when a warning is present.\n"
+            "For an unused-variable warning, remove the unused declaration unless "
+            "the variable is required for observable behavior.\n"
+            "Return only the complete revised raw C code.\n"
+            "Do not include markdown fences, shell commands, explanations, or tests "
+            "outside the C file.\n"
+            f"Compiler warning output:\n```\n{candidate.compile_result.stderr.strip()}\n```\n\n"
+            f"Current program:\n```c\n{candidate.source.strip()}\n```\n\n"
+            f"{correction_goal}"
+        )
+
+    def generate_refined_candidate(
+        self,
+        candidate: CodeCandidate,
+        *,
+        iteration: int,
+        candidate_index: int,
+    ) -> CodeCandidate:
+        prompt = self.build_refinement_prompt(
+            candidate,
+        )
+        logger.info(
+            "Generating C self-refinement iteration {} prompt = [{}]", iteration, prompt
+        )
+        raw_output = _generate_instruct(
+            self.base,
+            prompt,
+            enable_thinking=True,
+            max_generated_token=self.max_generated_token,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            top_p=self.top_p,
+        )
+        source = self.extract_c_source(raw_output)
+        logger.info(
+            "Self refinment iteration {} produced source [{}]", iteration, source
+        )
+        return CodeCandidate(
+            index=candidate_index,
+            prompt=prompt,
+            raw_output=raw_output,
+            source=source,
+        )
+
+    @staticmethod
     def extract_c_source(text: str) -> str:
         text = _strip_think_blocks(text)
-        match = re.search(r"```(?:c|C)\s*\n(?P<code>.*?)```", text, re.DOTALL)
+        match = re.search(r"```(?:c|C)?\s*\n(?P<code>.*?)```", text, re.DOTALL)
         if match is not None:
             return match.group("code").strip()
         return text.strip()
@@ -255,9 +313,12 @@ class Coder:
         judge_top_k: int | None = None,
         judge_top_p: float | None = None,
         compiler: str = "gcc",
+        self_refinment_max_iteration: int = DEFAULT_SELF_REFINMENT_MAX_ITERATION,
         rng: random.Random | None = None,
         compile_runner: CompileRunner | None = None,
     ) -> None:
+        if self_refinment_max_iteration < 0:
+            raise ValueError("self_refinment_max_iteration must be non-negative")
         self._candidate_generator = _CodeSelfConsistencyGenerator(
             code_generator,
             sample_count=sample_count,
@@ -272,6 +333,7 @@ class Coder:
         self.judge_top_k = judge_top_k
         self.judge_top_p = judge_top_p
         self.compiler = compiler
+        self.self_refinment_max_iteration = self_refinment_max_iteration
         self.rng = rng if rng is not None else random.Random()
         self.compile_runner = (
             compile_runner if compile_runner is not None else self._run_compile
@@ -282,33 +344,78 @@ class Coder:
             raise ValueError("sample_count must be positive")
 
         logger.info("Coder solve started")
-        candidates = self._candidate_generator.generate_candidates(
-            task,
-            sample_count=sample_count,
+        candidates = self.compile_candidates(
+            self._candidate_generator.generate_candidates(
+                task,
+                sample_count=sample_count,
+            )
         )
-        compile_results = self.compile_candidates(candidates)
         judge_results = self.judge_successful_candidate_tournament(
             task,
             candidates,
-            compile_results,
         )
         selected_candidate = self.select_candidate(
             candidates,
-            compile_results,
             judge_results,
         )
+        selected_candidate, refined_candidates = self.self_refine_selected_candidate(
+            task,
+            selected_candidate,
+            next_candidate_index=max(candidate.index for candidate in candidates) + 1,
+        )
+        candidates += refined_candidates
         logger.info("Selected C candidate {}", selected_candidate.index)
         return CoderResult(
             task=task,
             candidates=candidates,
-            compile_results=compile_results,
             judge_results=judge_results,
             selected_candidate=selected_candidate,
         )
 
+    def self_refine_selected_candidate(
+        self,
+        task: str,
+        selected_candidate: CodeCandidate,
+        *,
+        next_candidate_index: int,
+    ) -> tuple[CodeCandidate, tuple[CodeCandidate, ...]]:
+        refined_candidates: list[CodeCandidate] = []
+        current_candidate = selected_candidate
+
+        with tempfile.TemporaryDirectory(prefix="lllm-coder-refinement-") as directory:
+            workdir = Path(directory)
+            for iteration in range(1, self.self_refinment_max_iteration + 1):
+                if not self.has_compilation_warning(current_candidate):
+                    break
+
+                refined_candidate = (
+                    self._candidate_generator.generate_refined_candidate(
+                        current_candidate,
+                        iteration=iteration,
+                        candidate_index=next_candidate_index + len(refined_candidates),
+                    )
+                )
+                refined_candidate = self.compile_candidate(refined_candidate, workdir)
+                refined_candidates.append(refined_candidate)
+                refined_compile_result = self._get_compile_result(refined_candidate)
+                if not refined_compile_result.success:
+                    logger.warning(
+                        "C self-refinement iteration {} failed compilation; keeping "
+                        "candidate {}",
+                        iteration,
+                        current_candidate.index,
+                    )
+                    break
+                current_candidate = refined_candidate
+
+        return (
+            current_candidate,
+            tuple(refined_candidates),
+        )
+
     def compile_candidates(
         self, candidates: Sequence[CodeCandidate]
-    ) -> tuple[CompileResult, ...]:
+    ) -> tuple[CodeCandidate, ...]:
         with tempfile.TemporaryDirectory(prefix="lllm-coder-") as directory:
             workdir = Path(directory)
             return tuple(
@@ -317,7 +424,7 @@ class Coder:
 
     def compile_candidate(
         self, candidate: CodeCandidate, workdir: Path
-    ) -> CompileResult:
+    ) -> CodeCandidate:
         source_path = workdir / f"candidate_{candidate.index}.c"
         object_path = workdir / f"candidate_{candidate.index}.o"
         source_path.write_text(candidate.source, encoding="utf-8")
@@ -347,28 +454,26 @@ class Coder:
                 process.returncode,
                 self._stderr_summary(process.stderr),
             )
-        return CompileResult(
-            candidate_index=candidate.index,
-            success=success,
-            command=command,
-            returncode=process.returncode,
-            stdout=process.stdout,
-            stderr=process.stderr,
+        return replace(
+            candidate,
+            compile_result=CompileResult(
+                success=success,
+                command=command,
+                returncode=process.returncode,
+                stdout=process.stdout,
+                stderr=process.stderr,
+            ),
         )
 
     def judge_successful_candidate_tournament(
         self,
         task: str,
         candidates: Sequence[CodeCandidate],
-        compile_results: Sequence[CompileResult],
     ) -> tuple[JudgeResult, ...]:
-        successful_indexes = {
-            result.candidate_index for result in compile_results if result.success
-        }
         successful_candidates = [
             candidate
             for candidate in candidates
-            if candidate.index in successful_indexes
+            if candidate.compile_result is not None and candidate.compile_result.success
         ]
         if len(successful_candidates) < 2:
             return ()
@@ -446,7 +551,6 @@ class Coder:
     def select_candidate(
         self,
         candidates: Sequence[CodeCandidate],
-        compile_results: Sequence[CompileResult],
         judge_results: Sequence[JudgeResult] = (),
     ) -> CodeCandidate:
         """
@@ -456,17 +560,18 @@ class Coder:
         if not candidates:
             raise ValueError("cannot select from an empty candidate list")
 
-        successful_indexes = {
-            result.candidate_index for result in compile_results if result.success
-        }
         successful_candidates = [
             candidate
             for candidate in candidates
-            if candidate.index in successful_indexes
+            if candidate.compile_result is not None and candidate.compile_result.success
         ]
         if not successful_candidates:
             logger.warning("No C candidates compiled successfully, return first")
             return candidates[0]
+
+        if len(successful_candidates) == 1:
+            logger.warning("Only on C candidates compiled successfully, return it")
+            return successful_candidates[0]
 
         if judge_results:
             winner_index = judge_results[-1].winner_candidate_index
@@ -502,6 +607,17 @@ class Coder:
         if len(summary) <= max_length:
             return summary
         return f"{summary[: max_length - 3]}..."
+
+    @staticmethod
+    def _get_compile_result(candidate: CodeCandidate) -> CompileResult:
+        if candidate.compile_result is None:
+            raise ValueError("candidate has not been compiled")
+        return candidate.compile_result
+
+    @staticmethod
+    def has_compilation_warning(candidate: CodeCandidate) -> bool:
+        compile_result = Coder._get_compile_result(candidate)
+        return compile_result.success and "warning:" in compile_result.stderr.lower()
 
     @staticmethod
     def parse_judge_winner(text: str) -> str:
@@ -604,6 +720,7 @@ def _build_cli_coder(
     judge_max_generated_token: int,
     cache_length: int,
     code_top_p: float | None,
+    self_refinment_max_iteration: int,
     local_files_only: bool,
 ) -> Coder:
     code_generator = _build_qwen2_generator(
@@ -622,6 +739,7 @@ def _build_cli_coder(
         max_generated_token=max_generated_token,
         judge_max_generated_token=judge_max_generated_token,
         code_top_p=code_top_p,
+        self_refinment_max_iteration=self_refinment_max_iteration,
     )
 
 
@@ -685,6 +803,13 @@ def _configure_cli_logging(verbosity: str) -> None:
     help="Top-p sampling value for candidate generation.",
 )
 @click.option(
+    "--self-refinment-max-iteration",
+    default=DEFAULT_SELF_REFINMENT_MAX_ITERATION,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Maximum warning-driven revisions of the selected C program.",
+)
+@click.option(
     "--local-files-only",
     is_flag=True,
     help="Only use models already present in the local Hugging Face cache.",
@@ -704,6 +829,7 @@ def coder_cli(
     judge_max_generated_token: int,
     cache_length: int,
     code_top_p: float,
+    self_refinment_max_iteration: int,
     local_files_only: bool,
     verbosity: str,
 ) -> None:
@@ -719,6 +845,7 @@ def coder_cli(
         judge_max_generated_token=judge_max_generated_token,
         cache_length=cache_length,
         code_top_p=code_top_p,
+        self_refinment_max_iteration=self_refinment_max_iteration,
         local_files_only=local_files_only,
     )
     result = coder.solve(instruction, sample_count=sample_count)

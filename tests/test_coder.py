@@ -70,6 +70,28 @@ class FakeCompileProcess:
     stderr: str = ""
 
 
+def compiled_candidate(
+    index: int,
+    source: str,
+    *,
+    success: bool = True,
+    stderr: str = "",
+) -> CodeCandidate:
+    return CodeCandidate(
+        index,
+        "prompt",
+        "raw",
+        source,
+        CompileResult(
+            success=success,
+            command=("gcc",),
+            returncode=0 if success else 1,
+            stdout="",
+            stderr=stderr,
+        ),
+    )
+
+
 def test_coder_requests_five_code_candidates_with_thinking() -> None:
     code_generator = FakeTextGenerator(
         [
@@ -125,6 +147,15 @@ def test_coder_code_generation_uses_configured_sampling_options() -> None:
 
 def test_extract_c_source_prefers_fenced_c_block() -> None:
     text = "Here is code:\n```c\nint main(void) { return 0; }\n```\nDone"
+
+    coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]))
+    source = coder._candidate_generator.extract_c_source(text)
+
+    assert source == "int main(void) { return 0; }"
+
+
+def test_extract_c_source_accepts_unlabelled_fenced_block() -> None:
+    text = "```\nint main(void) { return 0; }\n```"
 
     coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]))
     source = coder._candidate_generator.extract_c_source(text)
@@ -199,10 +230,14 @@ def test_coder_compiles_every_candidate_without_running_code() -> None:
         compile_runner=compile_runner,
     )
 
-    compile_results = coder.compile_candidates(candidates)
+    compiled_candidates = coder.compile_candidates(candidates)
 
-    assert len(compile_results) == 2
-    assert [result.success for result in compile_results] == [True, True]
+    assert len(compiled_candidates) == 2
+    assert all(
+        candidate.compile_result is not None
+        and candidate.compile_result.success
+        for candidate in compiled_candidates
+    )
     assert len(commands) == 2
     assert all(command[0] == "gcc" for command in commands)
     assert all("-c" in command for command in commands)
@@ -213,38 +248,33 @@ def test_coder_default_gcc_compile_runner_compiles_source() -> None:
     candidate = CodeCandidate(0, "prompt", "raw", "int main(void) { return 0; }")
     coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]))
 
-    compile_results = coder.compile_candidates((candidate,))
+    compiled_candidates = coder.compile_candidates((candidate,))
+    compile_result = compiled_candidates[0].compile_result
 
-    assert compile_results[0].success
-    assert compile_results[0].command[0] == "gcc"
-    assert "-c" in compile_results[0].command
+    assert compile_result is not None
+    assert compile_result.success
+    assert compile_result.command[0] == "gcc"
+    assert "-c" in compile_result.command
 
 
 def test_coder_selects_from_successes_with_seeded_rng() -> None:
-    candidates = (
-        CodeCandidate(0, "prompt", "raw", "source"),
-        CodeCandidate(1, "prompt", "raw", "source"),
-        CodeCandidate(2, "prompt", "raw", "source"),
-    )
     compiler_results = (
         FakeCompileProcess(returncode=1),
         FakeCompileProcess(returncode=0),
         FakeCompileProcess(returncode=0),
     )
-    coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]), rng=random.Random(0))
-    compile_results = tuple(
-        CompileResult(
-            candidate_index=index,
+    candidates = tuple(
+        compiled_candidate(
+            index,
+            "source",
             success=process.returncode == 0,
-            command=("gcc",),
-            returncode=process.returncode,
-            stdout=process.stdout,
             stderr=process.stderr,
         )
         for index, process in enumerate(compiler_results)
     )
+    coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]), rng=random.Random(0))
 
-    selected = coder.select_candidate(candidates, compile_results)
+    selected = coder.select_candidate(candidates)
 
     assert selected.index == 2
 
@@ -272,7 +302,6 @@ def test_coder_cli_reads_stdin_and_prints_selected_source(
             return CoderResult(
                 task=instruction,
                 candidates=(selected_candidate,),
-                compile_results=(),
                 judge_results=(),
                 selected_candidate=selected_candidate,
             )
@@ -318,12 +347,118 @@ def test_coder_solve_accepts_per_call_sample_count() -> None:
     assert len(code_generator.tokenizer.prompts) == 2
 
 
+def test_coder_self_refines_selected_candidate_until_warnings_are_resolved() -> None:
+    code_generator = FakeTextGenerator(
+        [
+            "int main(void) { int unused; return 0; }",
+            "int main(void) { return 0; }",
+        ]
+    )
+    compile_outputs = [
+        FakeCompileProcess(
+            returncode=0,
+            stderr="candidate_0.c: warning: unused variable 'unused'",
+        ),
+        FakeCompileProcess(returncode=0),
+    ]
+
+    def compile_runner(_command: Sequence[str]) -> FakeCompileProcess:
+        return compile_outputs.pop(0)
+
+    coder = Coder(
+        code_generator,
+        FakeTextGenerator([]),
+        sample_count=1,
+        self_refinment_max_iteration=2,
+        compile_runner=compile_runner,
+    )
+
+    result = coder.solve("return success")
+
+    assert result.selected_candidate.index == 1
+    assert result.selected_candidate.source == "int main(void) { return 0; }"
+    assert [candidate.index for candidate in result.candidates] == [0, 1]
+    assert all(candidate.compile_result is not None for candidate in result.candidates)
+    assert "Compiler warning output:" in code_generator.tokenizer.prompts[1]
+    assert "unused variable" in code_generator.tokenizer.prompts[1]
+    assert "Current program:" in code_generator.tokenizer.prompts[1]
+    assert code_generator.tokenizer.enable_thinking == [True, True]
+
+
+def test_coder_stops_self_refinement_at_configured_limit() -> None:
+    code_generator = FakeTextGenerator(
+        [
+            "int main(void) { int first; return 0; }",
+            "int main(void) { int second; return 0; }",
+        ]
+    )
+    coder = Coder(
+        code_generator,
+        FakeTextGenerator([]),
+        sample_count=1,
+        self_refinment_max_iteration=1,
+        compile_runner=lambda _command: FakeCompileProcess(
+            returncode=0,
+            stderr="warning: unused variable",
+        ),
+    )
+
+    result = coder.solve("return success")
+
+    assert result.selected_candidate.index == 1
+    assert len(result.candidates) == 2
+    assert len(code_generator.tokenizer.prompts) == 2
+
+
+def test_coder_keeps_compiling_candidate_when_self_refinement_fails() -> None:
+    code_generator = FakeTextGenerator(
+        [
+            "int main(void) { int unused; return 0; }",
+            "not valid C",
+        ]
+    )
+    compile_outputs = [
+        FakeCompileProcess(returncode=0, stderr="warning: unused variable"),
+        FakeCompileProcess(returncode=1, stderr="error: invalid program"),
+    ]
+
+    def compile_runner(_command: Sequence[str]) -> FakeCompileProcess:
+        return compile_outputs.pop(0)
+
+    coder = Coder(
+        code_generator,
+        FakeTextGenerator([]),
+        sample_count=1,
+        self_refinment_max_iteration=2,
+        compile_runner=compile_runner,
+    )
+
+    result = coder.solve("return success")
+
+    assert result.selected_candidate.index == 0
+    assert len(result.candidates) == 2
+    assert result.candidates[1].compile_result is not None
+    assert not result.candidates[1].compile_result.success
+
+
+def test_coder_rejects_negative_self_refinment_iteration_limit() -> None:
+    with pytest.raises(
+        ValueError,
+        match="self_refinment_max_iteration must be non-negative",
+    ):
+        Coder(
+            FakeTextGenerator([]),
+            FakeTextGenerator([]),
+            self_refinment_max_iteration=-1,
+        )
+
+
 def test_coder_runs_tournament_over_successful_candidates() -> None:
     candidates = (
-        CodeCandidate(0, "prompt", "raw", "source 0"),
-        CodeCandidate(1, "prompt", "raw", "source 1"),
-        CodeCandidate(2, "prompt", "raw", "source 2"),
-        CodeCandidate(3, "prompt", "raw", "source 3"),
+        compiled_candidate(0, "source 0"),
+        compiled_candidate(1, "source 1", success=False, stderr="error"),
+        compiled_candidate(2, "source 2"),
+        compiled_candidate(3, "source 3"),
     )
     code_generator = FakeTextGenerator([])
     judge_generator = FakeTextGenerator(
@@ -340,47 +475,11 @@ def test_coder_runs_tournament_over_successful_candidates() -> None:
         judge_top_k=None,
         judge_top_p=None,
     )
-    compile_results = (
-        CompileResult(
-            candidate_index=0,
-            success=True,
-            command=("gcc",),
-            returncode=0,
-            stdout="",
-            stderr="",
-        ),
-        CompileResult(
-            candidate_index=1,
-            success=False,
-            command=("gcc",),
-            returncode=1,
-            stdout="",
-            stderr="error",
-        ),
-        CompileResult(
-            candidate_index=2,
-            success=True,
-            command=("gcc",),
-            returncode=0,
-            stdout="",
-            stderr="",
-        ),
-        CompileResult(
-            candidate_index=3,
-            success=True,
-            command=("gcc",),
-            returncode=0,
-            stdout="",
-            stderr="",
-        ),
-    )
-
     judge_results = coder.judge_successful_candidate_tournament(
         "write a program",
         candidates,
-        compile_results,
     )
-    selected = coder.select_candidate(candidates, compile_results, judge_results)
+    selected = coder.select_candidate(candidates, judge_results)
 
     assert [
         (
@@ -418,10 +517,10 @@ def test_coder_runs_tournament_over_successful_candidates() -> None:
 
 def test_coder_tournament_pairs_candidates_by_round() -> None:
     candidates = (
-        CodeCandidate(0, "prompt", "raw", "source 0"),
-        CodeCandidate(1, "prompt", "raw", "source 1"),
-        CodeCandidate(2, "prompt", "raw", "source 2"),
-        CodeCandidate(3, "prompt", "raw", "source 3"),
+        compiled_candidate(0, "source 0"),
+        compiled_candidate(1, "source 1"),
+        compiled_candidate(2, "source 2"),
+        compiled_candidate(3, "source 3"),
     )
     judge_generator = FakeTextGenerator(
         [
@@ -431,24 +530,12 @@ def test_coder_tournament_pairs_candidates_by_round() -> None:
         ]
     )
     coder = Coder(FakeTextGenerator([]), judge_generator)
-    compile_results = tuple(
-        CompileResult(
-            candidate_index=candidate.index,
-            success=True,
-            command=("gcc",),
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-        for candidate in candidates
-    )
 
     judge_results = coder.judge_successful_candidate_tournament(
         "write a program",
         candidates,
-        compile_results,
     )
-    selected = coder.select_candidate(candidates, compile_results, judge_results)
+    selected = coder.select_candidate(candidates, judge_results)
 
     assert [
         (
@@ -467,63 +554,27 @@ def test_coder_tournament_pairs_candidates_by_round() -> None:
 
 def test_coder_selects_last_tournament_winner() -> None:
     candidates = (
-        CodeCandidate(0, "prompt", "raw", "source"),
-        CodeCandidate(1, "prompt", "raw", "source"),
-    )
-    compile_results = (
-        CompileResult(
-            candidate_index=0,
-            success=True,
-            command=("gcc",),
-            returncode=0,
-            stdout="",
-            stderr="",
-        ),
-        CompileResult(
-            candidate_index=1,
-            success=True,
-            command=("gcc",),
-            returncode=0,
-            stdout="",
-            stderr="",
-        ),
+        compiled_candidate(0, "source"),
+        compiled_candidate(1, "source"),
     )
     judge_results = (
         JudgeResult(0, 1, 1, "Winner: B", "prompt"),
     )
     coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]))
 
-    selected = coder.select_candidate(candidates, compile_results, judge_results)
+    selected = coder.select_candidate(candidates, judge_results)
 
     assert selected.index == 1
 
 
 def test_coder_selects_first_candidate_when_all_compiles_fail() -> None:
     candidates = (
-        CodeCandidate(0, "prompt", "raw", "source"),
-        CodeCandidate(1, "prompt", "raw", "source"),
+        compiled_candidate(0, "source", success=False, stderr="error"),
+        compiled_candidate(1, "source", success=False, stderr="error"),
     )
     coder = Coder(FakeTextGenerator([]), FakeTextGenerator([]))
-    compile_results = (
-        CompileResult(
-            candidate_index=0,
-            success=False,
-            command=("gcc",),
-            returncode=1,
-            stdout="",
-            stderr="error",
-        ),
-        CompileResult(
-            candidate_index=1,
-            success=False,
-            command=("gcc",),
-            returncode=1,
-            stdout="",
-            stderr="error",
-        ),
-    )
 
-    selected = coder.select_candidate(candidates, compile_results)
+    selected = coder.select_candidate(candidates)
 
     assert selected == candidates[0]
 

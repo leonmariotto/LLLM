@@ -9,7 +9,9 @@ Coder is a tool used to generate C code.
 It use (by default) Qwen2.5 0.6B for generation and Qwen3 0.6B for judging. 
 Implement code-spcific self-consistency:
 For a given task, X candidates are generated, compilation is checked, then among 
-the successfull (compiled) candidates we choose the best by doing a judge tournament.
+the successfull (compiled) candidates we choose the best by doing a judge tournament. 
+After self-consistency, a loop of self-refinment is launch to remove compiler warning 
+if any (note that it barely manage to remove simple warning with Qwen-2.5 0.5B ...).
 
 Run:
 ```

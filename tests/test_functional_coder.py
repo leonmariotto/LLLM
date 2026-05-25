@@ -71,6 +71,46 @@ def test_functional_qwen2_5_coder_generates_addition_function(
 
 
 @pytest.mark.slow
+def test_functional_qwen2_5_coder_self_refines_compilation_warning(
+    qwen2_5_coder_generator: Generator,
+) -> None:
+    warned_source = """
+int main(void) {
+    int unused = 42; /* Remove this unused variable to fix the warning. */
+    return 0;
+}
+"""
+    coder = Coder(
+        qwen2_5_coder_generator,
+        qwen2_5_coder_generator,
+        max_generated_token=1024,
+        code_temperature=0.0,
+        code_top_k=None,
+        code_top_p=None,
+        self_refinment_max_iteration=2,
+    )
+    initial_candidate = coder.compile_candidates(
+        (CodeCandidate(0, "self-refinement", warned_source, warned_source),)
+    )[0]
+
+    assert initial_candidate.compile_result is not None
+    assert initial_candidate.compile_result.success
+    assert Coder.has_compilation_warning(initial_candidate)
+
+    refined_candidate, refinement_attempts = coder.self_refine_selected_candidate(
+        "remove compiler warnings without changing program behavior",
+        initial_candidate,
+        next_candidate_index=1,
+    )
+
+    assert refinement_attempts
+    assert refined_candidate.index != initial_candidate.index
+    assert refined_candidate.compile_result is not None
+    assert refined_candidate.compile_result.success
+    assert not Coder.has_compilation_warning(refined_candidate)
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("candidate_a_source", "candidate_b_source", "expected_winner_side"),
     [
@@ -122,18 +162,25 @@ def test_functional_qwen2_5_coder_judge_only_picks_matching_output(
     expected_winner_side: str,
 ) -> None:
     task = 'Write a C program that prints exactly "hello" followed by a newline.'
-    candidate_a = CodeCandidate(0, "judge-only", "raw", candidate_a_source)
-    candidate_b = CodeCandidate(1, "judge-only", "raw", candidate_b_source)
-    compile_results = (
-        CompileResult(0, True, ("judge-only",), 0, "", ""),
-        CompileResult(1, True, ("judge-only",), 0, "", ""),
+    candidate_a = CodeCandidate(
+        0,
+        "judge-only",
+        "raw",
+        candidate_a_source,
+        CompileResult(True, ("judge-only",), 0, "", ""),
+    )
+    candidate_b = CodeCandidate(
+        1,
+        "judge-only",
+        "raw",
+        candidate_b_source,
+        CompileResult(True, ("judge-only",), 0, "", ""),
     )
     coder = Coder(qwen2_5_coder_generator, qwen3_generator)
 
     judge_results = coder.judge_successful_candidate_tournament(
         task,
         (candidate_a, candidate_b),
-        compile_results,
     )
 
     assert len(judge_results) == 1
