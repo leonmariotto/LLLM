@@ -167,7 +167,7 @@ class _CodeSelfConsistencyGenerator:
     @staticmethod
     def build_prompt(task: str, sample_index: int) -> str:
         return (
-            "Write one complete, self-contained C11 source file for the task below.\n"
+            "Write compilable C11 code for the task below.\n"
             "Return only raw C code.\n"
             "Do not include markdown fences, shell commands, explanations, or tests "
             "outside the C file.\n"
@@ -190,7 +190,7 @@ class _CodeSelfConsistencyGenerator:
         candidate_b: CodeCandidate,
     ) -> str:
         return (
-            "You are judging two C11 program candidates for the same task.\n"
+            "You are judging two C11 code candidates for the same task.\n"
             "Both candidates compiled successfully. Choose the candidate that is "
             "more functionally correct for the original task.\n"
             f"Original task:\n{task.strip()}\n\n"
