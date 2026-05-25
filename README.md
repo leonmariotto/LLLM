@@ -37,6 +37,28 @@ $> uv run chat
 
 <img width="1920" height="1080" alt="Screenshot from 2026-05-24 16-23-11" src="https://github.com/user-attachments/assets/9df05958-152d-4df4-999e-9a78c1b218cb" />
 
+## Planner
+
+Planner contain a specialized self-refinment loop with human feedback.
+First the user request is expanded in X version. Then the X versions are agregated
+into a bullet-point list.
+The user is then asked to `revise`, `cancel` or `accept`.
+If `revise` is used, the user can write a review, and Planner will regenerate the
+bullet-point list with this input, and the user will be re-prompted.
+If `accept` is used the bullet point list is used to generate a markdown plan.
+If `cancel` is used the whole process is canceled.
+
+Run:
+```
+$> uv run planner --help
+$> uv run planner "design a caching layer"
+$> uv run planner
+```
+
+WIP: it's not working very well... I should add more discipline by doing a standardized process
+(SPICE). I could try to transform SYS.3 requirements in SWE.1 requirements, and then SWE.1 into
+SWE.2 architecture decision. It could be adapted for other SPICE-defined process.
+
 
 ## Wishlist
 
