@@ -93,12 +93,6 @@ class JudgeResult:
 
 
 @dataclass(frozen=True)
-class JudgeScore:
-    reason: str
-    score: int
-
-
-@dataclass(frozen=True)
 class CoderResult:
     task: str
     candidates: tuple[CodeCandidate, ...]
@@ -210,21 +204,6 @@ class _CodeSelfConsistencyGenerator:
             '{"judging": "<brief comparison, pros and cons>", "select": "<your choice between A and B>"}\n'
         )
 
-    @staticmethod
-    def build_score_prompt(task: str, candidate: CodeCandidate) -> str:
-        return (
-            "You are scoring one C11 program candidate for the original task.\n"
-            "Read the program text literally. Do not guess behavior that is not "
-            "present in the code.\n"
-            "Score functional correctness from 0 to 100, where 100 fully solves "
-            "the task and 0 is unrelated or unusable.\n"
-            f"Original task:\n{task.strip()}\n\n"
-            f"Program:\n"
-            f"```c\n{candidate.source.strip()}\n```\n"
-            "Return only valid JSON with exactly this shape:\n"
-            '{"judging": "<brief analysis, pros and cons>", "score": <integer from 0 to 100>}\n'
-        )
-
 
 def _generate_instruct(
     generator: TextGenerator,
@@ -319,8 +298,6 @@ class Coder:
             judge_results,
         )
         logger.info("Selected C candidate {}", selected_candidate.index)
-        # WIP: JudgeScore is ignored for now.
-        self.score_selected_candidate(task, selected_candidate)
         return CoderResult(
             task=task,
             candidates=candidates,
@@ -328,34 +305,6 @@ class Coder:
             judge_results=judge_results,
             selected_candidate=selected_candidate,
         )
-
-    def score_selected_candidate(
-        self,
-        task: str,
-        selected_candidate: CodeCandidate,
-    ) -> JudgeScore | None:
-        prompt = self._candidate_generator.build_score_prompt(
-            task,
-            selected_candidate,
-        )
-        logger.info("Scoring selected C candidate {}", selected_candidate.index)
-        raw_output = _generate_instruct(
-            self.judge_generator,
-            prompt,
-            enable_thinking=False,
-            max_generated_token=self.judge_max_generated_token,
-            temperature=self.judge_temperature,
-            top_k=self.judge_top_k,
-            top_p=self.judge_top_p,
-        )
-        judge_score = self.parse_judge_score(raw_output)
-        logger.info(
-            "Selected C candidate {} Judge score: {} reason: [{}]",
-            selected_candidate.index,
-            "unknown" if judge_score is None else judge_score.score,
-            "unknown" if judge_score is None else judge_score.reason,
-        )
-        return judge_score
 
     def compile_candidates(
         self, candidates: Sequence[CodeCandidate]
@@ -569,17 +518,6 @@ class Coder:
         return "A"
 
     @staticmethod
-    def parse_judge_score(text: str) -> JudgeScore | None:
-        last_score: JudgeScore | None = None
-        for payload in Coder._iter_json_objects(text):
-            score = Coder._validated_judge_score(payload, text)
-            if score is not None:
-                last_score = score
-        if last_score is None:
-            logger.warning("Could not parse valid judge score JSON: {}", text)
-        return last_score
-
-    @staticmethod
     def _iter_json_objects(text: str) -> Sequence[object]:
         decoder = json.JSONDecoder()
         payloads: list[object] = []
@@ -614,37 +552,6 @@ class Coder:
             )
             return None
         return winner
-
-    @staticmethod
-    def _validated_judge_score(
-        payload: object,
-        raw_output: str,
-    ) -> JudgeScore | None:
-        if not isinstance(payload, dict):
-            logger.warning("Judge score JSON must be an object, ignore: {}", raw_output)
-            return None
-
-        payload_object = cast(Mapping[str, object], payload)
-        judging = payload_object.get("judging")
-        score = payload_object.get("score")
-        if not isinstance(judging, str):
-            logger.warning(
-                "Judge score JSON missing string judging field, ignore: {}",
-                raw_output,
-            )
-            return None
-        if (
-            isinstance(score, bool)
-            or not isinstance(score, int)
-            or score < 0
-            or score > 100
-        ):
-            logger.warning(
-                "Judge score JSON has invalid score field, ignore: {}",
-                raw_output,
-            )
-            return None
-        return JudgeScore(reason=judging, score=score)
 
 
 def _build_qwen2_generator(
