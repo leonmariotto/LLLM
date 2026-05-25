@@ -1,8 +1,10 @@
+import pytest
 import torch
 from typing import Any, Callable, cast
 from transformers import Qwen2Config as TransformersQwen2Config
 from transformers import Qwen2ForCausalLM
 
+from ..LLLM.generator_with_tool import ToolCall
 from ..LLLM.hf_loader import model_ir_from_hf
 from ..LLLM.kv_cache import KVCache
 from ..LLLM.qwen2 import Qwen2Config, Qwen2Model, Qwen2Tokenizer
@@ -132,7 +134,112 @@ def test_qwen2_chat_template_keeps_existing_thinking_default() -> None:
     )
 
     assert prompt == (
-        "<|im_start|>user\n"
-        "Answer briefly.<|im_end|>\n"
-        "<|im_start|>assistant\n"
+        "<|im_start|>user\nAnswer briefly.<|im_end|>\n<|im_start|>assistant\n"
     )
+
+
+def test_qwen2_chat_template_renders_tools_calls_and_responses() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+    tools: list[dict[str, object]] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "weather",
+                "description": "Read weather.",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    prompt = tokenizer.apply_chat_template(
+        [
+            {"role": "system", "content": "Be precise."},
+            {"role": "user", "content": "Weather?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [ToolCall("weather", {"city": "Paris"})],
+            },
+            {"role": "tool", "content": "warm"},
+            {"role": "tool", "content": "dry"},
+        ],
+        tools=tools,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    assert isinstance(prompt, str)
+    assert prompt.startswith("<|im_start|>system\nBe precise.\n\n# Tools\n")
+    assert '"name": "weather"' in prompt
+    assert "<|im_start|>user\nWeather?<|im_end|>\n" in prompt
+    assert (
+        '<tool_call>\n{"name": "weather", "arguments": {"city": "Paris"}}\n'
+        "</tool_call><|im_end|>\n" in prompt
+    )
+    assert (
+        "<|im_start|>user\n<tool_response>\nwarm\n</tool_response>"
+        "\n<tool_response>\ndry\n</tool_response><|im_end|>\n" in prompt
+    )
+    assert prompt.endswith("<|im_start|>assistant\n")
+
+
+def test_qwen2_chat_template_adds_default_system_for_tools() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Use tools."}],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        tokenize=False,
+    )
+
+    assert isinstance(prompt, str)
+    assert prompt.startswith(
+        "<|im_start|>system\n"
+        "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n"
+        "# Tools"
+    )
+
+
+def test_qwen2_chat_template_renders_explicit_empty_tool_context() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "tool", "content": "Tool error: unknown tool"}],
+        tools=[],
+        tokenize=False,
+    )
+
+    assert isinstance(prompt, str)
+    assert "<tools>\n</tools>" in prompt
+    assert "<tool_response>\nTool error: unknown tool\n</tool_response>" in prompt
+
+
+def test_qwen2_parses_assistant_text_and_multiple_tool_calls() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    output = tokenizer.parse_assistant_output(
+        "Checking.\n"
+        '<tool_call>\n{"name": "a", "arguments": {"x": 1}}\n</tool_call>\n'
+        '<tool_call>\n{"name": "b", "arguments": {}}\n</tool_call>'
+    )
+
+    assert output.content == "Checking."
+    assert output.tool_calls == (
+        ToolCall("a", {"x": 1}),
+        ToolCall("b", {}),
+    )
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "<tool_call>{broken}</tool_call>",
+        '<tool_call>{"name": "lookup", "arguments": []}</tool_call>',
+        '<tool_call>{"name": "lookup", "arguments": {}}',
+    ],
+)
+def test_qwen2_rejects_invalid_tool_call_output(completion: str) -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    with pytest.raises(ValueError):
+        tokenizer.parse_assistant_output(completion)

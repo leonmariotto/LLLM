@@ -337,7 +337,7 @@ class GeneratorGPT2(Generator):
         temperature: float,
         top_k: int | None,
         top_p: float | None,
-    ) -> tuple[list[int], int]:
+    ) -> tuple[list[int], int, float]:
         if top_p is not None:
             raise NotImplementedError(
                 "top_p sampling is not supported by GeneratorGPT2"
@@ -350,6 +350,7 @@ class GeneratorGPT2(Generator):
             device=self._model_device(),
         )
         generated_token_count = 0
+        generated_sequence_logprob = 0.0
         eos = self.tokenizer.get_eos()
 
         for _ in range(max_generated_token):
@@ -362,12 +363,19 @@ class GeneratorGPT2(Generator):
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 break
+            generated_sequence_logprob += self._selected_token_logprob(
+                logits,
+                idx_next,
+                temperature,
+            )
             idx = torch.cat((idx, idx_next), dim=1)
             generated_token_count += int(idx_next.shape[0])
 
-        return cast(
-            list[int], cast(Any, idx.squeeze(0)).tolist()
-        ), generated_token_count
+        return (
+            cast(list[int], cast(Any, idx.squeeze(0)).tolist()),
+            generated_token_count,
+            generated_sequence_logprob,
+        )
 
 
 class GPT2MultiHeadAttention(nn.Module):

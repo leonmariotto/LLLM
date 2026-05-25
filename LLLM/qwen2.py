@@ -4,7 +4,10 @@ Qwen2 / Qwen2.5 text decoder.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+import json
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict, cast
 
 import tiktoken
@@ -17,6 +20,7 @@ from .llama2 import Llama2FeedForward
 from .norm import RMSNorm
 from .quantization import QuantizedLinear, QuantizedWeight, WeightMode
 from .rope import apply_rope, precompute_rope_cache
+from .generator_with_tool import AssistantOutput, ToolCall
 
 if TYPE_CHECKING:
     from .model_ir import ModelIR
@@ -547,18 +551,23 @@ class Qwen2Tokenizer:
 
     def apply_chat_template(
         self,
-        messages: list[dict[str, str]],
+        messages: Sequence[Mapping[str, object]],
         *,
+        tools: Sequence[dict[str, object]] | None = None,
         tokenize: bool = True,
         add_generation_prompt: bool = False,
         enable_thinking: bool = True,
     ) -> dict[str, list[int]] | str:
-        prompt = ""
-        for message in messages:
-            role = message["role"]
-            if role not in {"system", "user", "assistant"}:
-                raise ValueError(f"unsupported Qwen2 chat role {role!r}")
-            prompt += f"<|im_start|>{role}\n{message['content']}<|im_end|>\n"
+        if tools is not None:
+            prompt = self._apply_tool_chat_template(messages, tools)
+        else:
+            prompt = ""
+            for message in messages:
+                role = self._message_role(message)
+                if role not in {"system", "user", "assistant"}:
+                    raise ValueError(f"unsupported Qwen2 chat role {role!r}")
+                content = self._message_content(message)
+                prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
         if add_generation_prompt:
             prompt += "<|im_start|>assistant\n"
             if not enable_thinking:
@@ -566,6 +575,135 @@ class Qwen2Tokenizer:
         if not tokenize:
             return prompt
         return {"input_ids": self.encode(prompt)}
+
+    def parse_assistant_output(self, completion: str) -> AssistantOutput:
+        """Parse Qwen2.5 XML tool calls from one assistant completion."""
+        pattern = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", flags=re.DOTALL)
+        matches = list(pattern.finditer(completion))
+        content = pattern.sub("", completion)
+        if "<tool_call>" in content or "</tool_call>" in content:
+            raise ValueError("unmatched <tool_call> tag")
+
+        tool_calls: list[ToolCall] = []
+        for match in matches:
+            try:
+                raw_call = cast(object, json.loads(match.group(1)))
+            except json.JSONDecodeError as error:
+                raise ValueError("tool call must contain valid JSON") from error
+            if not isinstance(raw_call, dict):
+                raise ValueError("tool call must be a JSON object")
+            call_dict = cast(dict[str, object], raw_call)
+            name = call_dict.get("name")
+            arguments = call_dict.get("arguments")
+            if not isinstance(name, str) or not name:
+                raise ValueError("tool call name must be a non-empty string")
+            if not isinstance(arguments, dict):
+                raise ValueError("tool call arguments must be a JSON object")
+            tool_calls.append(
+                ToolCall(
+                    name=name,
+                    arguments=cast(dict[str, object], arguments),
+                )
+            )
+        return AssistantOutput(content=content.strip(), tool_calls=tuple(tool_calls))
+
+    def _apply_tool_chat_template(
+        self,
+        messages: Sequence[Mapping[str, object]],
+        tools: Sequence[dict[str, object]],
+    ) -> str:
+        """Render the Qwen2.5 Hermes-style XML tool template."""
+        first_is_system = bool(messages) and self._message_role(messages[0]) == "system"
+        if first_is_system:
+            system_content = self._message_content(messages[0])
+        else:
+            system_content = (
+                "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+            )
+        prompt = (
+            "<|im_start|>system\n"
+            f"{system_content}\n\n"
+            "# Tools\n\n"
+            "You may call one or more functions to assist with the user query.\n\n"
+            "You are provided with function signatures within <tools></tools> "
+            "XML tags:\n<tools>"
+        )
+        for tool in tools:
+            prompt += f"\n{json.dumps(tool, ensure_ascii=False)}"
+        prompt += (
+            "\n</tools>\n\n"
+            "For each function call, return a json object with function name and "
+            "arguments within <tool_call></tool_call> XML tags:\n"
+            "<tool_call>\n"
+            '{"name": <function-name>, "arguments": <args-json-object>}\n'
+            "</tool_call><|im_end|>\n"
+        )
+
+        start_index = 1 if first_is_system else 0
+        for index in range(start_index, len(messages)):
+            message = messages[index]
+            role = self._message_role(message)
+            content = self._message_content(message)
+            if role in {"system", "user"}:
+                prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+            elif role == "assistant":
+                prompt += self._format_tool_assistant_message(message, content)
+            elif role == "tool":
+                previous_is_tool = (
+                    index > start_index
+                    and self._message_role(messages[index - 1]) == "tool"
+                )
+                next_is_tool = (
+                    index + 1 < len(messages)
+                    and self._message_role(messages[index + 1]) == "tool"
+                )
+                if not previous_is_tool:
+                    prompt += "<|im_start|>user"
+                prompt += f"\n<tool_response>\n{content}\n</tool_response>"
+                if not next_is_tool:
+                    prompt += "<|im_end|>\n"
+            else:
+                raise ValueError(f"unsupported Qwen2 chat role {role!r}")
+        return prompt
+
+    def _format_tool_assistant_message(
+        self,
+        message: Mapping[str, object],
+        content: str,
+    ) -> str:
+        raw_calls = message.get("tool_calls")
+        if raw_calls is None:
+            return f"<|im_start|>assistant\n{content}<|im_end|>\n"
+        if not isinstance(raw_calls, list):
+            raise TypeError("assistant tool_calls must be a list[ToolCall]")
+        raw_call_items = cast(list[object], raw_calls)
+        if not all(isinstance(call, ToolCall) for call in raw_call_items):
+            raise TypeError("assistant tool_calls must be a list[ToolCall]")
+
+        prompt = "<|im_start|>assistant"
+        if content:
+            prompt += f"\n{content}"
+        for call in cast(list[ToolCall], raw_call_items):
+            prompt += (
+                "\n<tool_call>\n"
+                f"{json.dumps({'name': call.name, 'arguments': call.arguments}, ensure_ascii=False)}\n"
+                "</tool_call>"
+            )
+        return prompt + "<|im_end|>\n"
+
+    @staticmethod
+    def _message_role(message: Mapping[str, object]) -> str:
+        role = message.get("role")
+        if not isinstance(role, str):
+            raise TypeError("message role must be a string")
+        return role
+
+    @staticmethod
+    def _message_content(message: Mapping[str, object]) -> str:
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise TypeError("message content must be a string")
+        return content
 
     def convert_tokens_to_ids(self, token: str) -> int | None:
         if self.tiktok is not None:
