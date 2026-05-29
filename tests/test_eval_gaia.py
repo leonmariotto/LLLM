@@ -21,6 +21,7 @@ from ..LLLM.eval_gaia import (
 class TinyDataset:
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self.rows = rows
+        self.shuffle_seeds: list[int] = []
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -29,7 +30,15 @@ class TinyDataset:
         return iter(self.rows)
 
     def select(self, selected: range) -> "TinyDataset":
-        return TinyDataset([self.rows[index] for index in selected])
+        dataset = TinyDataset([self.rows[index] for index in selected])
+        dataset.shuffle_seeds = list(self.shuffle_seeds)
+        return dataset
+
+    def shuffle(self, *, seed: int) -> "TinyDataset":
+        self.shuffle_seeds.append(seed)
+        dataset = TinyDataset(list(reversed(self.rows)))
+        dataset.shuffle_seeds = list(self.shuffle_seeds)
+        return dataset
 
 
 def _row(
@@ -59,8 +68,9 @@ def _patch_dataset(
     calls: list[dict[str, Any]] = []
 
     def fake_load_dataset(*args: object, **kwargs: object) -> TinyDataset:
-        calls.append({"args": args, "kwargs": kwargs})
-        return TinyDataset(rows)
+        dataset = TinyDataset(rows)
+        calls.append({"args": args, "kwargs": kwargs, "dataset": dataset})
+        return dataset
 
     monkeypatch.setattr(eval_gaia, "load_dataset", fake_load_dataset)
     return calls
@@ -145,6 +155,19 @@ def test_load_gaia_tasks_applies_limit(
     assert [task.task_id for task in tasks] == ["task-1"]
 
 
+def test_load_gaia_tasks_can_shuffle_before_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    rows = [_row("task-1"), _row("task-2")]
+    calls = _patch_dataset(monkeypatch, rows)
+
+    tasks = load_gaia_tasks(data_dir=tmp_path, shuffle=True, limit=1)
+
+    assert [task.task_id for task in tasks] == ["task-2"]
+    assert calls[0]["dataset"].shuffle_seeds == [0]
+
+
 def test_evaluate_gaia_agent_scores_validation_rows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -168,6 +191,24 @@ def test_evaluate_gaia_agent_scores_validation_rows(
     assert evaluation.overall_accuracy == 0.5
     assert evaluation.per_level_accuracy == {1: 1.0, 2: 0.0}
     assert [result.correct for result in evaluation.results] == [True, False]
+
+
+def test_evaluate_gaia_agent_passes_shuffle_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = _patch_dataset(monkeypatch, [_row("task-1"), _row("task-2")])
+
+    evaluation = evaluate_gaia_agent(
+        lambda task: task.expected_answer or "",
+        data_dir=tmp_path,
+        shuffle=True,
+        shuffle_seed=7,
+        limit=1,
+    )
+
+    assert [result.task_id for result in evaluation.results] == ["task-2"]
+    assert calls[0]["dataset"].shuffle_seeds == [7]
 
 
 def test_evaluate_gaia_agent_keeps_test_rows_unscored(

@@ -84,6 +84,8 @@ def load_gaia_tasks(
     level: GaiaLevel | None = None,
     limit: int | None = None,
     data_dir: str | Path | None = None,
+    shuffle: bool = False,
+    shuffle_seed: int = 0,
 ) -> list[GaiaTask]:
     """
     Load GAIA tasks from Hugging Face or an existing dataset snapshot.
@@ -95,6 +97,8 @@ def load_gaia_tasks(
         limit: Optional maximum number of rows to return.
         data_dir: Optional local GAIA snapshot path.  When omitted, the dataset
             is resolved with ``huggingface_hub.snapshot_download``.
+        shuffle: Whether to shuffle the dataset before applying ``limit``.
+        shuffle_seed: Seed passed to Hugging Face datasets when ``shuffle`` is true.
 
     Returns:
         A list of normalized :class:`GaiaTask` objects.  Attachment paths are
@@ -112,6 +116,8 @@ def load_gaia_tasks(
         root,
     )
     dataset = load_dataset(str(root), config_name, split=split)
+    if shuffle:
+        dataset = dataset.shuffle(seed=shuffle_seed)
     if limit is not None:
         dataset = dataset.select(range(min(limit, len(dataset))))
 
@@ -128,6 +134,8 @@ def evaluate_gaia_agent(
     limit: int | None = None,
     data_dir: str | Path | None = None,
     output_path: str | Path | None = None,
+    shuffle: bool = False,
+    shuffle_seed: int = 0,
 ) -> GaiaEvaluationResult:
     """
     Evaluate an agent callable on GAIA tasks.
@@ -142,6 +150,8 @@ def evaluate_gaia_agent(
         level=level,
         limit=limit,
         data_dir=data_dir,
+        shuffle=shuffle,
+        shuffle_seed=shuffle_seed,
     )
     results: list[GaiaResult] = []
 
@@ -153,6 +163,7 @@ def evaluate_gaia_agent(
             task.task_id,
             task.level,
         )
+        logger.info("GAIA metadata={}", task.metadata)
         started = time.perf_counter()
         prediction = ""
         error: str | None = None

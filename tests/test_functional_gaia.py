@@ -43,6 +43,9 @@ def test_functional_qwen3_06b_runs_real_gaia_validation_smoke(
             if task.file_path is not None
             else "\nNo attached file is available for this task."
         )
+        #TODO: GAIA output format should be part of gaia contract and derived
+        #from a pydantic type.
+        # TODO add informations like: is_solvable: bool and unsolvability_reason:str
         prompt = (
             "Answer this GAIA benchmark question. Return only the final answer "
             "using this exact format: FINAL ANSWER: <answer>\n\n"
