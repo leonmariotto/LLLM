@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import importlib
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -271,7 +272,10 @@ class DockerSwebenchRunner:
         agent_patch = ""
         artifact_dir: Path | None = None
 
-        with tempfile.TemporaryDirectory(prefix="lllm-swebench-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="lllm-swebench-",
+            ignore_cleanup_errors=True,
+        ) as directory:
             host_root = Path(directory).resolve()
             repo_path = host_root / "repo"
             try:
@@ -309,6 +313,7 @@ class DockerSwebenchRunner:
                     test_result=test_result,
                     error=error,
                 )
+            self._restore_host_ownership(host_root)
 
         return SwebenchResult(
             instance_id=task.instance_id,
@@ -394,6 +399,28 @@ class DockerSwebenchRunner:
             stderr=process.stderr,
             elapsed_seconds=time.perf_counter() - started,
         )
+
+    def _restore_host_ownership(self, host_root: Path) -> None:
+        """Best-effort fix for root-owned files created by Docker bind mounts."""
+        uid = os.getuid()
+        gid = os.getgid()
+        try:
+            result = self._docker_exec(
+                host_root,
+                ("chown", "-R", f"{uid}:{gid}", "/workspace"),
+                workdir="/workspace",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not restore SWE-bench temp directory ownership: {}",
+                exc,
+            )
+            return
+        if result.returncode != 0:
+            logger.warning(
+                "Could not restore SWE-bench temp directory ownership: {}",
+                result.stderr.strip() or result.stdout.strip(),
+            )
 
     def _write_artifacts(
         self,

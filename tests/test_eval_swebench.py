@@ -342,3 +342,29 @@ def test_docker_runner_counts_test_failure_as_unresolved_not_error(
     assert result.error is None
     assert result.test_result is not None
     assert result.test_result.returncode == 1
+
+
+def test_docker_runner_ownership_restore_failure_does_not_fail_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_exec(
+        runner: eval_swebench.DockerSwebenchRunner,
+        host_root: Path,
+        command: tuple[str, ...],
+        *,
+        workdir: str,
+    ) -> CommandResult:
+        if command == ("git", "-C", "repo", "diff", "--binary"):
+            return CommandResult(command, 0, "workspace patch", "", 0.1)
+        if command[0] == "chown":
+            return CommandResult(command, 1, "", "permission denied", 0.1)
+        return CommandResult(command, 0, "ok", "", 0.1)
+
+    monkeypatch.setattr(eval_swebench.DockerSwebenchRunner, "_docker_exec", fake_exec)
+    runner = eval_swebench.DockerSwebenchRunner()
+    task = load_swebench_tasks.__globals__["_row_to_task"](_row("task-1"))
+
+    result = runner.run(task, lambda task, path: None)
+
+    assert result.resolved is True
+    assert result.error is None
