@@ -1,0 +1,363 @@
+"""
+GAIA benchmark evaluation helpers for agent-style systems.
+
+GAIA evaluates general AI assistants on real-world questions that may require
+reasoning, browsing, file handling, and tool use.  This module intentionally
+does not implement those tools.  Instead, it provides a small harness that loads
+GAIA tasks, passes each task to a caller-provided agent function, scores public
+validation answers, and exports results or test predictions.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+import importlib
+import json
+from pathlib import Path
+import re
+import time
+from typing import Any, Literal, cast
+
+from loguru import logger
+
+load_dataset = cast(
+    Callable[..., Any], importlib.import_module("datasets").load_dataset
+)
+snapshot_download = cast(
+    Callable[..., str], importlib.import_module("huggingface_hub").snapshot_download
+)
+
+GAIA_DATASET_ID = "gaia-benchmark/GAIA"
+GaiaSplit = Literal["validation", "test"]
+GaiaLevel = Literal[1, 2, 3]
+DatasetRow = Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class GaiaTask:
+    """One GAIA task passed to an agent implementation."""
+
+    task_id: str
+    question: str
+    level: int
+    file_path: Path | None
+    file_name: str | None
+    metadata: Mapping[str, Any]
+    expected_answer: str | None
+
+
+@dataclass(frozen=True)
+class GaiaResult:
+    """Result for one attempted GAIA task."""
+
+    task_id: str
+    question: str
+    level: int
+    file_path: Path | None
+    file_name: str | None
+    prediction: str
+    expected_answer: str | None
+    correct: bool | None
+    elapsed_seconds: float
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class GaiaEvaluationResult:
+    """Aggregate GAIA evaluation metrics and per-task results."""
+
+    total_tasks: int
+    scored_tasks: int
+    correct_tasks: int
+    overall_accuracy: float | None
+    per_level_accuracy: dict[int, float]
+    results: tuple[GaiaResult, ...]
+
+
+GaiaAgent = Callable[[GaiaTask], str]
+
+
+def load_gaia_tasks(
+    *,
+    split: GaiaSplit = "validation",
+    level: GaiaLevel | None = None,
+    limit: int | None = None,
+    data_dir: str | Path | None = None,
+) -> list[GaiaTask]:
+    """
+    Load GAIA tasks from Hugging Face or an existing dataset snapshot.
+
+    Args:
+        split: ``"validation"`` for locally scored development data or
+            ``"test"`` for leaderboard-style prediction export.
+        level: Optional GAIA level filter.  ``None`` loads all levels.
+        limit: Optional maximum number of rows to return.
+        data_dir: Optional local GAIA snapshot path.  When omitted, the dataset
+            is resolved with ``huggingface_hub.snapshot_download``.
+
+    Returns:
+        A list of normalized :class:`GaiaTask` objects.  Attachment paths are
+        absolute paths when the row contains a non-empty ``file_path``.
+    """
+    if limit is not None and limit < 0:
+        raise ValueError("limit must be non-negative")
+
+    config_name = _gaia_config_name(level)
+    root = _resolve_gaia_data_dir(data_dir)
+    logger.info(
+        "Loading GAIA dataset split={} config={} data_dir={}",
+        split,
+        config_name,
+        root,
+    )
+    dataset = load_dataset(str(root), config_name, split=split)
+    if limit is not None:
+        dataset = dataset.select(range(min(limit, len(dataset))))
+
+    tasks = [_row_to_task(cast(DatasetRow, row), root) for row in dataset]
+    logger.info("Loaded {} GAIA tasks", len(tasks))
+    return tasks
+
+
+def evaluate_gaia_agent(
+    agent: GaiaAgent,
+    *,
+    split: GaiaSplit = "validation",
+    level: GaiaLevel | None = None,
+    limit: int | None = None,
+    data_dir: str | Path | None = None,
+    output_path: str | Path | None = None,
+) -> GaiaEvaluationResult:
+    """
+    Evaluate an agent callable on GAIA tasks.
+
+    The supplied agent receives one :class:`GaiaTask` and must return the final
+    answer as a string.  Exceptions are captured as row-level failures so a long
+    evaluation can continue.  Rows with hidden or missing expected answers, such
+    as GAIA test rows, are included in the results with ``correct=None``.
+    """
+    tasks = load_gaia_tasks(
+        split=split,
+        level=level,
+        limit=limit,
+        data_dir=data_dir,
+    )
+    results: list[GaiaResult] = []
+
+    for index, task in enumerate(tasks, start=1):
+        logger.info(
+            "Evaluating GAIA task {}/{} task_id={} level={}",
+            index,
+            len(tasks),
+            task.task_id,
+            task.level,
+        )
+        started = time.perf_counter()
+        prediction = ""
+        error: str | None = None
+        try:
+            prediction = agent(task)
+        except Exception as exc:
+            error = str(exc)
+            logger.exception("GAIA task {} failed", task.task_id)
+
+        elapsed = time.perf_counter() - started
+        correct = _score_prediction(prediction, task.expected_answer, error)
+        logger.info(
+            "GAIA task {} finished correct={} elapsed={:.3f}s",
+            task.task_id,
+            correct,
+            elapsed,
+        )
+        results.append(
+            GaiaResult(
+                task_id=task.task_id,
+                question=task.question,
+                level=task.level,
+                file_path=task.file_path,
+                file_name=task.file_name,
+                prediction=prediction,
+                expected_answer=task.expected_answer,
+                correct=correct,
+                elapsed_seconds=elapsed,
+                error=error,
+            )
+        )
+
+    evaluation = _build_evaluation_result(results)
+    logger.info(
+        "GAIA evaluation complete total={} scored={} correct={} accuracy={}",
+        evaluation.total_tasks,
+        evaluation.scored_tasks,
+        evaluation.correct_tasks,
+        evaluation.overall_accuracy,
+    )
+    if output_path is not None:
+        write_gaia_results(evaluation.results, output_path)
+    return evaluation
+
+
+def write_gaia_results(
+    results: tuple[GaiaResult, ...] | list[GaiaResult],
+    output_path: str | Path,
+) -> None:
+    """Write complete GAIA row results as JSONL."""
+    path = Path(output_path)
+    logger.info("Writing {} GAIA result rows to {}", len(results), path)
+    with path.open("w", encoding="utf-8") as handle:
+        for result in results:
+            handle.write(json.dumps(_result_to_json(result), sort_keys=True) + "\n")
+
+
+def export_gaia_predictions(
+    results: GaiaEvaluationResult | tuple[GaiaResult, ...] | list[GaiaResult],
+    output_path: str | Path,
+) -> None:
+    """
+    Write leaderboard-style GAIA predictions as JSONL.
+
+    Only ``task_id`` and ``answer`` are exported, so this format can be used for
+    GAIA test predictions without leaking validation answers.
+    """
+    row_results = (
+        results.results if isinstance(results, GaiaEvaluationResult) else results
+    )
+    path = Path(output_path)
+    logger.info("Writing {} GAIA predictions to {}", len(row_results), path)
+    with path.open("w", encoding="utf-8") as handle:
+        for result in row_results:
+            row = {"task_id": result.task_id, "answer": result.prediction}
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def normalize_gaia_answer(text: str) -> str:
+    """
+    Normalize a GAIA answer for pragmatic local exact-match scoring.
+
+    This mirrors the intent of GAIA's short-answer scoring, but it is not
+    guaranteed to be byte-for-byte identical to the leaderboard scorer.
+    """
+    normalized = text.strip()
+    normalized = re.sub(
+        r"^\s*final\s+answer\s*:\s*",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = normalized.lower()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if normalized.endswith("."):
+        normalized = normalized[:-1].rstrip()
+    return normalized
+
+
+def score_gaia_answer(prediction: str, expected: str) -> bool:
+    """
+    Score a GAIA prediction against a public expected answer.
+
+    The scorer accepts normalized exact matches and cases where the normalized
+    expected answer is contained in a longer normalized model response.
+    """
+    normalized_prediction = normalize_gaia_answer(prediction)
+    normalized_expected = normalize_gaia_answer(expected)
+    if not normalized_expected:
+        return False
+    return (
+        normalized_prediction == normalized_expected
+        or normalized_expected in normalized_prediction
+    )
+
+
+def _gaia_config_name(level: GaiaLevel | None) -> str:
+    if level is None:
+        return "2023_all"
+    if level not in {1, 2, 3}:
+        raise ValueError("level must be one of 1, 2, 3, or None")
+    return f"2023_level{level}"
+
+
+def _resolve_gaia_data_dir(data_dir: str | Path | None) -> Path:
+    if data_dir is not None:
+        return Path(data_dir).expanduser().resolve()
+    downloaded = snapshot_download(repo_id=GAIA_DATASET_ID, repo_type="dataset")
+    return Path(downloaded).expanduser().resolve()
+
+
+def _row_to_task(row: DatasetRow, root: Path) -> GaiaTask:
+    file_path_value = _optional_str(row.get("file_path"))
+    expected_answer = _optional_str(row.get("Final answer"))
+    metadata = row.get("Annotator Metadata")
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    return GaiaTask(
+        task_id=_required_str(row, "task_id"),
+        question=_required_str(row, "Question"),
+        level=int(row["Level"]),
+        file_path=(root / file_path_value).resolve() if file_path_value else None,
+        file_name=_optional_str(row.get("file_name")),
+        metadata=cast(Mapping[str, Any], metadata),
+        expected_answer=expected_answer,
+    )
+
+
+def _required_str(row: DatasetRow, key: str) -> str:
+    value = row.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"GAIA row missing non-empty {key!r}")
+    return value
+
+
+def _optional_str(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def _score_prediction(
+    prediction: str,
+    expected_answer: str | None,
+    error: str | None,
+) -> bool | None:
+    if expected_answer is None:
+        return None
+    if error is not None:
+        return False
+    return score_gaia_answer(prediction, expected_answer)
+
+
+def _build_evaluation_result(results: list[GaiaResult]) -> GaiaEvaluationResult:
+    scored = [result for result in results if result.correct is not None]
+    correct_count = sum(1 for result in scored if result.correct)
+    per_level_accuracy: dict[int, float] = {}
+    for level in sorted({result.level for result in scored}):
+        level_results = [result for result in scored if result.level == level]
+        if level_results:
+            per_level_accuracy[level] = sum(
+                1 for result in level_results if result.correct
+            ) / len(level_results)
+
+    return GaiaEvaluationResult(
+        total_tasks=len(results),
+        scored_tasks=len(scored),
+        correct_tasks=correct_count,
+        overall_accuracy=correct_count / len(scored) if scored else None,
+        per_level_accuracy=per_level_accuracy,
+        results=tuple(results),
+    )
+
+
+def _result_to_json(result: GaiaResult) -> dict[str, object]:
+    return {
+        "task_id": result.task_id,
+        "question": result.question,
+        "level": result.level,
+        "file_path": str(result.file_path) if result.file_path is not None else None,
+        "file_name": result.file_name,
+        "prediction": result.prediction,
+        "expected_answer": result.expected_answer,
+        "correct": result.correct,
+        "elapsed_seconds": result.elapsed_seconds,
+        "error": result.error,
+    }
