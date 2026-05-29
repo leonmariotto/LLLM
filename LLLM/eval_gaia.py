@@ -162,6 +162,13 @@ def evaluate_gaia_agent(
             error = str(exc)
             logger.exception("GAIA task {} failed", task.task_id)
 
+        logger.info(
+            "GAIA question=[{}]\nprediction=[{}]\nexpected_answer=[{}]\n",
+            task.question,
+            prediction,
+            task.expected_answer,
+        )
+
         elapsed = time.perf_counter() - started
         correct = _score_prediction(prediction, task.expected_answer, error)
         logger.info(
