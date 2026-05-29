@@ -14,7 +14,7 @@ Implement LLM reasoning technics such as specialized **self-refinment** and
 Provide user application : **coder** code-production oriented generation, **chat** simple
 chat application, **planner** plan-production oriented generation.
 
-Provide different loader (**hf_loader** and **gguf**) that translate into an internal
+Provide different loader (**hf_loader**, **gguf** and **native**) that translate into an internal
 representation which is then used by models. This keep a clear separation between models
 format and internal logic.
 
@@ -126,4 +126,43 @@ space before storing them in the KV cache.
 - Add an optional cache to detect specialized neural regions activated for tasks.
 - bitsandbytes for memory pressure
 - Do a pass of documentation on docstring models because some has been dropped by refactor.
-- Tools support !
+- Add a training app that exports native IR checkpoints and persists optimizer/scheduler state for training resumption.
+- Add Hugging Face and GGUF exporters for distributing fine-tuned native IR checkpoints outside this project.
+
+- Tools support ! WIP
+- Integrate GAIA dataset in eval.py.
+- litellm completion have a response_format variable that define the expected
+structured output. This must be a prompt formatting technics, see with current
+Tokenizer what we can do. Using pydantic it's handy because we can generate a JSon schema from a pydantic type easily.
+Note that it's not litellm that implement constrained decoding it's the "provider": the
+inference service/server.
+Here's some technics to do that :
+    - Prompt-only formating: no hard garantee.
+    - Some model are trained for schema, so we can output them a JSON schema directly.
+    - Constrained decoding, we tweaks the generation so that invalid token are masked
+    out in token probability. That's the hard-lock. It's fun, I should do that. Not so
+    simple to implement though.
+
+## Context management
+
+- an agent need enough **effective context management**
+- a reasonably large cache_length
+- truncation of noisy old messages
+- summaries of old history
+- retrieval from files/vector DB/search
+- selective tool output inclusion
+- compact state like “current goal”, “known facts”, “open issues”
+- keeping the current task and constraints near the end of the prompt
+- "thinking" block not preserved.
+
+- system prompt must:
+    - define boundaries, which request is accepted, which is rejected.
+    - output format and style
+    - clarify knowledge/capacity limits
+    - "When the user's intent is clear, execute immediately without confirmation.
+        Only when intent is unclear, ask minimal questions to clarify"
+    - "use tool proactively, without asking permission"
+    - Clearly define when to use tools: use trigger pattern.
+    - Define when not use tool : "Do not search for timeless information,
+        fundamental concepts, definitions, or well- established technical facts."
+    - Provide concrete examples.
