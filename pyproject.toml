@@ -21,9 +21,11 @@ dependencies = [
     "tokenizers",
     "transformers",
     "datasets",
+    "docker",
     "sentencepiece", # LLama2 tokenizer
     "gguf",
     "loguru",
+    "requests",
     "textual>=8.2.7",
 ]
 
