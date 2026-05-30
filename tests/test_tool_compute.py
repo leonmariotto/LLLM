@@ -1,14 +1,21 @@
+import subprocess
+from collections.abc import Callable
+
 import pytest
 
 from ..LLLM.generator_with_tool import Tool
 from ..LLLM.tool_compute import compute_tool, execute_compute
 
 
-def compute(expression: str) -> str:
-    return execute_compute({"expression": expression})
+def test_compute_tool_returns_registered_bc_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_run(stdout="4"),
+    )
 
-
-def test_compute_tool_returns_registered_tool() -> None:
     tool = compute_tool()
 
     assert isinstance(tool, Tool)
@@ -16,34 +23,89 @@ def test_compute_tool_returns_registered_tool() -> None:
     function = tool.schema["function"]
     assert isinstance(function, dict)
     assert function["name"] == "compute"
+    assert "bc syntax" in str(function["description"])
     assert tool.execute({"expression": "2 + 2"}) == "4"
 
 
-@pytest.mark.parametrize(
-    ("expression", "expected"),
-    [
-        ("2 + 3 * 4", "14"),
-        ("(2 + 3) * 4", "20"),
-        ("-5 + 2", "-3"),
-        ("2 ** 10", "1024"),
-        ("sqrt(81)", "9"),
-        ("sin(pi / 2)", "1"),
-        ("sum([1, 2, 3])", "6"),
-        ("mean([2, 4, 6])", "4"),
-        ("max([1, 5, 3])", "5"),
-        ("round(1 / 3, 2)", "0.33"),
-    ],
-)
-def test_execute_compute_evaluates_supported_expressions(
-    expression: str,
-    expected: str,
+def test_execute_compute_forwards_expression_to_bc(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert compute(expression) == expected
+    calls: list[dict[str, object]] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        text: bool,
+        capture_output: bool,
+        timeout: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(
+            {
+                "command": command,
+                "input": input,
+                "text": text,
+                "capture_output": capture_output,
+                "timeout": timeout,
+                "check": check,
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="3973\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert execute_compute({"expression": "137 * 29"}) == "3973"
+    assert calls == [
+        {
+            "command": ["bc", "-l"],
+            "input": "137 * 29\n",
+            "text": True,
+            "capture_output": True,
+            "timeout": 5,
+            "check": False,
+        }
+    ]
 
 
-def test_execute_compute_formats_numbers_readably() -> None:
-    assert compute("6 / 2") == "3"
-    assert compute("1 / 8") == "0.125"
+def test_execute_compute_rewrites_pi_for_bc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(input)
+        return subprocess.CompletedProcess(command, 0, stdout="1548.4512\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert execute_compute({"expression": "scale=4; 4*pi*11.1^2"}) == "1548.4512"
+    assert calls == ["scale=4; 4*4*a(1)*11.1^2\n"]
+
+
+def test_execute_compute_rewrites_unicode_pi_for_bc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        input: str,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(input)
+        return subprocess.CompletedProcess(command, 0, stdout="1548.4512\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert execute_compute({"expression": "scale=4; 4*π*11.1^2"}) == "1548.4512"
+    assert calls == ["scale=4; 4*4*a(1)*11.1^2\n"]
 
 
 @pytest.mark.parametrize(
@@ -62,29 +124,58 @@ def test_execute_compute_validates_expression_argument(
         execute_compute(arguments)
 
 
-@pytest.mark.parametrize(
-    ("expression", "match"),
-    [
-        ("unknown(2)", "unknown function"),
-        ("x + 1", "unknown name"),
-        ("math.sqrt(4)", "function must be a simple name"),
-        ("[1, 2][0]", "unsupported syntax"),
-        ("[x for x in [1, 2]]", "unsupported syntax"),
-        ("2 if 1 else 3", "unsupported syntax"),
-        ("2 < 3", "unsupported syntax"),
-        ("import math", "valid calculator syntax"),
-        ("2^10", r"unsupported operator '\^'"),
-    ],
-)
-def test_execute_compute_rejects_unsupported_syntax(
-    expression: str,
-    match: str,
+def test_execute_compute_reports_missing_bc(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.raises(ValueError, match=match):
-        compute(expression)
+    def missing_bc(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError
+
+    monkeypatch.setattr(subprocess, "run", missing_bc)
+
+    with pytest.raises(ValueError, match="bc executable was not found"):
+        execute_compute({"expression": "2 + 2"})
 
 
-@pytest.mark.parametrize("expression", ["1 / 0", "sqrt(-1)", "exp(1000)"])
-def test_execute_compute_reports_math_failures(expression: str) -> None:
-    with pytest.raises(ValueError):
-        compute(expression)
+def test_execute_compute_reports_bc_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_run(returncode=1, stderr="syntax error"),
+    )
+
+    with pytest.raises(ValueError, match="bc error: syntax error"):
+        execute_compute({"expression": "2 +"})
+
+
+def test_execute_compute_reports_bc_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timeout(
+        command: list[str],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, 5)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+
+    with pytest.raises(ValueError, match="bc execution timed out"):
+        execute_compute({"expression": "while (1) 1"})
+
+
+def _fake_run(
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    return fake_run
