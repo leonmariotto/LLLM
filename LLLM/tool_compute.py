@@ -10,6 +10,9 @@ Intentionally unsupported Python syntax includes imports, assignments,
 attributes, indexing, comprehensions, comparisons, and statements.  Keeping the
 language small makes the tool easier for small models to use and gives them
 short, predictable error messages when they call it incorrectly.
+
+This is not working very well,. I suspect that a plain python interpreter will
+help the model better.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ COMPUTE_TOOL_SCHEMA: dict[str, object] = {
             "arithmetic, percentages, powers, square roots, logs, trig, sums, "
             "averages, min/max, and exact numeric calculations. This is not a "
             "Python interpreter: send only an expression. Use ** for powers. "
-            "Use this tool whenever you have calculation to do."
+            #          "Use this tool whenever you have calculation to do."
         ),
         "parameters": {
             "type": "object",
