@@ -6,7 +6,6 @@ Manage KVCache: KVCache is created and destroyed in a single generation.
 """
 
 import time
-import logging
 from typing import Any, Protocol, cast, List
 
 from loguru import logger
@@ -47,7 +46,6 @@ class Generator:
         self.generation_seconds: List[float] = []
         self.generated_sequence_logprob: List[float] = []
         self.mean_token_per_second = 0.0
-        self.logger = logging.getLogger(__name__)
 
     def generate(
         self,
@@ -211,6 +209,10 @@ class Generator:
             if step + 1 < max_generated_token:
                 with torch.no_grad():
                     logits = self.model(idx_next, kv_cache=kv_cache)
+            if generated_token_count % 256 == 0:
+                logger.debug(
+                    "Generating.. generated_token_count={}", generated_token_count
+                )
 
         return (
             cast(list[int], cast(Any, idx.squeeze(0)).tolist()),
@@ -254,13 +256,6 @@ class Generator:
             c_seconds += s
         if c_count != 0:
             self.mean_token_per_second = float(c_count) / c_seconds
-        message = "Generated {} tokens in {} (mean: {} tokens/s, logprob: {})".format(
-            generated_token_count,
-            elapsed,
-            self.mean_token_per_second,
-            generated_sequence_logprob,
-        )
-        self.logger.info(message)
         logger.info(
             "Generated {} tokens in {} (mean: {} tokens/s, logprob: {})",
             generated_token_count,

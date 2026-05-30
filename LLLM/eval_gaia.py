@@ -174,12 +174,13 @@ def evaluate_gaia_agent(
         elapsed = time.perf_counter() - started
 
         logger.info(
-            "GAIA question=[{}]\nprediction=[{}]\nexpected_answer=[{}]\n"
-            "expected_tools=[{}]\n expected_time=[{}] current_time={:.3f}s\n",
+            "GAIA TASK {} REPORT:\nquestion=[{}]\nprediction=[{}]\nexpected_answer=[{}]\n"
+            "expected_tools=[{}]\nexpected_time=[{}]\ncurrent_time={:.3f}s\n",
+            index,
             task.question,
             prediction,
             task.expected_answer,
-            task.metadata["Tools"],
+            task.metadata["Tools"].replace("\n", ", "),
             task.metadata["How long did this take?"],
             elapsed,
         )
