@@ -1,5 +1,8 @@
 """
 Qwen2 / Qwen2.5 text decoder.
+Recommended sampling parameters:
+Thinking: temperature=0.6, top_p=0.95, top_k=20
+Non-thinking (instruct): tasks: temperature=0.7, top_p=0.80, top_k=20
 """
 
 from __future__ import annotations

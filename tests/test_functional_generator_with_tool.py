@@ -72,7 +72,9 @@ def test_functional_qwen3_calls_hello_tool_and_uses_response(
             }
         ],
         max_generated_token=1024,
-        temperature=0.0,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
     )
 
     assert calls == [{}]
@@ -113,7 +115,9 @@ def test_functional_qwen3_with_thinking_calls_compute_tool(
             }
         ],
         max_generated_token=1024,
-        temperature=0.0,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
     )
 
     assert calls
@@ -155,7 +159,9 @@ def test_functional_qwen3_with_thinking_calls_wikisearch_tool(
             }
         ],
         max_generated_token=1024,
-        temperature=0.0,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
     )
 
     assert calls
@@ -202,7 +208,9 @@ def test_functional_qwen3_with_thinking_calls_wikisearch_open_tool(
             }
         ],
         max_generated_token=1024,
-        temperature=0.0,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
     )
 
     assert calls
@@ -236,7 +244,9 @@ def test_functional_qwen3_with_thinking_calls_compute_tool_autoload(
             }
         ],
         max_generated_token=1024,
-        temperature=0.0,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
     )
 
     assert response is not None
@@ -264,7 +274,9 @@ def test_functional_qwen3_with_thinking_calls_wikisearch_autoload(
             }
         ],
         max_generated_token=1024,
-        temperature=0.0,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
     )
 
     assert response is not None
