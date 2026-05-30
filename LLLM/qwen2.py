@@ -605,7 +605,15 @@ class Qwen2Tokenizer:
                     arguments=cast(dict[str, object], arguments),
                 )
             )
-        return AssistantOutput(content=content.strip(), tool_calls=tuple(tool_calls))
+        return AssistantOutput(
+            content=self._strip_think_blocks(content).strip(),
+            tool_calls=tuple(tool_calls),
+        )
+
+    @staticmethod
+    def _strip_think_blocks(text: str) -> str:
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        return re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
 
     def _apply_tool_chat_template(
         self,

@@ -139,6 +139,11 @@ class GeneratorWithTool:
                 top_p=top_p,
                 include_prompt=False,
             )
+            logger.debug(
+                "Generated assistant completion on tool round {}:\n{}",
+                tool_rounds,
+                completion,
+            )
             try:
                 output = self.tokenizer.parse_assistant_output(completion)
             except ValueError as error:
@@ -165,10 +170,24 @@ class GeneratorWithTool:
                 )
                 return output.content
 
+            logger.debug(
+                "Parsed assistant content on tool round {}:\n{}",
+                tool_rounds,
+                output.content,
+            )
+            for index, tool_call in enumerate(output.tool_calls):
+                logger.debug(
+                    "Parsed tool call block {} on round {}: name={} arguments={}",
+                    index,
+                    tool_rounds,
+                    tool_call.name,
+                    tool_call.arguments,
+                )
             logger.info(
-                "Assistant requested {} tool calls on round {}",
+                "Assistant requested {} tool calls on round {}: {}",
                 len(output.tool_calls),
                 tool_rounds,
+                [tool_call.name for tool_call in output.tool_calls],
             )
             self._check_tool_round_limit(tool_rounds)
             history.append(
@@ -179,10 +198,16 @@ class GeneratorWithTool:
                 }
             )
             for tool_call in output.tool_calls:
+                tool_response = self._execute_tool_call(tool_call)
+                logger.info(
+                    "Tool {} response:\n{}",
+                    tool_call.name,
+                    tool_response,
+                )
                 history.append(
                     {
                         "role": "tool",
-                        "content": self._execute_tool_call(tool_call),
+                        "content": tool_response,
                     }
                 )
             tool_rounds += 1

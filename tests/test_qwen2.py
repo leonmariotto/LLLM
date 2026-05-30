@@ -230,6 +230,28 @@ def test_qwen2_parses_assistant_text_and_multiple_tool_calls() -> None:
     )
 
 
+def test_qwen2_parse_assistant_output_strips_thinking_blocks() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    output = tokenizer.parse_assistant_output(
+        "<think>hidden reasoning</think>\n"
+        "Checking.\n"
+        '<tool_call>\n{"name": "a", "arguments": {"x": 1}}\n</tool_call>'
+    )
+
+    assert output.content == "Checking."
+    assert output.tool_calls == (ToolCall("a", {"x": 1}),)
+
+
+def test_qwen2_parse_assistant_output_strips_trailing_unclosed_thinking() -> None:
+    tokenizer = Qwen2Tokenizer.__new__(Qwen2Tokenizer)
+
+    output = tokenizer.parse_assistant_output("FINAL ANSWER: Paris\n<think>hidden")
+
+    assert output.content == "FINAL ANSWER: Paris"
+    assert output.tool_calls == ()
+
+
 @pytest.mark.parametrize(
     "completion",
     [

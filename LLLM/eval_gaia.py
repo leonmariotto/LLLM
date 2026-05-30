@@ -163,7 +163,6 @@ def evaluate_gaia_agent(
             task.task_id,
             task.level,
         )
-        logger.info("GAIA metadata={}", task.metadata)
         started = time.perf_counter()
         prediction = ""
         error: str | None = None
@@ -172,15 +171,19 @@ def evaluate_gaia_agent(
         except Exception as exc:
             error = str(exc)
             logger.exception("GAIA task {} failed", task.task_id)
+        elapsed = time.perf_counter() - started
 
         logger.info(
-            "GAIA question=[{}]\nprediction=[{}]\nexpected_answer=[{}]\n",
+            "GAIA question=[{}]\nprediction=[{}]\nexpected_answer=[{}]\n"
+            "expected_tools=[{}]\n expected_time=[{}] current_time={:.3f}s\n",
             task.question,
             prediction,
             task.expected_answer,
+            task.metadata["Tools"],
+            task.metadata["How long did this take?"],
+            elapsed,
         )
 
-        elapsed = time.perf_counter() - started
         correct = _score_prediction(prediction, task.expected_answer, error)
         logger.info(
             "GAIA task {} finished correct={} elapsed={:.3f}s",
@@ -205,11 +208,13 @@ def evaluate_gaia_agent(
 
     evaluation = _build_evaluation_result(results)
     logger.info(
-        "GAIA evaluation complete total={} scored={} correct={} accuracy={}",
+        "GAIA evaluation complete total_tasks={} scored_tasks={} correct_tasks={} "
+        "overall_accuracy={} per_level_accuracy={}",
         evaluation.total_tasks,
         evaluation.scored_tasks,
         evaluation.correct_tasks,
         evaluation.overall_accuracy,
+        evaluation.per_level_accuracy,
     )
     if output_path is not None:
         write_gaia_results(evaluation.results, output_path)
