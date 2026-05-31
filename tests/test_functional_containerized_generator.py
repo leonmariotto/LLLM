@@ -6,7 +6,14 @@ from typing import Any
 
 import pytest
 
-from LLLM.docker_generator import ContainerizedGeneratorWithTool, DockerMount
+from LLLM.docker_generator import (
+    DEFAULT_CONTAINER_HF_CACHE_PATH,
+    DEFAULT_CONTAINER_UV_CACHE_PATH,
+    DEFAULT_HOST_HF_CACHE_PATH,
+    DEFAULT_HOST_UV_CACHE_PATH,
+    ContainerizedGeneratorWithTool,
+    DockerMount,
+)
 from LLLM.fetch import fetch_model_ir
 from LLLM.generator import Generator
 from LLLM.generator_with_tool import GeneratorWithTool, Tool
@@ -81,7 +88,8 @@ def test_functional_qwen3_06b_agent_runs_inside_container(tmp_path: Path) -> Non
         ],
         client=docker_client,
         timeout_seconds=900,
-        startup_timeout_seconds=900,
+        startup_timeout_seconds=3000,
+        auto_remove=False,
     ) as agent:
         response = agent.generate(
             [
@@ -123,8 +131,8 @@ def _require_docker_client() -> Any:
 def _cache_mounts() -> list[DockerMount]:
     mounts: list[DockerMount] = []
     for host_path, container_path in [
-        (Path.home() / ".cache" / "huggingface", "/root/.cache/huggingface"),
-        (Path.home() / ".cache" / "uv", "/root/.cache/uv"),
+        (DEFAULT_HOST_HF_CACHE_PATH, DEFAULT_CONTAINER_HF_CACHE_PATH),
+        (DEFAULT_HOST_UV_CACHE_PATH, DEFAULT_CONTAINER_UV_CACHE_PATH),
     ]:
         host_path.mkdir(parents=True, exist_ok=True)
         mounts.append(DockerMount(host_path, container_path))

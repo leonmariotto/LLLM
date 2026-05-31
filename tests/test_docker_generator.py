@@ -1,11 +1,19 @@
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 import requests
 
-from ..LLLM.docker_generator import ContainerizedGeneratorWithTool, DockerMount
-from ..LLLM.generator_container_worker import execute_generate_payload, load_factory
+from ..LLLM.docker_generator import (
+    DEFAULT_CONTAINER_UV_PROJECT_ENVIRONMENT_PATH,
+    ContainerizedGeneratorWithTool,
+    DockerMount,
+)
+from ..LLLM.generator_container_worker import (
+    execute_generate_payload,
+    load_factory,
+)
 from ..LLLM.generator_with_tool import ToolCall, ToolMessage
 
 
@@ -13,6 +21,7 @@ class FakeContainer:
     def __init__(self) -> None:
         self.attrs: dict[str, object] = {"State": {"Running": True}}
         self.stopped = False
+        self.log_output = b""
 
     def reload(self) -> None:
         pass
@@ -20,6 +29,10 @@ class FakeContainer:
     def stop(self, *, timeout: int) -> None:
         del timeout
         self.stopped = True
+
+    def logs(self, **kwargs: object) -> bytes:
+        del kwargs
+        return self.log_output
 
 
 class FakeContainers:
@@ -128,14 +141,31 @@ def test_containerized_generator_starts_container_and_forwards_generate(
     call = client.containers.calls[0]
     assert call["image"] == "image"
     assert call["network_mode"] == "host"
+    assert call["user"] == "1000:1000"
     assert call["working_dir"] == "/workspace/LLLM"
+    command = cast(list[str], call["command"])
+    assert command[0:2] == ["sh", "-lc"]
+    assert "uv sync" in command[2]
+    assert "uv run --no-sync python -m LLLM.generator_container_worker" in (
+        command[2]
+    )
     assert call["environment"] == {
         "LLLM_GENERATOR_FACTORY": "tests.fake:create_generator",
         "LLLM_GENERATOR_FACTORY_KWARGS": '{"repo_id": "tiny"}',
         "LLLM_GENERATOR_WORKER_HOST": "127.0.0.1",
         "LLLM_GENERATOR_WORKER_PORT": "33333",
+        "HF_HOME": "/tmp/lllm-hf-cache",
         "UV_CACHE_DIR": "/tmp/lllm-uv-cache",
-        "UV_PROJECT_ENVIRONMENT": "/tmp/lllm-uv-venv",
+        "UV_PROJECT_ENVIRONMENT": DEFAULT_CONTAINER_UV_PROJECT_ENVIRONMENT_PATH,
+    }
+    volumes = cast(dict[str, dict[str, str]], call["volumes"])
+    assert volumes[str(Path.home() / ".cache" / "uv")] == {
+        "bind": "/tmp/lllm-uv-cache",
+        "mode": "rw",
+    }
+    assert volumes[str(Path.home() / ".cache" / "huggingface")] == {
+        "bind": "/tmp/lllm-hf-cache",
+        "mode": "rw",
     }
     assert posted[0]["json"] == {
         "messages": [{"role": "user", "content": "hi"}],
@@ -148,17 +178,46 @@ def test_containerized_generator_starts_container_and_forwards_generate(
     }
 
 
+def test_containerized_generator_can_override_container_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeDockerClient()
+
+    def fake_get(*_args: object, **_kwargs: object) -> FakeResponse:
+        return FakeResponse({})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    proxy = ContainerizedGeneratorWithTool(
+        "tests.fake:create_generator",
+        client=client,
+        worker_port=33333,
+        container_user=None,
+    )
+
+    proxy.start()
+
+    assert client.containers.calls[0]["image"] == "buildpack-deps:bookworm-curl"
+    assert client.containers.calls[0]["user"] is None
+
+
 def test_containerized_generator_raises_remote_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeDockerClient()
-    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: FakeResponse({}))
+
+    def fake_get(*_args: object, **_kwargs: object) -> FakeResponse:
+        return FakeResponse({})
+
+    def fake_post(*_args: object, **_kwargs: object) -> FakeResponse:
+        return FakeResponse(
+            {"error": {"type": "RuntimeError", "message": "remote failed"}}
+        )
+
+    monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(
         requests,
         "post",
-        lambda *_args, **_kwargs: FakeResponse(
-            {"error": {"type": "RuntimeError", "message": "remote failed"}}
-        ),
+        fake_post,
     )
     proxy = ContainerizedGeneratorWithTool(
         "tests.fake:create_generator",
@@ -174,7 +233,11 @@ def test_containerized_generator_context_manager_stops_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = FakeDockerClient()
-    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: FakeResponse({}))
+
+    def fake_get(*_args: object, **_kwargs: object) -> FakeResponse:
+        return FakeResponse({})
+
+    monkeypatch.setattr(requests, "get", fake_get)
 
     with ContainerizedGeneratorWithTool(
         "tests.fake:create_generator",

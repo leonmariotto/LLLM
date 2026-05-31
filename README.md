@@ -154,6 +154,7 @@ Here's some technics to do that :
 - compact state like “current goal”, “known facts”, “open issues”
 - keeping the current task and constraints near the end of the prompt
 - "thinking" block not preserved.
+- tool executor can have state and memory.
 
 - system prompt must:
     - define boundaries, which request is accepted, which is rejected.

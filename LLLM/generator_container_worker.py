@@ -65,6 +65,7 @@ def load_factory(factory_path: str) -> Callable[..., object]:
     module_name, qualname = factory_path.split(":", 1)
     if not module_name or not qualname:
         raise ValueError("factory must use 'module:callable' format")
+    logger.info("Importing GeneratorWithTool factory module {}", module_name)
     value: object = importlib.import_module(module_name)
     for part in qualname.split("."):
         value = getattr(value, part)
@@ -101,7 +102,9 @@ def build_generator_from_env() -> GeneratorWithTool:
     if not isinstance(kwargs, dict):
         raise ValueError(f"{_FACTORY_KWARGS_ENV} must be a JSON object")
     logger.info("Loading GeneratorWithTool factory {}", factory_path)
-    generator = load_factory(factory_path)(**cast(dict[str, object], kwargs))
+    factory = load_factory(factory_path)
+    logger.info("Calling GeneratorWithTool factory {}", factory_path)
+    generator = factory(**cast(dict[str, object], kwargs))
     if not isinstance(generator, GeneratorWithTool):
         raise TypeError("factory must return GeneratorWithTool")
     logger.info("GeneratorWithTool loaded in container")
@@ -228,9 +231,12 @@ def main() -> int:
         container usage those failures make the process exit before the host
         proxy's health check succeeds.
     """
+    logger.info("Generator container worker process started")
     host = os.environ.get(_HOST_ENV, "127.0.0.1")
     port = int(os.environ.get(_PORT_ENV, "8765"))
+    logger.info("Generator container worker configured host={} port={}", host, port)
     generator = build_generator_from_env()
+    logger.info("Binding generator container worker HTTP server")
     server = ThreadingHTTPServer((host, port), make_handler(generator))
     logger.info("Generator container worker listening on {}:{}", host, port)
     server.serve_forever()

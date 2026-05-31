@@ -11,12 +11,15 @@ will be executed in the newly created container.
 We can't serialize an initialized instance of GeneratorWithTool to a container,
 so the GeneratorWithTool instance have to be created in-place.
 
+The uv cache and project environment are both placed under a mounted cache path
+so repeated container runs do not recreate the heavyweight ML environment.
 """
 
 from __future__ import annotations
 
 import json
 import socket
+import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -29,9 +32,18 @@ from loguru import logger
 
 from .generator_with_tool import ToolMessage
 
-DEFAULT_DOCKER_IMAGE = "ghcr.io/astral-sh/uv:python3.12-bookworm-slim"
+DEFAULT_DOCKER_IMAGE = "buildpack-deps:bookworm-curl"
 DEFAULT_CONTAINER_REPO_PATH = "/workspace/LLLM"
 DEFAULT_REPO_PATH = Path(__file__).resolve().parents[1]
+DEFAULT_CONTAINER_USER = "1000:1000"
+DEFAULT_HOST_UV_CACHE_PATH = Path.home() / ".cache" / "uv"
+DEFAULT_CONTAINER_UV_CACHE_PATH = "/tmp/lllm-uv-cache"
+DEFAULT_CONTAINER_UV_PROJECT_ENVIRONMENT_PATH = (
+    f"{DEFAULT_CONTAINER_UV_CACHE_PATH}/project-envs/LLLM"
+)
+DEFAULT_HOST_HF_CACHE_PATH = Path.home() / ".cache" / "huggingface"
+DEFAULT_CONTAINER_HF_CACHE_PATH = "/tmp/lllm-hf-cache"
+CONTAINER_LOG_POLL_INTERVAL_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -94,6 +106,9 @@ class ContainerizedGeneratorWithTool:
         worker_port: Host port used by the worker. When omitted, a free local
             port is selected.
         auto_remove: Whether Docker should remove the container after it stops.
+        container_user: User passed to Docker. Defaults to UID/GID
+            ``"1000:1000"`` so bind-mounted caches stay writable by the first
+            host user.
     """
 
     def __init__(
@@ -110,6 +125,7 @@ class ContainerizedGeneratorWithTool:
         startup_timeout_seconds: int = 120,
         worker_port: int | None = None,
         auto_remove: bool = True,
+        container_user: str | None = DEFAULT_CONTAINER_USER,
     ) -> None:
         if not factory:
             raise ValueError("factory must not be empty")
@@ -130,7 +146,9 @@ class ContainerizedGeneratorWithTool:
         self.startup_timeout_seconds = startup_timeout_seconds
         self.worker_port = worker_port
         self.auto_remove = auto_remove
+        self.container_user = container_user
         self._container: Any | None = None
+        self._container_log_offset = 0
 
     def __enter__(self) -> ContainerizedGeneratorWithTool:
         self.start()
@@ -155,6 +173,10 @@ class ContainerizedGeneratorWithTool:
         the worker's ``/health`` endpoint responds. It returns ``None`` and
         raises ``RuntimeError`` if the container exits early or never becomes
         ready.
+
+        Note for debugging: if the container crash at initialization, we need to
+        instanciate with auto_remove=False, run `docker ps -a --no-trunc` and
+        then access logs via `docker logs <container_id>`.
         """
         if self._container is not None:
             return
@@ -167,26 +189,27 @@ class ContainerizedGeneratorWithTool:
             self.factory,
             self.worker_port,
         )
+        uv_version = _detect_host_uv_version()
+        logger.info("Installing uv {} in generator container", uv_version)
+        self._container_log_offset = 0
         self._container = client.containers.run(
             self.docker_image,
-            command=[
-                "uv",
-                "run",
-                "python",
-                "-m",
-                "LLLM.generator_container_worker",
-            ],
+            command=_container_boot_command(uv_version),
             detach=True,
             remove=self.auto_remove,
             network_mode="host",
+            user=self.container_user,
             working_dir=DEFAULT_CONTAINER_REPO_PATH,
             environment={
                 "LLLM_GENERATOR_FACTORY": self.factory,
                 "LLLM_GENERATOR_FACTORY_KWARGS": json.dumps(self.factory_kwargs),
                 "LLLM_GENERATOR_WORKER_HOST": "127.0.0.1",
                 "LLLM_GENERATOR_WORKER_PORT": str(self.worker_port),
-                "UV_CACHE_DIR": "/tmp/lllm-uv-cache",
-                "UV_PROJECT_ENVIRONMENT": "/tmp/lllm-uv-venv",
+                "HF_HOME": DEFAULT_CONTAINER_HF_CACHE_PATH,
+                "UV_CACHE_DIR": DEFAULT_CONTAINER_UV_CACHE_PATH,
+                "UV_PROJECT_ENVIRONMENT": (
+                    DEFAULT_CONTAINER_UV_PROJECT_ENVIRONMENT_PATH
+                ),
             },
             volumes=self._volumes(),
         )
@@ -281,30 +304,76 @@ class ContainerizedGeneratorWithTool:
                 "mode": "rw",
             }
         }
+        for mount in self._default_cache_mounts():
+            volumes[str(Path(mount.host_path).expanduser().resolve())] = (
+                mount.as_volume_spec()
+            )
         for mount in self.mount_points:
             volumes[str(Path(mount.host_path).expanduser().resolve())] = (
                 mount.as_volume_spec()
             )
         return volumes
 
+    def _default_cache_mounts(self) -> tuple[DockerMount, ...]:
+        DEFAULT_HOST_UV_CACHE_PATH.mkdir(parents=True, exist_ok=True)
+        (DEFAULT_HOST_UV_CACHE_PATH / "project-envs").mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        DEFAULT_HOST_HF_CACHE_PATH.mkdir(parents=True, exist_ok=True)
+        return (
+            DockerMount(DEFAULT_HOST_UV_CACHE_PATH, DEFAULT_CONTAINER_UV_CACHE_PATH),
+            DockerMount(DEFAULT_HOST_HF_CACHE_PATH, DEFAULT_CONTAINER_HF_CACHE_PATH),
+        )
+
     def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + self.startup_timeout_seconds
         last_error: Exception | None = None
+        next_log_poll = 0.0
         while time.monotonic() < deadline:
             if not self._container_is_running():
+                self._emit_new_container_logs()
                 raise RuntimeError("generator container exited before becoming ready")
             try:
                 response = requests.get(self._url("/health"), timeout=1)
                 if response.status_code == 200:
+                    self._emit_new_container_logs()
                     logger.info("GeneratorWithTool container is ready")
                     return
             except requests.RequestException as error:
                 last_error = error
+            now = time.monotonic()
+            if now >= next_log_poll:
+                self._emit_new_container_logs()
+                next_log_poll = now + CONTAINER_LOG_POLL_INTERVAL_SECONDS
             time.sleep(0.2)
+        self._emit_new_container_logs()
         raise RuntimeError(
             f"generator container did not become ready within "
             f"{self.startup_timeout_seconds}s: {last_error}"
         )
+
+    def _emit_new_container_logs(self) -> None:
+        if self._container is None or not hasattr(self._container, "logs"):
+            return
+        try:
+            raw_logs = self._container.logs(stdout=True, stderr=True)
+        except Exception as error:
+            logger.debug("Could not read generator container logs: {}", error)
+            return
+        if isinstance(raw_logs, str):
+            raw_bytes = raw_logs.encode("utf-8", errors="replace")
+        elif isinstance(raw_logs, bytes):
+            raw_bytes = raw_logs
+        else:
+            return
+        if len(raw_bytes) <= self._container_log_offset:
+            return
+        new_logs = raw_bytes[self._container_log_offset :]
+        self._container_log_offset = len(raw_bytes)
+        for line in new_logs.decode("utf-8", errors="replace").splitlines():
+            if line:
+                logger.info("container log | {}", line)
 
     def _container_is_running(self) -> bool:
         if self._container is None:
@@ -350,3 +419,49 @@ def _find_free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _detect_host_uv_version() -> str:
+    try:
+        result = subprocess.run(
+            ["uv", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("could not detect host uv version") from error
+    parts = result.stdout.strip().split()
+    if len(parts) < 2 or parts[0] != "uv":
+        raise RuntimeError(f"could not parse host uv version: {result.stdout!r}")
+    return parts[1]
+
+
+def _container_boot_command(uv_version: str) -> list[str]:
+    if not uv_version:
+        raise ValueError("uv_version must not be empty")
+    return [
+        "sh",
+        "-lc",
+        "\n".join(
+            [
+                "set -eux",
+                "echo '[lllm-boot] container boot started'",
+                "date -u",
+                "uname -a",
+                "id",
+                "pwd",
+                "export HOME=/tmp/lllm-home",
+                "export UV_INSTALL_DIR=/tmp/lllm-bin",
+                'export PATH="$UV_INSTALL_DIR:$PATH"',
+                'mkdir -p "$HOME" "$UV_INSTALL_DIR"',
+                "echo '[lllm-boot] installing uv'",
+                (f"wget -qO- https://astral.sh/uv/{uv_version}/install.sh | sh"),
+                "uv --version",
+                "echo '[lllm-boot] uv sync starting'",
+                "uv sync",
+                "echo '[lllm-boot] worker starting'",
+                "uv run --no-sync python -m LLLM.generator_container_worker",
+            ]
+        ),
+    ]
