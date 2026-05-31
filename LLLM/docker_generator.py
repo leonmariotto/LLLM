@@ -23,6 +23,7 @@ import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any, cast
@@ -44,6 +45,7 @@ DEFAULT_CONTAINER_UV_PROJECT_ENVIRONMENT_PATH = (
 DEFAULT_HOST_HF_CACHE_PATH = Path.home() / ".cache" / "huggingface"
 DEFAULT_CONTAINER_HF_CACHE_PATH = "/tmp/lllm-hf-cache"
 CONTAINER_LOG_POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_CONTAINER_LOG_DIR_NAME = "container_logs"
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,9 @@ class ContainerizedGeneratorWithTool:
         container_user: User passed to Docker. Defaults to UID/GID
             ``"1000:1000"`` so bind-mounted caches stay writable by the first
             host user.
+        record_log: Whether to concatenate container stdout/stderr logs into a
+            timestamped file under ``repo_path/container_logs`` for each
+            container execution.
     """
 
     def __init__(
@@ -126,6 +131,7 @@ class ContainerizedGeneratorWithTool:
         worker_port: int | None = None,
         auto_remove: bool = True,
         container_user: str | None = DEFAULT_CONTAINER_USER,
+        record_log: bool = True,
     ) -> None:
         if not factory:
             raise ValueError("factory must not be empty")
@@ -147,8 +153,10 @@ class ContainerizedGeneratorWithTool:
         self.worker_port = worker_port
         self.auto_remove = auto_remove
         self.container_user = container_user
+        self.record_log = record_log
         self._container: Any | None = None
         self._container_log_offset = 0
+        self._container_log_file_path: Path | None = None
 
     def __enter__(self) -> ContainerizedGeneratorWithTool:
         self.start()
@@ -192,6 +200,7 @@ class ContainerizedGeneratorWithTool:
         uv_version = _detect_host_uv_version()
         logger.info("Installing uv {} in generator container", uv_version)
         self._container_log_offset = 0
+        self._container_log_file_path = self._create_container_log_file()
         self._container = client.containers.run(
             self.docker_image,
             command=_container_boot_command(uv_version),
@@ -224,6 +233,7 @@ class ContainerizedGeneratorWithTool:
         if self._container is None:
             return
         container = self._container
+        self._emit_new_container_logs()
         self._container = None
         logger.info("Stopping GeneratorWithTool container")
         container.stop(timeout=5)
@@ -274,11 +284,14 @@ class ContainerizedGeneratorWithTool:
             "top_p": top_p,
         }
         logger.info("Forwarding generate request to container")
-        response = requests.post(
-            self._url("/generate"),
-            json=payload,
-            timeout=self.timeout_seconds,
-        )
+        try:
+            response = requests.post(
+                self._url("/generate"),
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+        finally:
+            self._emit_new_container_logs()
         if response.status_code != 200:
             raise RuntimeError(
                 f"container generate request failed with HTTP {response.status_code}: "
@@ -326,6 +339,11 @@ class ContainerizedGeneratorWithTool:
             DockerMount(DEFAULT_HOST_HF_CACHE_PATH, DEFAULT_CONTAINER_HF_CACHE_PATH),
         )
 
+    @property
+    def container_log_path(self) -> Path | None:
+        """Timestamped file receiving combined container stdout/stderr logs."""
+        return self._container_log_file_path
+
     def _wait_until_ready(self) -> None:
         deadline = time.monotonic() + self.startup_timeout_seconds
         last_error: Exception | None = None
@@ -371,9 +389,34 @@ class ContainerizedGeneratorWithTool:
             return
         new_logs = raw_bytes[self._container_log_offset :]
         self._container_log_offset = len(raw_bytes)
+        self._append_container_log_file(new_logs)
         for line in new_logs.decode("utf-8", errors="replace").splitlines():
             if line:
                 logger.info("container log | {}", line)
+
+    def _create_container_log_file(self) -> Path | None:
+        if not self.record_log:
+            return None
+        log_dir = self.repo_path.expanduser().resolve() / DEFAULT_CONTAINER_LOG_DIR_NAME
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        path = log_dir / f"containerized-generator-{timestamp}.log"
+        path.touch()
+        logger.info("Recording generator container logs to {}", path)
+        return path
+
+    def _append_container_log_file(self, logs: bytes) -> None:
+        if self._container_log_file_path is None:
+            return
+        try:
+            with self._container_log_file_path.open("ab") as log_file:
+                log_file.write(logs)
+        except OSError as error:
+            logger.warning(
+                "Could not write generator container log file {}: {}",
+                self._container_log_file_path,
+                error,
+            )
 
     def _container_is_running(self) -> bool:
         if self._container is None:

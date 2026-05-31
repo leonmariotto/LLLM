@@ -176,10 +176,69 @@ def test_containerized_generator_starts_container_and_forwards_generate(
         "top_k": None,
         "top_p": None,
     }
+    assert proxy.container_log_path is not None
+    assert proxy.container_log_path.parent == tmp_path / "container_logs"
+    assert proxy.container_log_path.name.startswith("containerized-generator-")
+    assert proxy.container_log_path.suffix == ".log"
+
+
+def test_containerized_generator_records_container_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = FakeDockerClient()
+    client.container.log_output = b"boot\nready\n"
+
+    def fake_get(*_args: object, **_kwargs: object) -> FakeResponse:
+        return FakeResponse({"ok": True})
+
+    def fake_post(*_args: object, **_kwargs: object) -> FakeResponse:
+        client.container.log_output = b"boot\nready\ngenerated\n"
+        return FakeResponse({"result": "answer"})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", fake_post)
+    proxy = ContainerizedGeneratorWithTool(
+        "tests.fake:create_generator",
+        repo_path=tmp_path,
+        client=client,
+        worker_port=33333,
+    )
+
+    assert proxy.generate([{"role": "user", "content": "hi"}]) == "answer"
+
+    assert proxy.container_log_path is not None
+    assert proxy.container_log_path.read_bytes() == b"boot\nready\ngenerated\n"
+
+
+def test_containerized_generator_can_disable_container_log_recording(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    client = FakeDockerClient()
+    client.container.log_output = b"boot\nready\n"
+
+    def fake_get(*_args: object, **_kwargs: object) -> FakeResponse:
+        return FakeResponse({"ok": True})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    proxy = ContainerizedGeneratorWithTool(
+        "tests.fake:create_generator",
+        repo_path=tmp_path,
+        client=client,
+        worker_port=33333,
+        record_log=False,
+    )
+
+    proxy.start()
+
+    assert proxy.container_log_path is None
+    assert not (tmp_path / "container_logs").exists()
 
 
 def test_containerized_generator_can_override_container_user(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     client = FakeDockerClient()
 
@@ -189,6 +248,7 @@ def test_containerized_generator_can_override_container_user(
     monkeypatch.setattr(requests, "get", fake_get)
     proxy = ContainerizedGeneratorWithTool(
         "tests.fake:create_generator",
+        repo_path=tmp_path,
         client=client,
         worker_port=33333,
         container_user=None,
@@ -202,6 +262,7 @@ def test_containerized_generator_can_override_container_user(
 
 def test_containerized_generator_raises_remote_errors(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     client = FakeDockerClient()
 
@@ -221,6 +282,7 @@ def test_containerized_generator_raises_remote_errors(
     )
     proxy = ContainerizedGeneratorWithTool(
         "tests.fake:create_generator",
+        repo_path=tmp_path,
         client=client,
         worker_port=33333,
     )
@@ -231,6 +293,7 @@ def test_containerized_generator_raises_remote_errors(
 
 def test_containerized_generator_context_manager_stops_container(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     client = FakeDockerClient()
 
@@ -241,6 +304,7 @@ def test_containerized_generator_context_manager_stops_container(
 
     with ContainerizedGeneratorWithTool(
         "tests.fake:create_generator",
+        repo_path=tmp_path,
         client=client,
         worker_port=33333,
     ) as proxy:
