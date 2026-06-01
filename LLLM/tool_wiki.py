@@ -1,7 +1,7 @@
 """
 Wikimedia wiki search and page retrieval tool for model tool-use loops.
 
-The tool exposes one ``wikisearch`` function with four actions:
+The tool exposes one ``wiki`` function with four actions:
 ``search`` queries a Wikimedia wiki through the MediaWiki API, ``open``
 retrieves a plain-text extract for a wiki page URL or page title,
 ``search_in_page`` searches inside a known wiki page, and ``read_chunk``
@@ -26,7 +26,7 @@ _DEFAULT_WIKI = "https://en.wikipedia.org"
 _REQUEST_TIMEOUT_SECONDS = 10
 _HEADERS = {
     "User-Agent": (
-        "LLLM wikisearch tool/0.1 "
+        "LLLM wiki tool/0.1 "
         "(https://github.com/leonmariotto/LLLM; contact: leon2mariotto@gmail.com)"
     )
 }
@@ -45,10 +45,10 @@ _SUPPORTED_EXACT_HOSTS = {"www.wikidata.org"}
 _SEARCH_IN_PAGE_CONTEXT_CHARS = 300
 _TRUNCATED_MARKER = "\n[truncated]"
 
-WIKISEARCH_TOOL_SCHEMA: dict[str, object] = {
+WIKI_TOOL_SCHEMA: dict[str, object] = {
     "type": "function",
     "function": {
-        "name": "wikisearch",
+        "name": "wiki",
         "description": (
             "Wikipedia/Wikimedia tool. Choose one action. "
             "1. action='search': find page titles for a topic. Use query as the "
@@ -74,7 +74,7 @@ WIKISEARCH_TOOL_SCHEMA: dict[str, object] = {
             "search_in_page search for exact match (case insensitive) so do only "
             "small search: 2-3 words maximum. "
             "Examples: "
-            '{"action":"open","title":"paris"}; '
+            '{"action":"open","title":"turtle"}; '
             '{"action":"search","query":"olympic games list"}; '
             '{"action":"search_in_page","title":"paris","query":"montmartre"}; '
             '{"action":"read_chunk"}.'
@@ -87,7 +87,7 @@ WIKISEARCH_TOOL_SCHEMA: dict[str, object] = {
                     "enum": ["search", "open", "search_in_page", "read_chunk"],
                     "description": (
                         "Choose exactly one: 'search' finds pages; 'open' reads a "
-                        "known page; 'search_in_page' finds a short phrase inside "
+                        "known page; 'search_in_page' finds an exact match inside "
                         "a known page; 'read_chunk' continues the previous "
                         "truncated result."
                     ),
@@ -163,18 +163,18 @@ class _FetchedPage:
     extract: str
 
 
-def wikisearch_tool() -> Tool:
-    """Return the ready-to-register ``wikisearch`` tool."""
-    executor = _WikisearchExecutor()
-    return Tool(schema=copy.deepcopy(WIKISEARCH_TOOL_SCHEMA), execute=executor.execute)
+def wiki_tool() -> Tool:
+    """Return the ready-to-register ``wiki`` tool."""
+    executor = _WikiExecutor()
+    return Tool(schema=copy.deepcopy(WIKI_TOOL_SCHEMA), execute=executor.execute)
 
 
-def execute_wikisearch(arguments: dict[str, object]) -> str:
-    """Execute the wikisearch tool."""
+def execute_wiki(arguments: dict[str, object]) -> str:
+    """Execute the wiki tool."""
     return _DEFAULT_EXECUTOR.execute(arguments)
 
 
-class _WikisearchExecutor:
+class _WikiExecutor:
     def __init__(self) -> None:
         self._continuation_chunks: deque[str] = deque()
 
@@ -228,7 +228,7 @@ class _WikisearchExecutor:
 
     def _read_chunk(self, max_chars: int) -> str:
         if not self._continuation_chunks:
-            return "No wikisearch continuation chunks available."
+            return "No wiki continuation chunks available."
         return self._truncate_and_queue(
             self._continuation_chunks.popleft(),
             max_chars,
@@ -250,7 +250,7 @@ class _WikisearchExecutor:
         return visible + _TRUNCATED_MARKER
 
 
-_DEFAULT_EXECUTOR = _WikisearchExecutor()
+_DEFAULT_EXECUTOR = _WikiExecutor()
 
 
 def _execute_search(
@@ -294,8 +294,13 @@ def _execute_search(
     lines: list[str] = []
     for index, result in enumerate(results, start=1):
         lines.append(f"{index}. {result.title}\nURL: {result.url}")
-        if result.snippet and include_snippet is True:
-            lines.append(f"Snippet: {result.snippet}")
+        # if result.snippet and include_snippet is True:
+        #     lines.append(f"Snippet: {result.snippet}")
+    if lines != []:
+        lines.append(
+            "Search results only list candidate pages. You must call "
+            "open or search_in_page before answering."
+        )
     return "\n".join(lines)
 
 

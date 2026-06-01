@@ -5,7 +5,7 @@ import pytest
 import requests
 
 from ..LLLM.generator_with_tool import Tool
-from ..LLLM.tool_wikisearch import execute_wikisearch, wikisearch_tool
+from ..LLLM.tool_wiki import execute_wiki, wiki_tool
 
 
 class FakeResponse:
@@ -30,14 +30,14 @@ class FakeResponse:
         pass
 
 
-def test_wikisearch_tool_returns_registered_tool() -> None:
-    tool = wikisearch_tool()
+def test_wiki_tool_returns_registered_tool() -> None:
+    tool = wiki_tool()
 
     assert isinstance(tool, Tool)
     assert tool.schema["type"] == "function"
     function = tool.schema["function"]
     assert isinstance(function, dict)
-    assert function["name"] == "wikisearch"
+    assert function["name"] == "wiki"
     parameters = function["parameters"]
     assert isinstance(parameters, dict)
     properties = parameters["properties"]
@@ -47,7 +47,7 @@ def test_wikisearch_tool_returns_registered_tool() -> None:
     assert action["enum"] == ["search", "open", "search_in_page", "read_chunk"]
 
 
-def test_execute_wikisearch_search_parses_results(
+def test_execute_wiki_search_parses_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -72,7 +72,7 @@ def test_execute_wikisearch_search_parses_results(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wikisearch({"action": "search", "query": "CAC 40"})
+    output = execute_wiki({"action": "search", "query": "CAC 40"})
 
     assert calls[0]["args"] == ("https://en.wikipedia.org/w/api.php",)
     kwargs = calls[0]["kwargs"]
@@ -86,7 +86,7 @@ def test_execute_wikisearch_search_parses_results(
     assert "2. CAC Next 20" in output
 
 
-def test_execute_wikisearch_search_uses_requested_wiki_and_max_results(
+def test_execute_wiki_search_uses_requested_wiki_and_max_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -105,7 +105,7 @@ def test_execute_wikisearch_search_uses_requested_wiki_and_max_results(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {
             "action": "search",
             "query": "Paris",
@@ -119,7 +119,7 @@ def test_execute_wikisearch_search_uses_requested_wiki_and_max_results(
     assert "2. Paris Saint-Germain FC" not in output
 
 
-def test_execute_wikisearch_search_reports_no_results(
+def test_execute_wiki_search_reports_no_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -128,12 +128,12 @@ def test_execute_wikisearch_search_reports_no_results(
         lambda *_, **__: FakeResponse({"query": {"search": []}}),
     )
 
-    output = execute_wikisearch({"action": "search", "query": "nothing"})
+    output = execute_wiki({"action": "search", "query": "nothing"})
 
     assert output == "No wiki results found for: nothing"
 
 
-def test_execute_wikisearch_open_reads_title(
+def test_execute_wiki_open_reads_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -155,14 +155,14 @@ def test_execute_wikisearch_open_reads_title(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wikisearch({"action": "open", "title": "CAC 40"})
+    output = execute_wiki({"action": "open", "title": "CAC 40"})
 
     assert "URL: https://en.wikipedia.org/wiki/CAC_40" in output
     assert "Title: CAC 40" in output
     assert "benchmark French stock market index" in output
 
 
-def test_execute_wikisearch_open_reads_url(
+def test_execute_wiki_open_reads_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -183,7 +183,7 @@ def test_execute_wikisearch_open_reads_url(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {"action": "open", "url": "https://fr.wikipedia.org/wiki/Caf%C3%A9"}
     )
 
@@ -192,7 +192,7 @@ def test_execute_wikisearch_open_reads_url(
     assert "A café is a type of restaurant." in output
 
 
-def test_execute_wikisearch_open_truncates_output(
+def test_execute_wiki_open_truncates_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -207,7 +207,7 @@ def test_execute_wikisearch_open_truncates_output(
     }
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {"action": "open", "title": "Long", "max_chars": 500}
     )
 
@@ -215,7 +215,7 @@ def test_execute_wikisearch_open_truncates_output(
     assert output.endswith("[truncated]")
 
 
-def test_wikisearch_tool_read_chunk_consumes_open_remainder_without_network(
+def test_wiki_tool_read_chunk_consumes_open_remainder_without_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -235,7 +235,7 @@ def test_wikisearch_tool_read_chunk_consumes_open_remainder_without_network(
         return FakeResponse(payload)
 
     monkeypatch.setattr(requests, "get", fake_get)
-    tool = wikisearch_tool()
+    tool = wiki_tool()
 
     first = tool.execute({"action": "open", "title": "Long", "max_chars": 500})
     second = tool.execute({"action": "read_chunk", "max_chars": 500})
@@ -247,7 +247,7 @@ def test_wikisearch_tool_read_chunk_consumes_open_remainder_without_network(
     assert len(calls) == 1
 
 
-def test_wikisearch_tool_read_chunk_consumes_multiple_chunks_in_order(
+def test_wiki_tool_read_chunk_consumes_multiple_chunks_in_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     extract = "a" * 600 + "b" * 600 + "END"
@@ -262,7 +262,7 @@ def test_wikisearch_tool_read_chunk_consumes_multiple_chunks_in_order(
         }
     }
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-    tool = wikisearch_tool()
+    tool = wiki_tool()
 
     first = tool.execute({"action": "open", "title": "Long", "max_chars": 500})
     second = tool.execute({"action": "read_chunk", "max_chars": 500})
@@ -280,10 +280,10 @@ def test_wikisearch_tool_read_chunk_consumes_multiple_chunks_in_order(
     assert "a" * 100 in combined
     assert "b" * 100 in combined
     assert "END" in combined
-    assert fourth == "No wikisearch continuation chunks available."
+    assert fourth == "No wiki continuation chunks available."
 
 
-def test_wikisearch_tool_read_chunk_isolated_by_tool_instance(
+def test_wiki_tool_read_chunk_isolated_by_tool_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -297,20 +297,20 @@ def test_wikisearch_tool_read_chunk_isolated_by_tool_instance(
         }
     }
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-    first_tool = wikisearch_tool()
-    second_tool = wikisearch_tool()
+    first_tool = wiki_tool()
+    second_tool = wiki_tool()
 
     first = first_tool.execute({"action": "open", "title": "Long", "max_chars": 500})
     isolated = second_tool.execute({"action": "read_chunk"})
     continuation = first_tool.execute({"action": "read_chunk"})
 
     assert first.endswith("[truncated]")
-    assert isolated == "No wikisearch continuation chunks available."
+    assert isolated == "No wiki continuation chunks available."
     assert continuation
     assert continuation != isolated
 
 
-def test_execute_wikisearch_search_in_page_reads_title(
+def test_execute_wiki_search_in_page_reads_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -334,7 +334,7 @@ def test_execute_wikisearch_search_in_page_reads_title(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {"action": "search_in_page", "title": "Python", "query": "PYTHON"}
     )
 
@@ -349,7 +349,7 @@ def test_execute_wikisearch_search_in_page_reads_title(
     assert "[python]" in output
 
 
-def test_execute_wikisearch_search_in_page_reads_url(
+def test_execute_wiki_search_in_page_reads_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -370,7 +370,7 @@ def test_execute_wikisearch_search_in_page_reads_url(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {
             "action": "search_in_page",
             "url": "https://fr.wikipedia.org/wiki/Caf%C3%A9",
@@ -383,7 +383,7 @@ def test_execute_wikisearch_search_in_page_reads_url(
     assert "[café]" in output
 
 
-def test_execute_wikisearch_search_in_page_reports_no_matches(
+def test_execute_wiki_search_in_page_reports_no_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -398,7 +398,7 @@ def test_execute_wikisearch_search_in_page_reports_no_matches(
     }
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {"action": "search_in_page", "title": "Python", "query": "missing"}
     )
 
@@ -409,7 +409,7 @@ def test_execute_wikisearch_search_in_page_reports_no_matches(
     )
 
 
-def test_execute_wikisearch_search_in_page_returns_all_matches_that_fit(
+def test_execute_wiki_search_in_page_returns_all_matches_that_fit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -424,7 +424,7 @@ def test_execute_wikisearch_search_in_page_returns_all_matches_that_fit(
     }
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {"action": "search_in_page", "title": "Short", "query": "needle"}
     )
 
@@ -432,7 +432,7 @@ def test_execute_wikisearch_search_in_page_returns_all_matches_that_fit(
     assert "[truncated]" not in output
 
 
-def test_execute_wikisearch_search_in_page_truncates_when_matches_do_not_fit(
+def test_execute_wiki_search_in_page_truncates_when_matches_do_not_fit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     extract = " ".join(f"needle {'x' * 120}" for _ in range(20))
@@ -448,7 +448,7 @@ def test_execute_wikisearch_search_in_page_truncates_when_matches_do_not_fit(
     }
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
 
-    output = execute_wikisearch(
+    output = execute_wiki(
         {
             "action": "search_in_page",
             "title": "Long",
@@ -462,7 +462,7 @@ def test_execute_wikisearch_search_in_page_truncates_when_matches_do_not_fit(
     assert "Match 1:" in output
 
 
-def test_wikisearch_tool_read_chunk_consumes_search_in_page_remainder(
+def test_wiki_tool_read_chunk_consumes_search_in_page_remainder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     extract = " ".join(f"needle {'x' * 120}" for _ in range(20))
@@ -477,7 +477,7 @@ def test_wikisearch_tool_read_chunk_consumes_search_in_page_remainder(
         }
     }
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-    tool = wikisearch_tool()
+    tool = wiki_tool()
 
     first = tool.execute(
         {
@@ -541,14 +541,14 @@ def test_wikisearch_tool_read_chunk_consumes_search_in_page_remainder(
         {"action": "bad"},
     ],
 )
-def test_execute_wikisearch_validates_arguments(
+def test_execute_wiki_validates_arguments(
     arguments: dict[str, object],
 ) -> None:
     with pytest.raises(ValueError):
-        execute_wikisearch(arguments)
+        execute_wiki(arguments)
 
 
-def test_execute_wikisearch_reports_request_exceptions(
+def test_execute_wiki_reports_request_exceptions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_get(*_: Any, **__: Any) -> FakeResponse:
@@ -557,10 +557,10 @@ def test_execute_wikisearch_reports_request_exceptions(
     monkeypatch.setattr(requests, "get", fake_get)
 
     with pytest.raises(ValueError, match="wiki request failed"):
-        execute_wikisearch({"action": "search", "query": "llm"})
+        execute_wiki({"action": "search", "query": "llm"})
 
 
-def test_execute_wikisearch_reports_http_failures(
+def test_execute_wiki_reports_http_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -570,10 +570,10 @@ def test_execute_wikisearch_reports_http_failures(
     )
 
     with pytest.raises(ValueError, match="HTTP 404"):
-        execute_wikisearch({"action": "open", "title": "Missing"})
+        execute_wiki({"action": "open", "title": "Missing"})
 
 
-def test_execute_wikisearch_reports_api_errors(
+def test_execute_wiki_reports_api_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -583,14 +583,14 @@ def test_execute_wikisearch_reports_api_errors(
     )
 
     with pytest.raises(ValueError, match="bad title"):
-        execute_wikisearch({"action": "open", "title": "Bad"})
+        execute_wiki({"action": "open", "title": "Bad"})
 
 
-def test_execute_wikisearch_reports_missing_pages(
+def test_execute_wiki_reports_missing_pages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {"query": {"pages": {"-1": {"title": "Missing", "missing": ""}}}}
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
 
     with pytest.raises(ValueError, match="wiki page not found"):
-        execute_wikisearch({"action": "open", "title": "Missing"})
+        execute_wiki({"action": "open", "title": "Missing"})
