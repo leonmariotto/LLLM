@@ -38,6 +38,13 @@ def test_wikisearch_tool_returns_registered_tool() -> None:
     function = tool.schema["function"]
     assert isinstance(function, dict)
     assert function["name"] == "wikisearch"
+    parameters = function["parameters"]
+    assert isinstance(parameters, dict)
+    properties = parameters["properties"]
+    assert isinstance(properties, dict)
+    action = properties["action"]
+    assert isinstance(action, dict)
+    assert action["enum"] == ["search", "open", "search_in_page", "read_chunk"]
 
 
 def test_execute_wikisearch_search_parses_results(
@@ -208,6 +215,285 @@ def test_execute_wikisearch_open_truncates_output(
     assert output.endswith("[truncated]")
 
 
+def test_wikisearch_tool_read_chunk_consumes_open_remainder_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Long",
+                    "extract": "a" * 600 + "TAIL",
+                }
+            }
+        }
+    }
+    calls: list[object] = []
+
+    def fake_get(*args: Any, **__: Any) -> FakeResponse:
+        calls.append(args)
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    tool = wikisearch_tool()
+
+    first = tool.execute({"action": "open", "title": "Long", "max_chars": 500})
+    second = tool.execute({"action": "read_chunk", "max_chars": 500})
+
+    assert len(first) <= 500
+    assert first.endswith("[truncated]")
+    assert "TAIL" in second
+    assert not second.endswith("[truncated]")
+    assert len(calls) == 1
+
+
+def test_wikisearch_tool_read_chunk_consumes_multiple_chunks_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extract = "a" * 600 + "b" * 600 + "END"
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Long",
+                    "extract": extract,
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
+    tool = wikisearch_tool()
+
+    first = tool.execute({"action": "open", "title": "Long", "max_chars": 500})
+    second = tool.execute({"action": "read_chunk", "max_chars": 500})
+    third = tool.execute({"action": "read_chunk", "max_chars": 500})
+    fourth = tool.execute({"action": "read_chunk", "max_chars": 500})
+
+    combined = (
+        first.replace("\n[truncated]", "")
+        + second.replace("\n[truncated]", "")
+        + third.replace("\n[truncated]", "")
+    )
+    assert first.endswith("[truncated]")
+    assert second.endswith("[truncated]")
+    assert not third.endswith("[truncated]")
+    assert "a" * 100 in combined
+    assert "b" * 100 in combined
+    assert "END" in combined
+    assert fourth == "No wikisearch continuation chunks available."
+
+
+def test_wikisearch_tool_read_chunk_isolated_by_tool_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Long",
+                    "extract": "x" * 1000,
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
+    first_tool = wikisearch_tool()
+    second_tool = wikisearch_tool()
+
+    first = first_tool.execute({"action": "open", "title": "Long", "max_chars": 500})
+    isolated = second_tool.execute({"action": "read_chunk"})
+    continuation = first_tool.execute({"action": "read_chunk"})
+
+    assert first.endswith("[truncated]")
+    assert isolated == "No wikisearch continuation chunks available."
+    assert continuation
+    assert continuation != isolated
+
+
+def test_execute_wikisearch_search_in_page_reads_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Python",
+                    "extract": (
+                        "Python is a programming language. "
+                        "The python community maintains many libraries."
+                    ),
+                }
+            }
+        }
+    }
+    captured_params: list[dict[str, str]] = []
+
+    def fake_get(*_: Any, **kwargs: Any) -> FakeResponse:
+        captured_params.append(kwargs["params"])
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    output = execute_wikisearch(
+        {"action": "search_in_page", "title": "Python", "query": "PYTHON"}
+    )
+
+    assert captured_params[0]["prop"] == "extracts"
+    assert captured_params[0]["titles"] == "Python"
+    assert "URL: https://en.wikipedia.org/wiki/Python" in output
+    assert "Title: Python" in output
+    assert "Query: PYTHON" in output
+    assert "Match 1:" in output
+    assert "[Python]" in output
+    assert "Match 2:" in output
+    assert "[python]" in output
+
+
+def test_execute_wikisearch_search_in_page_reads_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Café",
+                    "extract": "A café may serve coffee. The café is small.",
+                }
+            }
+        }
+    }
+    captured_titles: list[str] = []
+
+    def fake_get(*_: Any, **kwargs: Any) -> FakeResponse:
+        captured_titles.append(kwargs["params"]["titles"])
+        return FakeResponse(payload, url="https://fr.wikipedia.org/w/api.php")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    output = execute_wikisearch(
+        {
+            "action": "search_in_page",
+            "url": "https://fr.wikipedia.org/wiki/Caf%C3%A9",
+            "query": "café",
+        }
+    )
+
+    assert captured_titles == ["Café"]
+    assert "URL: https://fr.wikipedia.org/wiki/Caf%C3%A9" in output
+    assert "[café]" in output
+
+
+def test_execute_wikisearch_search_in_page_reports_no_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Python",
+                    "extract": "Python is a programming language.",
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
+
+    output = execute_wikisearch(
+        {"action": "search_in_page", "title": "Python", "query": "missing"}
+    )
+
+    assert output == (
+        "No matches found in page: Python\n"
+        "Query: missing\n"
+        "URL: https://en.wikipedia.org/wiki/Python"
+    )
+
+
+def test_execute_wikisearch_search_in_page_returns_all_matches_that_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Short",
+                    "extract": "needle one. needle two. needle three.",
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
+
+    output = execute_wikisearch(
+        {"action": "search_in_page", "title": "Short", "query": "needle"}
+    )
+
+    assert output.count("Match ") == 3
+    assert "[truncated]" not in output
+
+
+def test_execute_wikisearch_search_in_page_truncates_when_matches_do_not_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extract = " ".join(f"needle {'x' * 120}" for _ in range(20))
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Long",
+                    "extract": extract,
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
+
+    output = execute_wikisearch(
+        {
+            "action": "search_in_page",
+            "title": "Long",
+            "query": "needle",
+            "max_chars": 500,
+        }
+    )
+
+    assert len(output) <= 500
+    assert output.endswith("[truncated]")
+    assert "Match 1:" in output
+
+
+def test_wikisearch_tool_read_chunk_consumes_search_in_page_remainder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extract = " ".join(f"needle {'x' * 120}" for _ in range(20))
+    payload = {
+        "query": {
+            "pages": {
+                "1": {
+                    "title": "Long",
+                    "extract": extract,
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
+    tool = wikisearch_tool()
+
+    first = tool.execute(
+        {
+            "action": "search_in_page",
+            "title": "Long",
+            "query": "needle",
+            "max_chars": 500,
+        }
+    )
+    second = tool.execute({"action": "read_chunk", "max_chars": 500})
+
+    assert first.endswith("[truncated]")
+    assert second
+    assert "Match " in second
+
+
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -228,6 +514,30 @@ def test_execute_wikisearch_open_truncates_output(
         {"action": "open", "title": "CAC 40", "max_chars": 499},
         {"action": "open", "title": "CAC 40", "max_chars": 20001},
         {"action": "open", "title": "CAC 40", "max_chars": False},
+        {"action": "search_in_page"},
+        {"action": "search_in_page", "title": "CAC 40"},
+        {"action": "search_in_page", "title": "CAC 40", "query": ""},
+        {
+            "action": "search_in_page",
+            "title": "CAC 40",
+            "query": "market",
+            "max_chars": 499,
+        },
+        {
+            "action": "search_in_page",
+            "title": "CAC 40",
+            "query": "market",
+            "max_chars": 20001,
+        },
+        {
+            "action": "search_in_page",
+            "title": "CAC 40",
+            "query": "market",
+            "max_chars": False,
+        },
+        {"action": "read_chunk", "max_chars": 499},
+        {"action": "read_chunk", "max_chars": 20001},
+        {"action": "read_chunk", "max_chars": False},
         {"action": "bad"},
     ],
 )

@@ -123,7 +123,7 @@ def test_functional_qwen3_with_thinking_calls_wikisearch_autoload(
     tool_generator = GeneratorWithTool(
         qwen3_generator_with_tool,
         [wikisearch_tool()],
-        max_tool_rounds=3,
+        max_tool_rounds=8,
     )
 
     response = tool_generator.generate(
@@ -132,7 +132,8 @@ def test_functional_qwen3_with_thinking_calls_wikisearch_autoload(
                 "role": "user",
                 "content": (
                     "What's the CAC40 latest market cap ? I believe that this "
-                    "information is present in wikipedia."
+                    "information is present in wikipedia. Keep trying to use "
+                    "wikisearch until you got the response."
                 ),
             }
         ],
