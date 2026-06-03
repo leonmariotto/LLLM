@@ -3,6 +3,7 @@ High-Level Generator class that provide text generation function
 from a raw model.
 Manage KVCache: KVCache is created and destroyed in a single generation.
 (_generate_tokens).
+Tool-less version. May be archived in a future iteration.
 """
 
 import time

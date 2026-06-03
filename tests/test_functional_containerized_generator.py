@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from LLLM.docker_generator import (
     DEFAULT_CONTAINER_HF_CACHE_PATH,
     DEFAULT_CONTAINER_UV_CACHE_PATH,

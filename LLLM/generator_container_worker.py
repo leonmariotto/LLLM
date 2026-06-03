@@ -1,23 +1,25 @@
 """
-Container-side RPC server for a ``GeneratorWithTool`` instance.
+Container-side RPC server for a ContainerizedGeneratorWithTool instance.
 
 The host process starts this module in a long-lived container.  The worker
 constructs the real generator from an importable factory and executes all
-``generate`` calls in-place inside the container.
+generate calls in-place inside the container.
+The point of all this is that tools are executed inside this container, so only
+mounted volume can be affected by model.
 
 Endpoints:
-    ``GET /health``:
+    GET /health:
         Health check used by the host proxy during startup. Returns
-        ``{"ok": true}`` with HTTP 200 once the generator has been constructed
+        {"ok": true} with HTTP 200 once the generator has been constructed
         and the HTTP server is listening.
-    ``POST /generate``:
-        Execute one ``GeneratorWithTool.generate`` call. The JSON request body
-        must contain ``messages`` and may include generation options such as
-        ``stop_at_eos``, ``max_generated_token``, ``cache_length``,
-        ``temperature``, ``top_k``, and ``top_p``. Successful calls return
-        ``{"result": "<assistant response>"}``. Worker-side exceptions are
-        serialized as ``{"error": {"type": ..., "message": ..., "traceback":
-        ...}}`` so the host can raise a useful ``RuntimeError``.
+    POST /generate:
+        Execute one GeneratorWithTool.generate call. The JSON request body
+        must contain 'messages' and may include generation options such as
+        'stop_at_eos', 'max_generated_token', 'cache_length',
+        'temperature', 'top_k', and 'top_p'. Successful calls return
+        {"result": "<assistant response>"}. Worker-side exceptions are
+        serialized as {"error": {"type": ..., "message": ..., "traceback":
+        ...}} so the host can raise a useful RuntimeError.
 """
 
 from __future__ import annotations
@@ -41,19 +43,19 @@ _PORT_ENV = "LLLM_GENERATOR_WORKER_PORT"
 
 
 def load_factory(factory_path: str) -> Callable[..., object]:
-    """Import a ``module:qualname`` factory.
+    """Import a factory.
 
     Args:
-        factory_path: Import path in ``"module:callable"`` format. The
+        factory_path: Import path in "module:callable" format. The
             callable portion may be dotted, for example
-            ``"some.module:FactoryClass.create"``.
+            "some.module:FactoryClass.create".
 
     Returns:
         The imported callable object. The caller is responsible for invoking it
         and validating its return type.
 
     Raises:
-        ValueError: If ``factory_path`` does not use ``"module:callable"``
+        ValueError: If factory_path does not use "module:callable"
             syntax.
         AttributeError: If the module imports but the requested attribute path
             does not exist.
@@ -75,22 +77,22 @@ def load_factory(factory_path: str) -> Callable[..., object]:
 
 
 def build_generator_from_env() -> GeneratorWithTool:
-    """Build the configured container-side ``GeneratorWithTool``.
+    """Build the configured container-side GeneratorWithTool.
 
     Inputs are read from environment variables:
-        ``LLLM_GENERATOR_FACTORY``:
-            Required ``"module:callable"`` factory path.
-        ``LLLM_GENERATOR_FACTORY_KWARGS``:
+        LLLM_GENERATOR_FACTORY:
+            Required "module:callable" factory path.
+        LLLM_GENERATOR_FACTORY_KWARGS:
             Optional JSON object of keyword arguments passed to the factory.
 
     Returns:
-        A fully constructed ``GeneratorWithTool`` that will handle all
-        ``/generate`` requests for this worker process.
+        A fully constructed GeneratorWithTool that will handle all
+        /generate requests for this worker process.
 
     Raises:
         ValueError: If the factory env var is missing, or if the kwargs env var
             is not a JSON object.
-        TypeError: If the factory does not return ``GeneratorWithTool``.
+        TypeError: If the factory does not return GeneratorWithTool.
         json.JSONDecodeError: If the kwargs env var is not valid JSON.
         ImportError, AttributeError: If the factory path cannot be imported.
     """
@@ -115,19 +117,19 @@ def execute_generate_payload(
     generator: GeneratorWithTool,
     payload: dict[str, object],
 ) -> str:
-    """Execute one serialized ``GeneratorWithTool.generate`` request.
+    """Execute one serialized GeneratorWithTool.generate request.
 
     Args:
         generator: Container-local generator created by
             :func:`build_generator_from_env`.
-        payload: JSON-decoded request body. ``messages`` is required and must
-            be a list. Optional keys are ``stop_at_eos``,
-            ``max_generated_token``, ``cache_length``, ``temperature``,
-            ``top_k``, and ``top_p``.
+        payload: JSON-decoded request body. 'messages' is required and must
+            be a list. Optional keys are 'stop_at_eos',
+            'max_generated_token', 'cache_length', 'temperature',
+            'top_k', and 'top_p'.
 
     Returns:
         The final assistant response string returned by
-        ``GeneratorWithTool.generate``.
+        GeneratorWithTool.generate.
 
     Raises:
         ValueError: If required or optional payload fields have invalid types.
@@ -149,15 +151,15 @@ def execute_generate_payload(
 
 
 def make_handler(generator: GeneratorWithTool) -> type[BaseHTTPRequestHandler]:
-    """Create an HTTP request handler bound to ``generator``.
+    """Create an HTTP request handler bound to generator.
 
     Args:
-        generator: The ``GeneratorWithTool`` instance used for every
-            ``POST /generate`` request handled by this worker.
+        generator: The GeneratorWithTool instance used for every
+            `POST /generate` request handled by this worker.
 
     Returns:
-        A ``BaseHTTPRequestHandler`` subclass suitable for
-        ``ThreadingHTTPServer``. The class closes over ``generator`` rather
+        A BaseHTTPRequestHandler subclass suitable for
+        ThreadingHTTPServer. The class closes over generator rather
         than constructing a new model per request.
     """
 
@@ -218,13 +220,13 @@ def main() -> int:
     """Serve the configured generator until the container is stopped.
 
     Environment variables:
-        ``LLLM_GENERATOR_WORKER_HOST``:
-            Host/interface to bind. Defaults to ``"127.0.0.1"``.
-        ``LLLM_GENERATOR_WORKER_PORT``:
-            Port to bind. Defaults to ``"8765"``.
+        LLLM_GENERATOR_WORKER_HOST:
+            Host/interface to bind. Defaults to "127.0.0.1".
+        LLLM_GENERATOR_WORKER_PORT:
+            Port to bind. Defaults to "8765".
 
     Returns:
-        ``0`` if ``serve_forever`` exits normally.
+        0 if serve_forever exits normally.
 
     Raises:
         Any exception from generator construction or server binding. In normal

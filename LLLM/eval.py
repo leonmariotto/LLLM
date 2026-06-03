@@ -3,6 +3,16 @@ Models evaluations module.
 Support :
     - raw model evaluation with WikiText-based test (measure perplexity).
     - instruction-tuned models evaluation dataset : boolq, gsm8k and squad.
+
+DatasetAdapter contain all information needed to pull and run the dataset including
+the HF dataset ID and the prompt encoding.
+evaluate_instructions_model can then be run with a DatasetAdapter, it run up to "limit"
+dataset entry.
+evaluate_base_model_perplexity is only for next-token prediction evaluation. It only
+support WikiText-2 dataset.
+
+The whole module can be used to integrate new inference models, and evaluate the
+integration. Each models in this repo shall be functionaly tested with this evaluations.
 """
 
 import math

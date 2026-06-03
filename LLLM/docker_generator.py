@@ -13,6 +13,8 @@ so the GeneratorWithTool instance have to be created in-place.
 
 The uv cache and project environment are both placed under a mounted cache path
 so repeated container runs do not recreate the heavyweight ML environment.
+However, uv version must match, this is currently handled by detecting host
+uv version and downloading it at the container boot... That add some boot time.
 """
 
 from __future__ import annotations
@@ -33,8 +35,10 @@ from loguru import logger
 
 from .generator_with_tool import ToolMessage
 
+# Basic debian with network utility needed to download uv.
 DEFAULT_DOCKER_IMAGE = "buildpack-deps:bookworm-curl"
 DEFAULT_CONTAINER_REPO_PATH = "/workspace/LLLM"
+DEFAULT_CONTAINER_REPO_SOURCE_PATH = "/workspace/LLLM-src"
 DEFAULT_REPO_PATH = Path(__file__).resolve().parents[1]
 DEFAULT_CONTAINER_USER = "1000:1000"
 DEFAULT_HOST_UV_CACHE_PATH = Path.home() / ".cache" / "uv"
@@ -96,8 +100,9 @@ class ContainerizedGeneratorWithTool:
             LLLM.generator_container_worker``.
         mount_points: Extra bind mounts made available to the container, for
             example model caches or test scratch directories.
-        repo_path: Host checkout mounted at ``/workspace/LLLM`` inside the
-            container. Defaults to this repository.
+        repo_path: Host checkout mounted read-only at ``/workspace/LLLM-src``
+            inside the container, then copied to ``/workspace/LLLM`` at
+            container startup. Defaults to this repository.
         docker_base_url: Optional Docker daemon URL passed to
             ``docker.DockerClient``. When omitted, ``docker.from_env()`` is
             used.
@@ -176,11 +181,11 @@ class ContainerizedGeneratorWithTool:
 
         Called in every generate().
 
-        The repository is mounted into the container, the factory configuration
-        is passed through environment variables, and this method blocks until
-        the worker's ``/health`` endpoint responds. It returns ``None`` and
-        raises ``RuntimeError`` if the container exits early or never becomes
-        ready.
+        The repository is mounted read-only into the container and copied to a
+        writable container-local working tree, the factory configuration is
+        passed through environment variables, and this method blocks until the
+        worker's ``/health`` endpoint responds. It returns ``None`` and raises
+        ``RuntimeError`` if the container exits early or never becomes ready.
 
         Note for debugging: if the container crash at initialization, we need to
         instanciate with auto_remove=False, run `docker ps -a --no-trunc` and
@@ -208,7 +213,7 @@ class ContainerizedGeneratorWithTool:
             remove=self.auto_remove,
             network_mode="host",
             user=self.container_user,
-            working_dir=DEFAULT_CONTAINER_REPO_PATH,
+            working_dir=str(Path(DEFAULT_CONTAINER_REPO_PATH).parent),
             environment={
                 "LLLM_GENERATOR_FACTORY": self.factory,
                 "LLLM_GENERATOR_FACTORY_KWARGS": json.dumps(self.factory_kwargs),
@@ -313,8 +318,8 @@ class ContainerizedGeneratorWithTool:
     def _volumes(self) -> dict[str, dict[str, str]]:
         volumes = {
             str(self.repo_path.expanduser().resolve()): {
-                "bind": DEFAULT_CONTAINER_REPO_PATH,
-                "mode": "rw",
+                "bind": DEFAULT_CONTAINER_REPO_SOURCE_PATH,
+                "mode": "ro",
             }
         }
         for mount in self._default_cache_mounts():
@@ -498,6 +503,14 @@ def _container_boot_command(uv_version: str) -> list[str]:
                 "export UV_INSTALL_DIR=/tmp/lllm-bin",
                 'export PATH="$UV_INSTALL_DIR:$PATH"',
                 'mkdir -p "$HOME" "$UV_INSTALL_DIR"',
+                "echo '[lllm-boot] copying repository'",
+                f"rm -rf {DEFAULT_CONTAINER_REPO_PATH}",
+                (
+                    f"cp -R {DEFAULT_CONTAINER_REPO_SOURCE_PATH} "
+                    f"{DEFAULT_CONTAINER_REPO_PATH}"
+                ),
+                f"cd {DEFAULT_CONTAINER_REPO_PATH}",
+                "pwd",
                 "echo '[lllm-boot] installing uv'",
                 (f"wget -qO- https://astral.sh/uv/{uv_version}/install.sh | sh"),
                 "uv --version",

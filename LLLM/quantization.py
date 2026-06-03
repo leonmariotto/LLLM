@@ -1,4 +1,7 @@
-"""Quantized weight containers and modules."""
+"""
+Quantized weight containers and modules.
+Support GGUF quantization.
+"""
 
 from __future__ import annotations
 

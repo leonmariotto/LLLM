@@ -3,6 +3,8 @@ import math
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from ..LLLM.eval import (
     evaluate_base_model_perplexity,
 )

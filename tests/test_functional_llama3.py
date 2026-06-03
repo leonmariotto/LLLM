@@ -3,6 +3,8 @@ import gc
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.slow
 import torch
 from transformers import AutoModel
 

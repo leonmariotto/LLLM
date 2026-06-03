@@ -1,5 +1,5 @@
 """
-Specialized self-refinment with user feedback for plan creation.
+Specialized self-refinment loop with user feedback for plan creation.
 """
 
 from __future__ import annotations

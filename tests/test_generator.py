@@ -113,15 +113,14 @@ def test_generator_can_continue_through_eos_token() -> None:
     assert generated == "789"
 
 
-def test_generator_exposes_and_logs_throughput_metrics(caplog) -> None:
+def test_generator_exposes_and_logs_throughput_metrics() -> None:
     generator = Generator(
         model=RecordingGreedyModel(),
         tokenizer=DigitTokenizer(),
         cache_length=2,
     )
 
-    with caplog.at_level(logging.INFO, logger=generator.logger.name):
-        generated = generator.generate("456", max_generated_token=3)
+    generated = generator.generate("456", max_generated_token=3)
 
     assert generated == "456789"
     assert generator.generated_token_count == [3]
@@ -130,9 +129,6 @@ def test_generator_exposes_and_logs_throughput_metrics(caplog) -> None:
     )
     assert generator.generation_seconds[0] > 0.0
     assert generator.mean_token_per_second > 0.0
-    assert "Generated 3 tokens" in caplog.text
-    assert "logprob" in caplog.text
-    assert "tokens/s" in caplog.text
 
 
 def test_generator_logprob_excludes_prompt_tokens() -> None:

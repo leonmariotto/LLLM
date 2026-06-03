@@ -5,6 +5,7 @@ GGUF files are single binary files containing metadata, tokenizer data, and poss
 quantized tensors.
 This module is the adapter layer that turns GGUF back into the same representation
 used by the existing loaders.
+Provide only decode function.
 """
 
 from __future__ import annotations

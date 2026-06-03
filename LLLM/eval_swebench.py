@@ -5,6 +5,17 @@ This module does not use the official SWE-bench evaluation harness.  It loads
 SWE-bench-compatible rows, prepares an isolated Docker-backed repository
 workspace for each task, invokes a caller-provided agent, applies the task test
 patch, runs tests, and records JSONL results.
+
+The containerization layer is required for running SWE-bench tests on produced
+code, so tool containerization alone is not enough. Use
+ContainerizedGeneratorWithTool to isolate tool execution.
+
+DockerSwebenchRunner clones the repository into a mounted volume:
+"{host_root}/repo" -> "/workspace/repo". The agent runs in this Python process
+against the host path and must modify the repository directly.
+"{host_root}/repo" need to be available to ContainerizedGeneratorWithTool.
+
+WIP: to be updated when I'll have a real agent capable of doing SWE-bench tests.
 """
 
 from __future__ import annotations
@@ -71,7 +82,6 @@ class SwebenchResult:
     base_commit: str
     problem_statement: str
     agent_patch: str
-    returned_patch: str | None
     resolved: bool
     elapsed_seconds: float
     test_result: CommandResult | None
@@ -91,7 +101,7 @@ class SwebenchEvaluationResult:
     results: tuple[SwebenchResult, ...]
 
 
-SwebenchAgent = Callable[[SwebenchTask, Path], str | None]
+SwebenchAgent = Callable[[SwebenchTask, Path], None]
 
 
 class SwebenchRunner(Protocol):
@@ -146,8 +156,7 @@ def evaluate_swebench_agent(
     Evaluate an agent callable on SWE-bench tasks.
 
     The supplied agent receives a :class:`SwebenchTask` and the prepared
-    repository workspace path.  It may mutate the workspace or return a unified
-    diff.  Workspace changes are authoritative when both are present.
+    repository workspace path.  It must mutate the workspace directly.
     """
     tasks = load_swebench_tasks(
         dataset_name=dataset_name,
@@ -184,7 +193,6 @@ def evaluate_swebench_agent(
                 base_commit=task.base_commit,
                 problem_statement=task.problem_statement,
                 agent_patch="",
-                returned_patch=None,
                 resolved=False,
                 elapsed_seconds=0.0,
                 test_result=None,
@@ -266,7 +274,6 @@ class DockerSwebenchRunner:
 
     def run(self, task: SwebenchTask, agent: SwebenchAgent) -> SwebenchResult:
         started = time.perf_counter()
-        returned_patch: str | None = None
         test_result: CommandResult | None = None
         error: str | None = None
         agent_patch = ""
@@ -287,13 +294,8 @@ class DockerSwebenchRunner:
                     host_root,
                     f"git -C repo checkout {shlex.quote(task.base_commit)}",
                 )
-                returned_patch = agent(task, repo_path)
-                workspace_patch = self._git_diff(host_root)
-                if workspace_patch:
-                    agent_patch = workspace_patch
-                elif returned_patch:
-                    agent_patch = returned_patch
-                    self._apply_patch(host_root, returned_patch, "agent.patch")
+                agent(task, repo_path)
+                agent_patch = self._git_diff(host_root)
 
                 if task.test_patch.strip():
                     self._apply_patch(host_root, task.test_patch, "test.patch")
@@ -309,7 +311,6 @@ class DockerSwebenchRunner:
                 artifact_dir = self._write_artifacts(
                     task,
                     agent_patch=agent_patch,
-                    returned_patch=returned_patch,
                     test_result=test_result,
                     error=error,
                 )
@@ -321,7 +322,6 @@ class DockerSwebenchRunner:
             base_commit=task.base_commit,
             problem_statement=task.problem_statement,
             agent_patch=agent_patch,
-            returned_patch=returned_patch,
             resolved=error is None
             and test_result is not None
             and test_result.returncode == 0,
@@ -427,7 +427,6 @@ class DockerSwebenchRunner:
         task: SwebenchTask,
         *,
         agent_patch: str,
-        returned_patch: str | None,
         test_result: CommandResult | None,
         error: str | None,
     ) -> Path:
@@ -436,10 +435,6 @@ class DockerSwebenchRunner:
         artifact_dir = self.artifacts_dir / _safe_path_name(task.instance_id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "agent.patch").write_text(agent_patch, encoding="utf-8")
-        if returned_patch is not None:
-            (artifact_dir / "returned.patch").write_text(
-                returned_patch, encoding="utf-8"
-            )
         (artifact_dir / "test.patch").write_text(task.test_patch, encoding="utf-8")
         if test_result is not None:
             (artifact_dir / "test.stdout").write_text(
@@ -534,7 +529,6 @@ def _result_to_json(result: SwebenchResult) -> dict[str, object]:
         "base_commit": result.base_commit,
         "problem_statement": result.problem_statement,
         "agent_patch": result.agent_patch,
-        "returned_patch": result.returned_patch,
         "resolved": result.resolved,
         "elapsed_seconds": result.elapsed_seconds,
         "test_result": test_result,

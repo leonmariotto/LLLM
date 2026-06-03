@@ -4,6 +4,8 @@ Tool-aware generation loop built on top of a token-based text generator.
 The loop is independent of model-specific tool syntax.  Its tokenizer protocol
 is responsible for rendering tools into a chat prompt and parsing assistant
 completions into structured tool calls.
+
+This is getting closer to a real agent, but without context management.
 """
 
 from __future__ import annotations

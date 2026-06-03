@@ -1,4 +1,6 @@
-"""GPT2 (Generative Pretrained Tranformer)"""
+"""
+GPT2 (Generative Pretrained Tranformer)
+"""
 
 from __future__ import annotations
 

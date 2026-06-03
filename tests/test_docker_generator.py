@@ -6,6 +6,8 @@ import pytest
 import requests
 
 from ..LLLM.docker_generator import (
+    DEFAULT_CONTAINER_REPO_PATH,
+    DEFAULT_CONTAINER_REPO_SOURCE_PATH,
     DEFAULT_CONTAINER_UV_PROJECT_ENVIRONMENT_PATH,
     ContainerizedGeneratorWithTool,
     DockerMount,
@@ -121,11 +123,12 @@ def test_containerized_generator_starts_container_and_forwards_generate(
 
     monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(requests, "post", fake_post)
+    data_path = tmp_path / "data"
     proxy = ContainerizedGeneratorWithTool(
         "tests.fake:create_generator",
         factory_kwargs={"repo_id": "tiny"},
         docker_image="image",
-        mount_points=[DockerMount(tmp_path, "/data", read_only=True)],
+        mount_points=[DockerMount(data_path, "/data", read_only=True)],
         repo_path=tmp_path,
         client=client,
         worker_port=33333,
@@ -142,9 +145,14 @@ def test_containerized_generator_starts_container_and_forwards_generate(
     assert call["image"] == "image"
     assert call["network_mode"] == "host"
     assert call["user"] == "1000:1000"
-    assert call["working_dir"] == "/workspace/LLLM"
+    assert call["working_dir"] == "/workspace"
     command = cast(list[str], call["command"])
     assert command[0:2] == ["sh", "-lc"]
+    assert (
+        f"cp -R {DEFAULT_CONTAINER_REPO_SOURCE_PATH} "
+        f"{DEFAULT_CONTAINER_REPO_PATH}"
+    ) in command[2]
+    assert f"cd {DEFAULT_CONTAINER_REPO_PATH}" in command[2]
     assert "uv sync" in command[2]
     assert "uv run --no-sync python -m LLLM.generator_container_worker" in (
         command[2]
@@ -159,6 +167,11 @@ def test_containerized_generator_starts_container_and_forwards_generate(
         "UV_PROJECT_ENVIRONMENT": DEFAULT_CONTAINER_UV_PROJECT_ENVIRONMENT_PATH,
     }
     volumes = cast(dict[str, dict[str, str]], call["volumes"])
+    assert volumes[str(tmp_path)] == {
+        "bind": DEFAULT_CONTAINER_REPO_SOURCE_PATH,
+        "mode": "ro",
+    }
+    assert volumes[str(data_path)] == {"bind": "/data", "mode": "ro"}
     assert volumes[str(Path.home() / ".cache" / "uv")] == {
         "bind": "/tmp/lllm-uv-cache",
         "mode": "rw",

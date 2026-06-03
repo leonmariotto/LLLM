@@ -1,6 +1,6 @@
 """
 Reusable key/value cache primitives for autoregressive attention.
-Support for cache sliding window.
+Support for sliding cache window.
 """
 
 from __future__ import annotations

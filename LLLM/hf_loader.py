@@ -1,4 +1,7 @@
-"""Hugging Face artifact loader that produces ``ModelIR``."""
+"""
+Hugging Face artifact loader that produces ``ModelIR``.
+HF format parser, provide only decode functions.
+"""
 
 from __future__ import annotations
 

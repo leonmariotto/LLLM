@@ -3,9 +3,9 @@ Self-consistency loop for code production.
 
 Coder currently targets C programs only.
 It generates several candidate files, then check compilation.
-Use Qwen2.5-coder 0.5B.
 Then select the best candidate by doing a judging tournament
 using annother model (Qwen3 0.6B).
+Use Qwen2.5-coder 0.5B.
 
 It intentionally does not execute produced code.
 """

@@ -1,6 +1,7 @@
 """
-Fetch or locate model artifacts and call parser functions
-to load them into ModelIR.
+Fetch or locate model artifacts and call parser functions to load them into
+ModelIR.
+No format decode/encode here, only fetching.
 Entrypoint is fetch_model_ir.
 """
 

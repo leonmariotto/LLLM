@@ -1,3 +1,10 @@
+"""
+Chat application !
+
+Include a fancy TUI based on textual lib and rich.Text.
+All history is reinjected at each request.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -551,21 +558,23 @@ def _message_renderable(message: ChatMessage) -> Text:
 )
 @click.option(
     "--temperature",
-    default=0.0,
+    default=0.6,
     show_default=True,
     type=float,
     help="Sampling temperature. Use 0 for greedy decoding.",
 )
 @click.option(
     "--top-k",
-    default=None,
+    default=20,
     type=click.IntRange(min=1),
+    show_default=True,
     help="Restrict sampling to the top K tokens.",
 )
 @click.option(
     "--top-p",
-    default=None,
+    default=0.95,
     type=float,
+    show_default=True,
     help="Restrict sampling to nucleus probability P.",
 )
 @click.option(

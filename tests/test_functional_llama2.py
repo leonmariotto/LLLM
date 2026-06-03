@@ -3,6 +3,8 @@ import math
 from typing import Literal
 
 import pytest
+
+pytestmark = pytest.mark.slow
 import torch
 
 from ..LLLM.eval import evaluate_base_model_perplexity

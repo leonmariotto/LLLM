@@ -51,7 +51,6 @@ class FakeRunner:
             base_commit=task.base_commit,
             problem_statement=task.problem_statement,
             agent_patch="diff --git a/file.py b/file.py\n",
-            returned_patch=None,
             resolved=True,
             elapsed_seconds=1.0,
             test_result=CommandResult(
@@ -169,7 +168,6 @@ def test_evaluate_swebench_agent_aggregates_runner_results(
         base_commit="abc123",
         problem_statement="Fix the bug.",
         agent_patch="",
-        returned_patch=None,
         resolved=False,
         elapsed_seconds=2.0,
         test_result=CommandResult(
@@ -182,7 +180,12 @@ def test_evaluate_swebench_agent_aggregates_runner_results(
         artifact_dir=None,
         error=None,
     )
-    runner = FakeRunner(results=[FakeRunner().run(load_swebench_tasks(limit=1)[0], lambda t, p: None), failing_result])
+    runner = FakeRunner(
+        results=[
+            FakeRunner().run(load_swebench_tasks(limit=1)[0], lambda t, p: None),
+            failing_result,
+        ]
+    )
 
     evaluation = evaluate_swebench_agent(lambda task, path: None, runner=runner)
 
@@ -257,7 +260,7 @@ def test_export_swebench_predictions_writes_prediction_shape(
     ]
 
 
-def test_docker_runner_prefers_workspace_diff_over_returned_patch(
+def test_docker_runner_uses_workspace_diff_as_agent_patch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -279,41 +282,12 @@ def test_docker_runner_prefers_workspace_diff_over_returned_patch(
     runner = eval_swebench.DockerSwebenchRunner(artifacts_dir=tmp_path)
     task = load_swebench_tasks.__globals__["_row_to_task"](_row("task-1"))
 
-    result = runner.run(task, lambda task, path: "returned patch")
+    result = runner.run(task, lambda task, path: None)
 
     assert result.agent_patch == "workspace patch"
-    assert result.returned_patch == "returned patch"
     assert result.resolved is True
     assert (tmp_path / "task-1" / "agent.patch").read_text() == "workspace patch"
     assert ("git", "-C", "repo", "apply", "/workspace/agent.patch") not in commands
-
-
-def test_docker_runner_applies_returned_patch_when_workspace_is_clean(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    commands: list[tuple[str, ...]] = []
-
-    def fake_exec(
-        runner: eval_swebench.DockerSwebenchRunner,
-        host_root: Path,
-        command: tuple[str, ...],
-        *,
-        workdir: str,
-    ) -> CommandResult:
-        commands.append(command)
-        if command == ("git", "-C", "repo", "diff", "--binary"):
-            return CommandResult(command, 0, "", "", 0.1)
-        return CommandResult(command, 0, "ok", "", 0.1)
-
-    monkeypatch.setattr(eval_swebench.DockerSwebenchRunner, "_docker_exec", fake_exec)
-    runner = eval_swebench.DockerSwebenchRunner()
-    task = load_swebench_tasks.__globals__["_row_to_task"](_row("task-1"))
-
-    result = runner.run(task, lambda task, path: "returned patch")
-
-    assert result.agent_patch == "returned patch"
-    assert result.resolved is True
-    assert ("git", "-C", "repo", "apply", "/workspace/agent.patch") in commands
 
 
 def test_docker_runner_counts_test_failure_as_unresolved_not_error(

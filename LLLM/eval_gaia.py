@@ -2,10 +2,12 @@
 GAIA benchmark evaluation helpers for agent-style systems.
 
 GAIA evaluates general AI assistants on real-world questions that may require
-reasoning, browsing, file handling, and tool use.  This module intentionally
-does not implement those tools.  Instead, it provides a small harness that loads
-GAIA tasks, passes each task to a caller-provided agent function, scores public
-validation answers, and exports results or test predictions.
+reasoning, browsing, file handling, and tool use.
+Gaia is used in this project to evaluate agent harness improvment.
+The caller must provide an agent_evaluate function that take a GaiaTask in parameter.
+Then caller can dispose of the GaiaTask parameter.
+
+Gaia level-1 with Qwen3-06B got ~ 1/10 without any tool.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ DatasetRow = Mapping[str, Any]
 
 @dataclass(frozen=True)
 class GaiaTask:
-    """One GAIA task passed to an agent implementation."""
+    """One GAIA task passed to an agent_evaluate function implementation."""
 
     task_id: str
     question: str
@@ -127,7 +129,7 @@ def load_gaia_tasks(
 
 
 def evaluate_gaia_agent(
-    agent: GaiaAgent,
+    agent_evaluate: GaiaAgent,
     *,
     split: GaiaSplit = "validation",
     level: GaiaLevel | None = None,
@@ -138,9 +140,9 @@ def evaluate_gaia_agent(
     shuffle_seed: int = 0,
 ) -> GaiaEvaluationResult:
     """
-    Evaluate an agent callable on GAIA tasks.
+    Evaluate an agent_evaluate callable on GAIA tasks.
 
-    The supplied agent receives one :class:`GaiaTask` and must return the final
+    The supplied agent_evaluate receives one :class:`GaiaTask` and must return the final
     answer as a string.  Exceptions are captured as row-level failures so a long
     evaluation can continue.  Rows with hidden or missing expected answers, such
     as GAIA test rows, are included in the results with ``correct=None``.
@@ -167,7 +169,7 @@ def evaluate_gaia_agent(
         prediction = ""
         error: str | None = None
         try:
-            prediction = agent(task)
+            prediction = agent_evaluate(task)
         except Exception as exc:
             error = str(exc)
             logger.exception("GAIA task {} failed", task.task_id)

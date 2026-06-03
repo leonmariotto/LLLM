@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from ..LLLM.generator import Generator
 from ..LLLM.coder import (
     CodeCandidate,

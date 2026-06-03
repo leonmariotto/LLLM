@@ -11,6 +11,8 @@ from loguru import logger
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from ..LLLM.eval_gaia import GaiaTask, evaluate_gaia_agent
 from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator

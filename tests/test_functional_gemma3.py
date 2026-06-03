@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+pytestmark = pytest.mark.slow
 import torch
 
 from ..LLLM.eval import (

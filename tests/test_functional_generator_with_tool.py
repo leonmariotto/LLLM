@@ -2,6 +2,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
 from ..LLLM.generator_with_tool import GeneratorWithTool, Tool

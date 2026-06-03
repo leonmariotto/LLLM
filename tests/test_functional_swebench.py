@@ -11,6 +11,8 @@ from typing import cast
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from ..LLLM.eval_swebench import SwebenchTask, evaluate_swebench_agent
 from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
@@ -40,11 +42,10 @@ def test_functional_qwen3_06b_runs_real_swebench_lite_smoke(
 ) -> None:
     tokenizer = cast(Qwen3Tokenizer, qwen3_06b_swebench_generator.tokenizer)
 
-    def agent(task: SwebenchTask, repo_path: Path) -> str:
+    def agent(task: SwebenchTask, repo_path: Path) -> None:
         prompt = (
-            "You are given one SWE-bench task. Return only a unified git diff "
-            "patch. Do not include markdown fences or explanations. If you cannot "
-            "produce a patch, return an empty response.\n\n"
+            "You are given one SWE-bench task. Inspect the task and briefly "
+            "describe what files you would investigate first.\n\n"
             f"Repository: {task.repo}\n"
             f"Checkout path: {repo_path}\n"
             f"Base commit: {task.base_commit}\n\n"
@@ -54,13 +55,12 @@ def test_functional_qwen3_06b_runs_real_swebench_lite_smoke(
             prompt,
             enable_thinking=False,
         )
-        raw_output = qwen3_06b_swebench_generator.generate_from_tokens(
+        qwen3_06b_swebench_generator.generate_from_tokens(
             prompt_tokens,
             max_generated_token=512,
             temperature=0.0,
             include_prompt=False,
-        ).strip()
-        return _extract_git_diff(raw_output)
+        )
 
     evaluation = evaluate_swebench_agent(
         agent,
@@ -83,10 +83,3 @@ def test_functional_qwen3_06b_runs_real_swebench_lite_smoke(
     assert result.elapsed_seconds >= 0.0
     assert result.artifact_dir is not None
     assert result.artifact_dir.exists()
-
-
-def _extract_git_diff(text: str) -> str:
-    diff_start = text.find("diff --git ")
-    if diff_start == -1:
-        return ""
-    return text[diff_start:].strip()

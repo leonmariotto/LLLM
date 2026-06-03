@@ -4,6 +4,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from ..LLLM.eval import (
     DatasetAdapter,
     boolq_adapter,

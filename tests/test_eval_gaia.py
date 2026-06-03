@@ -57,7 +57,8 @@ def _row(
         "Final answer": final_answer,
         "file_name": file_name,
         "file_path": file_path,
-        "Annotator Metadata": {"source": "unit-test"},
+        "Annotator Metadata": {"source": "unit-test", "Tools": "",
+                               "How long did this take?": ""},
     }
 
 
@@ -103,7 +104,8 @@ def test_load_gaia_tasks_selects_all_config_and_resolves_file_path(
             level=2,
             file_path=(tmp_path / "2023/validation/document.pdf").resolve(),
             file_name="document.pdf",
-            metadata={"source": "unit-test"},
+            metadata={"source": "unit-test", "Tools": "",
+                               "How long did this take?": ""},
             expected_answer="Paris",
         )
     ]

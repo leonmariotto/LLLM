@@ -3,6 +3,8 @@ bc-backed compute tool for model tool-use loops.
 
 This module exposes a ``compute`` tool that forwards a single expression to
 ``bc -l`` and returns the calculator output.
+Found that a known syntax (bc) is better than a custom approximate "math" syntax,
+and still simple enough for dumb model.
 """
 
 from __future__ import annotations
