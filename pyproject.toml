@@ -27,6 +27,7 @@ dependencies = [
     "loguru",
     "requests",
     "textual>=8.2.7",
+    "pydantic"
 ]
 
 [build-system]
