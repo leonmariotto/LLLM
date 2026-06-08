@@ -2,14 +2,14 @@
 Agent execution context central storage, and its internal types.
 """
 
-from typing import Any, Dict, List, Optional, Literal, Union
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Any, Literal
 
 
-# TODO system prompt is a message ?
 class Message(BaseModel):
     """A text message in the conversation."""
 
@@ -24,7 +24,7 @@ class ToolCall(BaseModel):
     type: Literal["tool_call"] = "tool_call"
     tool_call_id: str
     name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
 
 
 # TODO strict typing here.
@@ -42,10 +42,22 @@ class ToolResult(BaseModel):
     tool_call_id: str
     name: str
     status: Literal["success", "error"]
-    content: List[Any]
+    content: list[Any]
 
 
-ContentItem = Union[Message, ToolCall, ToolResult]
+ContentItem = Message | ToolCall | ToolResult
+
+
+def _empty_content() -> list[ContentItem]:
+    return []
+
+
+def _empty_events() -> list["Event"]:
+    return []
+
+
+def _empty_state() -> dict[str, Any]:
+    return {}
 
 
 class Event(BaseModel):
@@ -54,8 +66,8 @@ class Event(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     execution_id: str
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
-    author: str  # "user" or agent name
-    content: List[ContentItem] = Field(default_factory=list)
+    author: str  # TODO LMA, why not a literal here ?
+    content: list[ContentItem] = Field(default_factory=_empty_content)
 
 
 @dataclass
@@ -63,15 +75,51 @@ class ExecutionContext:
     """Central storage for all execution state."""
 
     execution_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    events: List[Event] = field(default_factory=list)
+    events: list[Event] = field(default_factory=_empty_events)
     current_step: int = 0
-    state: Dict[str, Any] = field(default_factory=dict)
-    final_result: Optional[str | BaseModel] = None
+    state: dict[str, Any] = field(default_factory=_empty_state)
+    final_result: str | BaseModel | None = None
 
-    def add_event(self, event: Event):
+    def add_event(self, event: Event) -> None:
         """Append an event to the execution history."""
         self.events.append(event)
 
-    def increment_step(self):
+    def add_user_message(self, content: str) -> Message:
+        """Record a user message and return the stored item."""
+        message = Message(role="user", content=content)
+        self.add_event(
+            Event(
+                execution_id=self.execution_id,
+                author="user",
+                content=[message],
+            )
+        )
+        return message
+
+    def add_agent_items(
+        self,
+        author: str,
+        items: Sequence[ContentItem],
+    ) -> None:
+        """Record one assistant/tool event when there is content to store."""
+        if not items:
+            return
+        self.add_event(
+            Event(
+                execution_id=self.execution_id,
+                author=author,
+                content=list(items),
+            )
+        )
+
+    def items(self) -> list[ContentItem]:
+        """Return all content items in event order."""
+        return [item for event in self.events for item in event.content]
+
+    def messages(self) -> list[Message]:
+        """Return all text messages in event order."""
+        return [item for item in self.items() if isinstance(item, Message)]
+
+    def increment_step(self) -> None:
         """Move to the next execution step."""
         self.current_step += 1
