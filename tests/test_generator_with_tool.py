@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from loguru import logger
 
+from ..LLLM.generator import ChatCompletion, CompletionParseError
 from ..LLLM.generator_with_tool import (
     AssistantOutput,
     GeneratorWithTool,
@@ -61,31 +62,49 @@ class FakeTextGenerator:
         self.tokenizer = FakeToolTokenizer(parsed_outputs)
         self.calls: list[dict[str, Any]] = []
 
-    def generate_from_tokens(
+    def generate_completion(
         self,
-        prompt_tokens: list[int],
+        messages: Sequence[ToolMessage],
         *,
+        tools: Sequence[dict[str, object]] | None = None,
         stop_at_eos: bool = True,
         max_generated_token: int = 20,
         cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
         top_p: float | None = None,
-        include_prompt: bool = True,
-    ) -> str:
+    ) -> ChatCompletion:
+        encoded = self.tokenizer.apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        assert isinstance(encoded, dict)
+        input_ids = encoded["input_ids"]
         self.calls.append(
             {
-                "prompt_tokens": prompt_tokens,
+                "prompt_tokens": input_ids,
                 "stop_at_eos": stop_at_eos,
                 "max_generated_token": max_generated_token,
                 "cache_length": cache_length,
                 "temperature": temperature,
                 "top_k": top_k,
                 "top_p": top_p,
-                "include_prompt": include_prompt,
             }
         )
-        return self.outputs[len(self.calls) - 1]
+        raw_completion = self.outputs[len(self.calls) - 1]
+        try:
+            message = self.tokenizer.parse_assistant_output(raw_completion)
+        except ValueError as error:
+            raise CompletionParseError(raw_completion, error) from error
+        return ChatCompletion(
+            message=message,
+            raw_completion=raw_completion,
+            prompt_tokens=len(input_ids),
+            generated_tokens=len(raw_completion),
+            finish_reason="stop",
+        )
 
 
 def tool(name: str, execute: Any) -> Tool:
@@ -123,7 +142,6 @@ def test_tool_generator_returns_final_response_without_mutating_input() -> None:
             "temperature": 0.5,
             "top_k": 2,
             "top_p": 0.9,
-            "include_prompt": False,
         }
     ]
 
@@ -214,6 +232,8 @@ def test_tool_generator_feeds_failures_back_for_recovery(
     tool_generator = GeneratorWithTool(generator, [tool("explode", explode)])
 
     assert tool_generator.generate([{"role": "user", "content": "go"}]) == "recovered"
+    if isinstance(parsed_output, ValueError):
+        assert generator.tokenizer.histories[1][1]["content"] == first_output
     assert expected_error in generator.tokenizer.histories[1][-1]["content"]
 
 

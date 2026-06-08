@@ -7,6 +7,7 @@ Gemma3.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Optional, TypedDict, cast, Any, Callable
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from tokenizers import Tokenizer
 from .rope import precompute_rope_cache, apply_rope
 from .kv_cache import KVCache
 from .quantization import QuantizedLinear, QuantizedWeight, WeightMode
+from .generator import AssistantOutput
+from .utils import parse_plain_assistant_output, render_plain_chat_template
 
 if TYPE_CHECKING:
     from .model_ir import ModelIR
@@ -941,10 +944,12 @@ class Gemma3Tokenizer:
 
     def apply_chat_template(
         self,
-        messages: list[dict[str, str]],
+        messages: Sequence[Mapping[str, object]],
         *,
+        tools: Sequence[dict[str, object]] | None = None,
         tokenize: bool = True,
         add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
     ) -> dict[str, list[int]] | str:
         """
         Apply Gemma's text-only chat wire format.
@@ -952,19 +957,39 @@ class Gemma3Tokenizer:
         This intentionally covers the user/model turns used by the functional
         tests and eval adapters without depending on ``transformers``.
         """
+        _ = enable_thinking
+        if tools is not None:
+            prompt = render_plain_chat_template(
+                messages,
+                tools=tools,
+                add_generation_prompt=add_generation_prompt,
+            )
+            if not tokenize:
+                return prompt
+            return {"input_ids": self.encode(prompt)}
+
         prompt = "<bos>"
         for message in messages:
-            role = message["role"]
+            role = message.get("role")
+            if not isinstance(role, str):
+                raise TypeError("message role must be a string")
             if role == "assistant":
                 role = "model"
             if role not in {"user", "model"}:
                 raise ValueError(f"unsupported Gemma3 chat role {role!r}")
-            prompt += f"<start_of_turn>{role}\n{message['content']}<end_of_turn>\n"
+            content = message.get("content")
+            if not isinstance(content, str):
+                raise TypeError("message content must be a string")
+            prompt += f"<start_of_turn>{role}\n{content}<end_of_turn>\n"
         if add_generation_prompt:
             prompt += "<start_of_turn>model\n"
         if not tokenize:
             return prompt
         return {"input_ids": self.encode(prompt)}
+
+    def parse_assistant_output(self, completion: str) -> AssistantOutput:
+        """Parse fallback output as plain assistant text without tool calls."""
+        return parse_plain_assistant_output(completion)
 
     def convert_tokens_to_ids(self, token: str) -> int | None:
         """Return the token id for a special token string when known."""

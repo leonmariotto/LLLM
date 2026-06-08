@@ -23,7 +23,7 @@ from .llama2 import Llama2FeedForward
 from .norm import RMSNorm
 from .quantization import QuantizedLinear, QuantizedWeight, WeightMode
 from .rope import apply_rope, precompute_rope_cache
-from .generator_with_tool import AssistantOutput, ToolCall
+from .generator import AssistantOutput, ToolCall
 
 if TYPE_CHECKING:
     from .model_ir import ModelIR

@@ -12,9 +12,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, NotRequired, Protocol, TypedDict, cast
+from typing import Any, Protocol, TypeAlias, cast
 
 from loguru import logger
+
+from .generator import (
+    AssistantOutput as AssistantOutput,
+    ChatCompletion,
+    ChatMessage,
+    CompletionParseError,
+    ToolCall,
+)
 
 # Use code execution or programming tools for running code, checking syntax,
 # inspecting files, tests, data processing, or reproducible technical work.
@@ -72,28 +80,7 @@ Examples:
 """
 
 
-@dataclass(frozen=True)
-class ToolCall:
-    """A tool invocation requested by an assistant completion."""
-
-    name: str
-    arguments: dict[str, object]
-
-
-@dataclass(frozen=True)
-class AssistantOutput:
-    """Parsed assistant completion with optional tool calls."""
-
-    content: str
-    tool_calls: tuple[ToolCall, ...] = ()
-
-
-class ToolMessage(TypedDict):
-    """Structured chat message understood by tool-capable tokenizers."""
-
-    role: str
-    content: str
-    tool_calls: NotRequired[list[ToolCall]]
+ToolMessage: TypeAlias = ChatMessage
 
 
 ToolExecutor = Callable[[dict[str, object]], str]
@@ -107,38 +94,23 @@ class Tool:
     execute: ToolExecutor
 
 
-class ToolTokenizer(Protocol):
-    """Tokenizer operations required by the model-agnostic tool loop."""
-
-    def apply_chat_template(
-        self,
-        messages: Sequence[ToolMessage],
-        *,
-        tools: Sequence[dict[str, object]] | None = None,
-        tokenize: bool = True,
-        add_generation_prompt: bool = False,
-    ) -> dict[str, list[int]] | str: ...
-
-    def parse_assistant_output(self, completion: str) -> AssistantOutput: ...
-
-
 class TextGenerator(Protocol):
     """Underlying completion generator used for each assistant turn."""
 
     tokenizer: Any
 
-    def generate_from_tokens(
+    def generate_completion(
         self,
-        prompt_tokens: list[int],
+        messages: Sequence[ChatMessage],
         *,
+        tools: Sequence[dict[str, object]] | None = None,
         stop_at_eos: bool = True,
         max_generated_token: int = 20,
         cache_length: int | None = None,
         temperature: float = 0.0,
         top_k: int | None = None,
         top_p: float | None = None,
-        include_prompt: bool = True,
-    ) -> str: ...
+    ) -> ChatCompletion: ...
 
 
 class GeneratorWithTool:
@@ -154,7 +126,7 @@ class GeneratorWithTool:
         if max_tool_rounds < 0:
             raise ValueError("max_tool_rounds must be non-negative")
         self.generator = generator
-        self.tokenizer = cast(ToolTokenizer, generator.tokenizer)
+        self.tokenizer = generator.tokenizer
         self.tools = tuple(tools)
         self.max_tool_rounds = max_tool_rounds
         self._tools_by_name = self._index_tools(self.tools)
@@ -180,29 +152,22 @@ class GeneratorWithTool:
         )
 
         while True:
-            prompt_tokens = self._encode_history(history)
             logger.info(
                 "Generating assistant turn for tool round {} with {} history messages",
                 tool_rounds,
                 len(history),
             )
-            completion = self.generator.generate_from_tokens(
-                prompt_tokens,
-                stop_at_eos=stop_at_eos,
-                max_generated_token=max_generated_token,
-                cache_length=cache_length,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                include_prompt=False,
-            )
-            logger.debug(
-                "Generated assistant completion on tool round {}:\n{}",
-                tool_rounds,
-                completion,
-            )
             try:
-                output = self.tokenizer.parse_assistant_output(completion)
+                completion = self.generator.generate_completion(
+                    history,
+                    tools=[tool.schema for tool in self.tools],
+                    stop_at_eos=stop_at_eos,
+                    max_generated_token=max_generated_token,
+                    cache_length=cache_length,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                )
             except ValueError as error:
                 logger.info(
                     "Assistant output could not be parsed as tool calls on round {}: {}",
@@ -210,7 +175,12 @@ class GeneratorWithTool:
                     error,
                 )
                 self._check_tool_round_limit(tool_rounds)
-                history.append({"role": "assistant", "content": completion})
+                raw_completion = (
+                    error.raw_completion
+                    if isinstance(error, CompletionParseError)
+                    else ""
+                )
+                history.append({"role": "assistant", "content": raw_completion})
                 history.append(
                     {
                         "role": "tool",
@@ -219,6 +189,13 @@ class GeneratorWithTool:
                 )
                 tool_rounds += 1
                 continue
+
+            logger.debug(
+                "Generated assistant completion on tool round {}:\n{}",
+                tool_rounds,
+                completion.raw_completion,
+            )
+            output = completion.message
 
             if not output.tool_calls:
                 logger.info(
@@ -268,20 +245,6 @@ class GeneratorWithTool:
                     }
                 )
             tool_rounds += 1
-
-    def _encode_history(self, messages: list[ToolMessage]) -> list[int]:
-        encoded = self.tokenizer.apply_chat_template(
-            messages,
-            tools=[tool.schema for tool in self.tools],
-            tokenize=True,
-            add_generation_prompt=True,
-        )
-        if not isinstance(encoded, dict):
-            raise TypeError("expected tokenized chat template output")
-        input_ids = encoded.get("input_ids")
-        if input_ids is None:
-            raise TypeError("expected input_ids to be a list[int]")
-        return input_ids
 
     @staticmethod
     def _copy_messages(messages: Sequence[ToolMessage]) -> list[ToolMessage]:

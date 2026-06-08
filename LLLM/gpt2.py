@@ -4,6 +4,7 @@ GPT2 (Generative Pretrained Tranformer)
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, TYPE_CHECKING, cast, TypeAlias, Dict, Optional
 from typing import TypedDict, Literal
 
@@ -16,7 +17,8 @@ from tiktoken_ext.openai_public import gpt2 as gpt2_tiktoken_base_args
 
 from .norm import LayerNorm
 from .rope import apply_rope, precompute_rope_cache
-from .generator import Generator
+from .generator import AssistantOutput, Generator
+from .utils import parse_plain_assistant_output, render_plain_chat_template
 
 if TYPE_CHECKING:
     from .model_ir import ModelIR, ModelWeightsIR
@@ -315,6 +317,30 @@ class GPT2Tokenizer:
             Decoded text.
         """
         return self.tiktok.decode(in_tok)
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[Mapping[str, object]],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> dict[str, list[int]] | str:
+        """Apply the generic fallback chat template for plain GPT-2 models."""
+        _ = enable_thinking
+        prompt = render_plain_chat_template(
+            messages,
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if not tokenize:
+            return prompt
+        return {"input_ids": self.encode(prompt)}
+
+    def parse_assistant_output(self, completion: str) -> AssistantOutput:
+        """Parse fallback output as plain assistant text without tool calls."""
+        return parse_plain_assistant_output(completion)
 
     def token_count(self, in_str: str) -> int:
         """

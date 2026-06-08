@@ -8,6 +8,7 @@ from ..LLLM.gemma3 import (
     Gemma3Config,
     Gemma3GroupedQueryAttention,
     Gemma3Model,
+    Gemma3Tokenizer,
     Gemma3TransformerBlock,
 )
 from ..LLLM.hf_loader import model_ir_from_hf
@@ -60,6 +61,33 @@ def _tiny_transformers_gemma3_config() -> Gemma3TextConfig:
         final_logit_softcapping=None,
         attn_logit_softcapping=None,
     )
+
+
+def test_gemma3_tokenizer_uses_native_chat_and_tool_fallback_templates() -> None:
+    tokenizer = Gemma3Tokenizer.__new__(Gemma3Tokenizer)
+
+    native_prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Question?"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    tool_prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Question?"}],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    output = tokenizer.parse_assistant_output(" Answer. ")
+
+    assert native_prompt == (
+        "<bos><start_of_turn>user\nQuestion?<end_of_turn>\n"
+        "<start_of_turn>model\n"
+    )
+    assert isinstance(tool_prompt, str)
+    assert "system: Available tools:" in tool_prompt
+    assert '"name": "lookup"' in tool_prompt
+    assert output.content == "Answer."
+    assert output.tool_calls == ()
 
 
 def test_gemma3_config_from_ir_translates_hugging_face_names() -> None:

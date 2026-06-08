@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch import nn
 
-from ..LLLM.generator import Generator
+from ..LLLM.generator import AssistantOutput, Generator, ToolCall
 
 
 class DigitTokenizer:
@@ -21,6 +21,38 @@ class DigitTokenizer:
 
     def get_eos(self) -> int | None:
         return self.eos
+
+
+class DigitChatTokenizer(DigitTokenizer):
+    def __init__(self, eos: int | None = None) -> None:
+        super().__init__(eos)
+        self.messages: list[list[dict[str, object]]] = []
+        self.tools: list[list[dict[str, object]] | None] = []
+        self.enable_thinking: list[bool] = []
+
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        tools: list[dict[str, object]] | None = None,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> dict[str, list[int]] | str:
+        self.messages.append([dict(message) for message in messages])
+        self.tools.append(tools)
+        self.enable_thinking.append(enable_thinking)
+        prompt = "12"
+        if add_generation_prompt:
+            prompt += "3"
+        if not tokenize:
+            return prompt
+        return {"input_ids": self.encode(prompt)}
+
+    def parse_assistant_output(self, completion: str) -> AssistantOutput:
+        if completion == "45":
+            return AssistantOutput("parsed", (ToolCall("lookup", {"x": 1}),))
+        return AssistantOutput(completion)
 
 
 class RecordingGreedyModel(nn.Module):
@@ -78,6 +110,39 @@ def test_generator_can_return_completion_only() -> None:
     )
 
     assert generated == "789"
+
+
+def test_generator_completion_uses_chat_template_and_parses_output() -> None:
+    tokenizer = DigitChatTokenizer()
+    generator = Generator(
+        model=RecordingGreedyModel(),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+    messages = [{"role": "user", "content": "question"}]
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+
+    completion = generator.generate_completion(
+        messages,
+        tools=tools,
+        max_generated_token=2,
+        temperature=0.0,
+        top_k=None,
+        top_p=None,
+        enable_thinking=False,
+    )
+
+    assert completion.raw_completion == "45"
+    assert completion.message == AssistantOutput(
+        "parsed",
+        (ToolCall("lookup", {"x": 1}),),
+    )
+    assert completion.prompt_tokens == 3
+    assert completion.generated_tokens == 2
+    assert completion.finish_reason == "length"
+    assert tokenizer.messages == [messages]
+    assert tokenizer.tools == [tools]
+    assert tokenizer.enable_thinking == [False]
 
 
 def test_generator_stops_before_eos_token() -> None:

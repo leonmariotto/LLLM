@@ -61,6 +61,25 @@ def test_llama3_tokenizer_stops_generation_at_end_of_turn() -> None:
     assert tokenizer.get_eos() != tokenizer.special["<|end_of_text|>"]
 
 
+def test_llama3_tokenizer_supports_fallback_chat_completion_template() -> None:
+    tokenizer = Llama3Tokenizer.__new__(Llama3Tokenizer)
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Question?"}],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    output = tokenizer.parse_assistant_output(" Answer. ")
+
+    assert isinstance(prompt, str)
+    assert "system: Available tools:" in prompt
+    assert '"name": "lookup"' in prompt
+    assert prompt.endswith("assistant: ")
+    assert output.content == "Answer."
+    assert output.tool_calls == ()
+
+
 def test_llama3_config_from_ir_translates_hugging_face_names() -> None:
     ir = model_ir_from_hf(_tiny_hf_llama3_config(), {}, architecture="llama3")
     cfg = Llama3Model.config_from_ir(ir)

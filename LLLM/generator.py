@@ -6,8 +6,10 @@ Manage KVCache: KVCache is created and destroyed in a single generation.
 Tool-less version. May be archived in a future iteration.
 """
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 import time
-from typing import Any, Protocol, cast, List
+from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast, List
 
 from loguru import logger
 import torch
@@ -29,6 +31,66 @@ class Tokenizer(Protocol):
     def decode(self, tok: list[int]) -> str: ...
 
     def get_eos(self) -> int | None: ...
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A parsed assistant request to call one tool."""
+
+    name: str
+    arguments: dict[str, object]
+
+
+@dataclass(frozen=True)
+class AssistantOutput:
+    """Assistant message content plus any parsed tool calls."""
+
+    content: str
+    tool_calls: tuple[ToolCall, ...] = ()
+
+
+class ChatMessage(TypedDict):
+    """Minimal internal chat message shape accepted by local generators."""
+
+    role: str
+    content: str
+    tool_calls: NotRequired[list[ToolCall]]
+
+
+@dataclass(frozen=True)
+class ChatCompletion:
+    """Single-turn local chat completion result."""
+
+    message: AssistantOutput
+    raw_completion: str
+    prompt_tokens: int
+    generated_tokens: int
+    finish_reason: Literal["stop", "length"]
+
+
+class CompletionParseError(ValueError):
+    """Raised when raw generated text cannot be parsed as an assistant message."""
+
+    def __init__(self, raw_completion: str, parse_error: ValueError) -> None:
+        super().__init__(str(parse_error))
+        self.raw_completion = raw_completion
+        self.parse_error = parse_error
+
+
+class ChatTokenizer(Tokenizer, Protocol):
+    """Tokenizer operations required by ``Generator.generate_completion``."""
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> dict[str, list[int]] | str: ...
+
+    def parse_assistant_output(self, completion: str) -> AssistantOutput: ...
 
 
 class Generator:
@@ -145,6 +207,84 @@ class Generator:
             else generated_tokens[len(prompt_tokens) :]
         )
         return self.tokenizer.decode(output_tokens)
+
+    def generate_completion(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        stop_at_eos: bool = True,
+        max_generated_token: int = 20,
+        cache_length: int | None = None,
+        temperature: float = 0.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        enable_thinking: bool = True,
+    ) -> ChatCompletion:
+        """Generate and parse one assistant turn from structured chat messages.
+
+        The method mirrors the useful part of standard completion APIs while
+        staying local and typed. It does not execute requested tools; callers
+        should inspect ``result.message.tool_calls`` or use ``GeneratorWithTool``
+        for a full tool-execution loop.
+        """
+        tokenizer = cast(ChatTokenizer, self.tokenizer)
+        prompt_tokens = self._encode_completion_messages(
+            tokenizer,
+            messages,
+            tools=tools,
+            enable_thinking=enable_thinking,
+        )
+        raw_completion = self.generate_from_tokens(
+            prompt_tokens,
+            stop_at_eos=stop_at_eos,
+            max_generated_token=max_generated_token,
+            cache_length=cache_length,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            include_prompt=False,
+        )
+        try:
+            message = tokenizer.parse_assistant_output(raw_completion)
+        except ValueError as error:
+            raise CompletionParseError(raw_completion, error) from error
+        generated_tokens = self.generated_token_count[-1]
+        finish_reason = "length" if generated_tokens >= max_generated_token else "stop"
+        return ChatCompletion(
+            message=message,
+            raw_completion=raw_completion,
+            prompt_tokens=len(prompt_tokens),
+            generated_tokens=generated_tokens,
+            finish_reason=finish_reason,
+        )
+
+    @staticmethod
+    def _encode_completion_messages(
+        tokenizer: ChatTokenizer,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None,
+        enable_thinking: bool,
+    ) -> list[int]:
+        """Apply a tokenizer chat template and validate tokenized output."""
+        encoded = tokenizer.apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+        if not isinstance(encoded, dict):
+            raise TypeError("expected tokenized chat template output")
+        encoded_dict = cast(dict[str, object], encoded)
+        input_ids = encoded_dict.get("input_ids")
+        if not isinstance(input_ids, list):
+            raise TypeError("expected input_ids to be a list[int]")
+        input_tokens = cast(list[object], input_ids)
+        if not all(isinstance(token, int) for token in input_tokens):
+            raise TypeError("expected input_ids to be a list[int]")
+        return cast(list[int], input_tokens)
 
     def _generate_tokens(
         self,

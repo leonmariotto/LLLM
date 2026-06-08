@@ -9,6 +9,7 @@ from ..LLLM.gpt2 import (
     GPT2FeedForward,
     GPT2Model,
     GPT2MultiHeadAttention,
+    GPT2Tokenizer,
     GPT2TransformerBlock,
     GeneratorGPT2,
 )
@@ -84,6 +85,26 @@ def _tiny_hf_gpt2_config() -> dict[str, int | str | float]:
         "n_layer": 1,
         "resid_pdrop": 0.0,
     }
+
+
+def test_gpt2_tokenizer_supports_fallback_chat_completion_template() -> None:
+    tokenizer = GPT2Tokenizer()
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Question?"}],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    output = tokenizer.parse_assistant_output(" Answer. ")
+
+    assert isinstance(prompt, str)
+    assert "system: Available tools:" in prompt
+    assert '"name": "lookup"' in prompt
+    assert prompt.endswith("assistant: ")
+    assert output.content == "Answer."
+    assert output.tool_calls == ()
+
 
 def test_multi_head_attention() -> None:
     torch.manual_seed(42)  # Let there be order among chaos.

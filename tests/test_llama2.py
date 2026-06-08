@@ -52,6 +52,25 @@ def _tiny_hf_llama_config() -> dict[str, int | float | str]:
     }
 
 
+def test_llama2_tokenizer_supports_fallback_chat_completion_template() -> None:
+    tokenizer = Llama2Tokenizer.__new__(Llama2Tokenizer)
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Question?"}],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    output = tokenizer.parse_assistant_output(" Answer. ")
+
+    assert isinstance(prompt, str)
+    assert "system: Available tools:" in prompt
+    assert '"name": "lookup"' in prompt
+    assert prompt.endswith("assistant: ")
+    assert output.content == "Answer."
+    assert output.tool_calls == ()
+
+
 def _manual_rms_norm(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     """Compute RMSNorm directly for expected-value comparisons."""
     means = x.pow(2).mean(dim=-1, keepdim=True)

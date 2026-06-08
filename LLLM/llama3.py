@@ -5,6 +5,7 @@ Support 3.1 and 3.2.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Optional, TypedDict, cast, Any
 from importlib import import_module
 import os
@@ -22,6 +23,8 @@ from .norm import RMSNorm
 from .rope import precompute_rope_cache, apply_rope, RopeFrequencyConfig
 from .kv_cache import KVCache
 from .quantization import QuantizedLinear, QuantizedWeight, WeightMode
+from .generator import AssistantOutput
+from .utils import parse_plain_assistant_output, render_plain_chat_template
 
 if TYPE_CHECKING:
     from .model_ir import ModelIR
@@ -791,6 +794,30 @@ class Llama3Tokenizer:
         ids += [self.special["<|end_header_id|>"]]
         ids += self.encode("\n\n")
         return ids
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[Mapping[str, object]],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> dict[str, list[int]] | str:
+        """Apply the generic fallback chat template for full-history calls."""
+        _ = enable_thinking
+        prompt = render_plain_chat_template(
+            messages,
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if not tokenize:
+            return prompt
+        return {"input_ids": self.encode(prompt)}
+
+    def parse_assistant_output(self, completion: str) -> AssistantOutput:
+        """Parse fallback output as plain assistant text without tool calls."""
+        return parse_plain_assistant_output(completion)
 
     def decode(self, tok: list[int]) -> str:
         if self.hf_tokenizer is not None:

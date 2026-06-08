@@ -8,6 +8,7 @@ here could be done. This concern: Llama2 43B and 70B.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import torch
 from torch import nn
 import sentencepiece as spm
@@ -16,6 +17,8 @@ from typing import TYPE_CHECKING, Callable, Optional, Sequence, TypedDict, cast
 from .rope import precompute_rope_cache, apply_rope
 from .norm import RMSNorm
 from .kv_cache import KVCache
+from .generator import AssistantOutput
+from .utils import parse_plain_assistant_output, render_plain_chat_template
 
 if TYPE_CHECKING:
     from .model_ir import ModelIR, ModelWeightsIR
@@ -319,6 +322,30 @@ class Llama2Tokenizer:
             getattr(self.tokenizer, "decode"),
         )
         return decode(tok)
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[Mapping[str, object]],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> dict[str, list[int]] | str:
+        """Apply the generic fallback chat template for plain Llama 2 models."""
+        _ = enable_thinking
+        prompt = render_plain_chat_template(
+            messages,
+            tools=tools,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if not tokenize:
+            return prompt
+        return {"input_ids": self.encode(prompt)}
+
+    def parse_assistant_output(self, completion: str) -> AssistantOutput:
+        """Parse fallback output as plain assistant text without tool calls."""
+        return parse_plain_assistant_output(completion)
 
 
 class Llama2Model(nn.Module):
