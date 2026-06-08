@@ -69,21 +69,22 @@ def test_functional_qwen3_06b_no_harness_gaia_validation(
         #TODO: GAIA output format should be part of gaia contract and derived
         #from a pydantic type.
         # TODO add informations like: is_solvable: bool and unsolvability_reason:str
-        prompt = (
-            "Answer this GAIA benchmark question. Return only the final answer "
-            "using this exact format: FINAL ANSWER: <answer>\n\n"
-            f"Question: {task.question}"
-            f"{attachment_note}"
-        )
-        prompt_tokens = tokenizer.encode_instruct_prompt( prompt,
-            enable_thinking=True,
-        )
-        return qwen3_06b_gaia_generator.generate_from_tokens(
-            prompt_tokens,
+        messages = [
+                {
+                    "role": "user",
+                    "content":"Answer this GAIA benchmark question. Return only the "
+                    "final answer using this exact format: FINAL ANSWER: <answer>\n\n"
+                    f"Question: {task.question}\n"
+                    f"{attachment_note}"
+                }
+        ]
+        completion = qwen3_06b_gaia_generator.generate_completion(
+            messages,
             max_generated_token=4096,
-            temperature=0.0,
-            include_prompt=False,
-        ).strip()
+            temperature=0.6, top_p=0.95, top_k=20
+        )
+        logger.info("Generated completion = [{}]", completion)
+        return completion.message.content
 
     evaluation = evaluate_gaia_agent(
         agent,
