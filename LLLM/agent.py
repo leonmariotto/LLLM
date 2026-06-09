@@ -19,11 +19,6 @@ The LlmResponse is then parsed, if it contain ToolCall execute them.
 We check that the LlmResponse contain no final_answer: depending on
 configuration at init, final_answer may be provided by a tool call.
 
-TODO this is really minimal, and I should get a lot of improvement by reading
-at the implementation of scratch_agent.
-TODO a lot of thing is overcomplicate here and could be simplified.
-Need to re-review it.
-
 """
 
 from __future__ import annotations
@@ -39,8 +34,9 @@ from .agent_llm import (
     LlmRequest,
     LlmResponse,
 )
-from .generator import ToolCall as GeneratorToolCall
-from .generator_with_tool import Tool
+from .tool_common import Tool
+
+from loguru import logger
 
 
 class Agent:
@@ -54,17 +50,20 @@ class Agent:
         llm: LlmClient,
         tools: Sequence[Tool],
         *,
+        instruction: str = "",
         instructions: str | Sequence[str] | None = None,
         max_tool_rounds: int = 8,
     ) -> None:
+        if instruction and instructions is not None:
+            raise ValueError("use either instruction or instructions, not both")
         if max_tool_rounds < 0:
             raise ValueError("max_tool_rounds must be non-negative")
         self.llm = llm
         self.tools = tuple(tools)
         self._tools_by_name = self._index_tools(self.tools)
-        self.instructions = self._normalize_instructions(
-            instructions
-        )  # TODO not needed to have a list here. Instructions should be str.
+        self.system_instructions = self._normalize_instructions(
+            instructions if instructions is not None else instruction
+        )
         self.max_tool_rounds = max_tool_rounds
 
     def run(
@@ -73,7 +72,14 @@ class Agent:
         *,
         context: ExecutionContext | None = None,
     ) -> str:
-        """Run the agent until the model returns an assistant answer."""
+        """
+        Run the agent until the model returns an assistant answer.
+
+        @param prompt: user input
+        @param context: optional caller initialized execution context. If None it's
+            init here.
+        @return agent final answer.
+        """
 
         # Create execution context.
         execution_context = context if context is not None else ExecutionContext()
@@ -81,80 +87,118 @@ class Agent:
         # Add user input as the first event.
         execution_context.add_user_message(prompt)
 
-        # TODO try catch??
-        # Execute steps until completion or max steps reached
-        tool_rounds = 0
-        while True:  # TODO replace this while True by a real condition
-            request = LlmRequest(
-                instructions=self.instructions,
-                content=execution_context.items(),
-                tool_schemas=[tool.schema for tool in self.tools],
-            )
-            response = self.llm.complete(request)
-            if (
-                response.error_message is not None
-                and not response.messages
-                and not response.tool_calls
-            ):
-                raise RuntimeError(response.error_message)
-
-            step = execution_context.current_step
-            assistant_items = self._response_items(response, step=step)
-            execution_context.add_agent_items("assistant", assistant_items)
-
-            tool_calls = [
-                item for item in assistant_items if isinstance(item, AgentToolCall)
-            ]
-            # If not tool call its a final answer....
-            # TODO do a final_answer tool call !
-            if not tool_calls:
-                final_answer = self._last_assistant_text(assistant_items)
-                execution_context.final_result = final_answer
+        while execution_context.final_result is None:
+            final_answer = self.step(execution_context)
+            if final_answer is not None:
                 return final_answer
 
-            self._check_tool_round_limit(tool_rounds)
-            tool_results = [
-                self._execute_tool_call(tool_call) for tool_call in tool_calls
-            ]
-            execution_context.add_agent_items("tool", tool_results)
-            execution_context.increment_step()
-            tool_rounds += 1
+        return str(execution_context.final_result)
+
+    def step(self, context: ExecutionContext) -> str | None:
+        """
+        Perform one ReAct think-act cycle.
+
+        @param context: execution context to update.
+        @return final assistant answer when the run is complete, otherwise None.
+        """
+        response = self.think(context)
+        if response.error_message is not None and not response.content:
+            raise RuntimeError(response.error_message)
+
+        assistant_items = self._response_items(
+            response,
+            step=context.current_step,
+        )
+        context.add_agent_items("assistant", assistant_items)
+
+        tool_calls = [
+            item for item in assistant_items if isinstance(item, AgentToolCall)
+        ]
+        # If not tool call its a final answer....
+        # TODO do a final_answer tool call !
+        if not tool_calls:
+            final_answer = ""
+            if len(assistant_items) < 1:
+                logger.error("No assistant item and no tool call\n")
+            else:
+                item = assistant_items[-1]
+                if isinstance(item, Message):
+                    final_answer = item.content
+
+            context.final_result = final_answer
+            return final_answer
+
+        if context.current_step >= self.max_tool_rounds:
+            raise RuntimeError(f"maximum tool rounds exceeded ({self.max_tool_rounds})")
+        self.act(context, tool_calls)
+        return None
+
+    def think(self, context: ExecutionContext) -> LlmResponse:
+        """
+        Ask the LLM for the next assistant message or tool call.
+        Prepare the request using current ExecutionContext.
+        Context management happen here !
+
+        @param context: execution context to use as request history.
+        @return parsed LLM response.
+        """
+        request = LlmRequest(
+            instructions=self.system_instructions,
+            content=context.items(),
+            tool_schemas=[tool.schema for tool in self.tools],
+        )
+        return self.llm.complete(request)
+
+    def act(
+        self,
+        context: ExecutionContext,
+        tool_calls: AgentToolCall | Sequence[AgentToolCall],
+    ) -> list[ToolResult]:
+        """
+        Execute tool calls and append their results to the context.
+
+        @param context: execution context to update.
+        @param tool_calls: tool calls emitted by the last think phase.
+        @return stored tool results.
+        """
+        pending_tool_calls = (
+            [tool_calls] if isinstance(tool_calls, AgentToolCall) else tool_calls
+        )
+        tool_results = [
+            self._execute_tool_call(tool_call) for tool_call in pending_tool_calls
+        ]
+        context.add_agent_items("tool", tool_results)
+        context.increment_step()
+        return tool_results
 
     @staticmethod
-    def _normalize_instructions(
-        instructions: str | Sequence[str] | None,
-    ) -> list[str]:
-        if instructions is None:
-            return []
+    def _normalize_instructions(instructions: str | Sequence[str]) -> list[str]:
         if isinstance(instructions, str):
-            return [instructions]
-        return list(instructions)
+            return [instructions] if instructions else []
+        return [instruction for instruction in instructions if instruction]
 
     @staticmethod
     def _response_items(response: LlmResponse, *, step: int) -> list[ContentItem]:
         """Convert an LLM response into agent event items with local tool IDs."""
-        items: list[ContentItem] = list(response.messages)
-        items.extend(
-            Agent._agent_tool_call(tool_call, step=step, index=index)
-            for index, tool_call in enumerate(response.tool_calls)
-        )
+        items: list[ContentItem] = []
+        tool_call_index = 0
+        for item in response.content:
+            if isinstance(item, AgentToolCall):
+                items.append(
+                    item.model_copy(
+                        update={"tool_call_id": f"call_{step}_{tool_call_index}"}
+                    )
+                )
+                tool_call_index += 1
+            else:
+                items.append(item)
         return items
-
-    @staticmethod
-    def _agent_tool_call(
-        tool_call: GeneratorToolCall,
-        *,
-        step: int,
-        index: int,
-    ) -> AgentToolCall:
-        return AgentToolCall(
-            tool_call_id=f"call_{step}_{index}",
-            name=tool_call.name,
-            arguments=dict(tool_call.arguments),
-        )
 
     @classmethod
     def _index_tools(cls, tools: Sequence[Tool]) -> dict[str, Tool]:
+        """
+        Build a tool dictionary for easy access (by name).
+        """
         indexed: dict[str, Tool] = {}
         for tool in tools:
             name = cls._tool_name(tool.schema)
@@ -165,6 +209,9 @@ class Agent:
 
     @staticmethod
     def _tool_name(schema: dict[str, object]) -> str:
+        """
+        Retrieve a tool name from a tool description dict.
+        """
         function = schema.get("function")
         if not isinstance(function, dict):
             raise ValueError("tool schema must include a function object")
@@ -175,6 +222,10 @@ class Agent:
         return name
 
     def _execute_tool_call(self, tool_call: AgentToolCall) -> ToolResult:
+        """
+        Lookup in tool dictionary and execute tool.
+        Return ToolResult.
+        """
         tool = self._tools_by_name.get(tool_call.name)
         if tool is None:
             return ToolResult(
@@ -200,14 +251,3 @@ class Agent:
             status="success",
             content=[result],
         )
-
-    @staticmethod
-    def _last_assistant_text(items: Sequence[ContentItem]) -> str:
-        for item in reversed(items):
-            if isinstance(item, Message) and item.role == "assistant":
-                return item.content
-        return ""
-
-    def _check_tool_round_limit(self, tool_rounds: int) -> None:
-        if tool_rounds >= self.max_tool_rounds:
-            raise RuntimeError(f"maximum tool rounds exceeded ({self.max_tool_rounds})")

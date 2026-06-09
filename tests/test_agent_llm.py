@@ -1,7 +1,4 @@
 from collections.abc import Sequence
-from typing import Any
-
-import pytest
 
 from ..LLLM.agent_context import Message, ToolCall, ToolResult
 from ..LLLM.agent_llm import LlmClient, LlmRequest, build_messages
@@ -112,8 +109,10 @@ def test_llm_client_complete_returns_text_tool_calls_and_usage() -> None:
         "generated_tokens": 4,
         "finish_reason": "stop",
     }
-    assert response.messages == [Message(role="assistant", content="I will check")]
-    assert response.tool_calls == [GeneratorToolCall("lookup", {"q": "x"})]
+    assert response.content == [
+        Message(role="assistant", content="I will check"),
+        ToolCall(tool_call_id="call_0", name="lookup", arguments={"q": "x"}),
+    ]
     assert generator.messages == [[{"role": "user", "content": "question"}]]
     assert generator.tool_schemas == [[schema]]
     assert generator.calls[0]["max_generated_token"] == 9
@@ -124,5 +123,4 @@ def test_llm_client_preserves_parse_error_raw_completion() -> None:
 
     assert response.error_message == "invalid"
     assert response.raw_completion == "bad raw"
-    assert response.messages == [Message(role="assistant", content="bad raw")]
-    assert response.tool_calls == []
+    assert response.content == [Message(role="assistant", content="bad raw")]

@@ -27,10 +27,6 @@ class ToolCall(BaseModel):
     arguments: dict[str, Any]
 
 
-# TODO strict typing here.
-# TODO the ai-agent-from-scratch BaseTool seems not needed, I rather do without it,
-# or maybe only have a common BaseTool class, but no decorator.
-# TODO BaseTool inherit ABC, whats ABC ??
 class ToolResult(BaseModel):
     """
     Result from tool execution.
@@ -66,7 +62,7 @@ class Event(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     execution_id: str
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
-    author: str  # TODO LMA, why not a literal here ?
+    author: str
     content: list[ContentItem] = Field(default_factory=_empty_content)
 
 

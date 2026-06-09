@@ -27,14 +27,6 @@ def _empty_content() -> list[ContentItem]:
     return []
 
 
-def _empty_messages() -> list[Message]:
-    return []
-
-
-def _empty_tool_calls() -> list[GeneratorToolCall]:
-    return []
-
-
 def _empty_tool_schemas() -> list[dict[str, object]]:
     return []
 
@@ -56,8 +48,7 @@ class LlmRequest:
 class LlmResponse:
     """One assistant-turn response."""
 
-    messages: list[Message] = field(default_factory=_empty_messages)
-    tool_calls: list[GeneratorToolCall] = field(default_factory=_empty_tool_calls)
+    content: list[ContentItem] = field(default_factory=_empty_content)
     raw_completion: str = ""
     usage_metadata: dict[str, object] = field(default_factory=_empty_usage_metadata)
     error_message: str | None = None
@@ -150,7 +141,7 @@ class LlmClient:
             )
         except CompletionParseError as error:
             return LlmResponse(
-                messages=[Message(role="assistant", content=error.raw_completion)],
+                content=[Message(role="assistant", content=error.raw_completion)],
                 raw_completion=error.raw_completion,
                 error_message=str(error),
             )
@@ -163,8 +154,17 @@ class LlmClient:
                 Message(role="assistant", content=completion.message.content)
             )
         return LlmResponse(
-            messages=assistant_messages,
-            tool_calls=list(completion.message.tool_calls),
+            content=[
+                *assistant_messages,
+                *[
+                    AgentToolCall(
+                        tool_call_id=f"call_{index}",
+                        name=tool_call.name,
+                        arguments=dict(tool_call.arguments),
+                    )
+                    for index, tool_call in enumerate(completion.message.tool_calls)
+                ],
+            ],
             raw_completion=completion.raw_completion,
             usage_metadata={
                 "prompt_tokens": completion.prompt_tokens,
