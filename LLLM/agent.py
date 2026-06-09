@@ -27,7 +27,7 @@ from collections.abc import Sequence
 from typing import cast
 
 from .agent_context import ContentItem, ExecutionContext, Message
-from .agent_context import ToolCall as AgentToolCall
+from .agent_context import AgentToolCall
 from .agent_context import ToolResult
 from .agent_llm import (
     LlmClient,

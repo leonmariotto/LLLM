@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 import requests
 
-from ..LLLM.generator_with_tool import Tool
+from ..LLLM.tool_common import Tool
 from ..LLLM.tool_wiki import execute_wiki, wiki_tool
 
 

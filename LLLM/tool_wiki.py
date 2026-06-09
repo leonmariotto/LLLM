@@ -20,7 +20,7 @@ from urllib.parse import quote, unquote, urlparse
 
 import requests
 
-from .generator_with_tool import Tool
+from .tool_common import Tool
 
 _DEFAULT_WIKI = "https://en.wikipedia.org"
 _REQUEST_TIMEOUT_SECONDS = 10

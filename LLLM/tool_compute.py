@@ -13,7 +13,7 @@ import copy
 import re
 import subprocess
 
-from .generator_with_tool import Tool
+from .tool_common import Tool
 
 _BC_TIMEOUT_SECONDS = 5
 _PI_PATTERN = re.compile(r"\bpi\b")

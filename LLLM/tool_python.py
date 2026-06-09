@@ -13,7 +13,7 @@ import subprocess
 
 from loguru import logger
 
-from .generator_with_tool import Tool
+from .tool_common import Tool
 
 _DEFAULT_TIMEOUT_SECONDS = 10
 _MAX_TIMEOUT_SECONDS = 30

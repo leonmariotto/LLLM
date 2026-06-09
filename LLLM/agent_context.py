@@ -18,7 +18,7 @@ class Message(BaseModel):
     content: str
 
 
-class ToolCall(BaseModel):
+class AgentToolCall(BaseModel):
     """LLM's request to execute a tool."""
 
     type: Literal["tool_call"] = "tool_call"
@@ -41,7 +41,7 @@ class ToolResult(BaseModel):
     content: list[Any]
 
 
-ContentItem = Message | ToolCall | ToolResult
+ContentItem = Message | AgentToolCall | ToolResult
 
 
 def _empty_content() -> list[ContentItem]:

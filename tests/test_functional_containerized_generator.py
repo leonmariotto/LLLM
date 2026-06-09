@@ -18,8 +18,9 @@ from LLLM.docker_generator import (
 )
 from LLLM.fetch import fetch_model_ir
 from LLLM.generator import Generator
-from LLLM.generator_with_tool import GeneratorWithTool, Tool
+from LLLM.generator_with_tool import GeneratorWithTool
 from LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
+from LLLM.tool_common import Tool
 from LLLM.tool_python import execute_python, python_tool
 
 

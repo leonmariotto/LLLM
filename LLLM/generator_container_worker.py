@@ -34,7 +34,8 @@ from typing import cast
 
 from loguru import logger
 
-from .generator_with_tool import GeneratorWithTool, ToolMessage
+from .generator_with_tool import GeneratorWithTool
+from .tool_common import ToolMessage
 
 _FACTORY_ENV = "LLLM_GENERATOR_FACTORY"
 _FACTORY_KWARGS_ENV = "LLLM_GENERATOR_FACTORY_KWARGS"

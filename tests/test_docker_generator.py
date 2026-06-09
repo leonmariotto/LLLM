@@ -16,7 +16,8 @@ from ..LLLM.generator_container_worker import (
     execute_generate_payload,
     load_factory,
 )
-from ..LLLM.generator_with_tool import ToolCall, ToolMessage
+from ..LLLM.tool_common import ToolMessage
+from ..LLLM.generator import ToolCall
 
 
 class FakeContainer:

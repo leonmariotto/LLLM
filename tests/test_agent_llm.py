@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 
-from ..LLLM.agent_context import Message, ToolCall, ToolResult
+from ..LLLM.agent_context import Message, AgentToolCall, ToolResult
 from ..LLLM.agent_llm import LlmClient, LlmRequest, build_messages
 from ..LLLM.generator import (
     AssistantOutput,
@@ -62,7 +62,7 @@ def test_build_messages_converts_context_items() -> None:
         content=[
             Message(role="user", content="question"),
             Message(role="assistant", content="checking"),
-            ToolCall(tool_call_id="call_2_0", name="lookup", arguments={"q": "x"}),
+            AgentToolCall(tool_call_id="call_2_0", name="lookup", arguments={"q": "x"}),
             ToolResult(
                 tool_call_id="call_2_0",
                 name="lookup",
@@ -111,7 +111,7 @@ def test_llm_client_complete_returns_text_tool_calls_and_usage() -> None:
     }
     assert response.content == [
         Message(role="assistant", content="I will check"),
-        ToolCall(tool_call_id="call_0", name="lookup", arguments={"q": "x"}),
+        AgentToolCall(tool_call_id="call_0", name="lookup", arguments={"q": "x"}),
     ]
     assert generator.messages == [[{"role": "user", "content": "question"}]]
     assert generator.tool_schemas == [[schema]]

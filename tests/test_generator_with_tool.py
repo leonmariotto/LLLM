@@ -8,10 +8,9 @@ from ..LLLM.generator import ChatCompletion, CompletionParseError
 from ..LLLM.generator_with_tool import (
     AssistantOutput,
     GeneratorWithTool,
-    Tool,
-    ToolCall,
-    ToolMessage,
 )
+from ..LLLM.tool_common import ToolMessage, Tool
+from ..LLLM.generator import ToolCall
 
 
 class FakeToolTokenizer:

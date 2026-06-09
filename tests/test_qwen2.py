@@ -4,7 +4,7 @@ from typing import Any, Callable, cast
 from transformers import Qwen2Config as TransformersQwen2Config
 from transformers import Qwen2ForCausalLM
 
-from ..LLLM.generator_with_tool import ToolCall
+from ..LLLM.generator import ToolCall
 from ..LLLM.hf_loader import model_ir_from_hf
 from ..LLLM.kv_cache import KVCache
 from ..LLLM.qwen2 import Qwen2Config, Qwen2Model, Qwen2Tokenizer

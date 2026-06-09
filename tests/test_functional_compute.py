@@ -6,8 +6,9 @@ pytestmark = pytest.mark.slow
 
 from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
-from ..LLLM.generator_with_tool import GeneratorWithTool, Tool
+from ..LLLM.generator_with_tool import GeneratorWithTool
 from ..LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
+from ..LLLM.tool_common import Tool
 from ..LLLM.tool_compute import compute_tool, execute_compute
 
 QWEN3_06B_REPO_ID = "Qwen/Qwen3-0.6B"
@@ -97,6 +98,5 @@ def test_functional_qwen3_with_thinking_calls_compute_tool_autoload(
     )
 
     assert response is not None
-
 
 

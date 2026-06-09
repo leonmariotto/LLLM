@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 from loguru import logger
 
-from ..LLLM.generator_with_tool import Tool
+from ..LLLM.tool_common import Tool
 from ..LLLM.tool_python import execute_python, python_tool
 
 

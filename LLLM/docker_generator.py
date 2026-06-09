@@ -33,7 +33,7 @@ from typing import Any, cast
 import requests
 from loguru import logger
 
-from .generator_with_tool import ToolMessage
+from .tool_common import ToolMessage
 
 # Basic debian with network utility needed to download uv.
 DEFAULT_DOCKER_IMAGE = "buildpack-deps:bookworm-curl"

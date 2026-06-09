@@ -9,7 +9,7 @@ from typing import Literal, cast
 from dataclasses import dataclass, field
 
 from .agent_context import ContentItem, Message
-from .agent_context import ToolCall as AgentToolCall
+from .agent_context import AgentToolCall
 from .agent_context import ToolResult
 from .generator import (
     Generator,

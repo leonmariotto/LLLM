@@ -6,8 +6,9 @@ pytestmark = pytest.mark.slow
 
 from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
-from ..LLLM.generator_with_tool import GeneratorWithTool, Tool
+from ..LLLM.generator_with_tool import GeneratorWithTool
 from ..LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
+from ..LLLM.tool_common import Tool
 from ..LLLM.tool_compute import compute_tool, execute_compute
 
 
@@ -80,5 +81,4 @@ def test_functional_qwen3_calls_hello_tool_and_uses_response(
 
     assert calls == [{}]
     assert "Hello Tool !" in response
-
 

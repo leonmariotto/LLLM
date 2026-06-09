@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 import pytest
 
-from ..LLLM.generator_with_tool import Tool
+from ..LLLM.tool_common import Tool
 from ..LLLM.tool_compute import compute_tool, execute_compute
 
 

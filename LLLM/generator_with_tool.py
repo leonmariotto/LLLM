@@ -5,14 +5,13 @@ The loop is independent of model-specific tool syntax.  Its tokenizer protocol
 is responsible for rendering tools into a chat prompt and parsing assistant
 completions into structured tool calls.
 
-This is getting closer to a real agent, but without context management.
+This is getting close to a real agent, but without context management.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from typing import Any, Protocol, TypeAlias, cast
+from collections.abc import Sequence
+from typing import Any, Protocol, cast
 
 from loguru import logger
 
@@ -23,6 +22,7 @@ from .generator import (
     CompletionParseError,
     ToolCall,
 )
+from .tool_common import Tool, ToolMessage
 
 # Use code execution or programming tools for running code, checking syntax,
 # inspecting files, tests, data processing, or reproducible technical work.
@@ -75,23 +75,7 @@ Examples:
     search 'Venezuela' in this page.
 - User: "Write a script to rename these files." Assistant: provide or edit code;
   use file/code tools if repository or local files must be inspected.
-- User: "Should I use a tool?" Assistant: if the task matches a trigger, use the
-  tool immediately rather than asking permission.
 """
-
-
-ToolMessage: TypeAlias = ChatMessage
-
-
-ToolExecutor = Callable[[dict[str, object]], str]
-
-
-@dataclass(frozen=True)
-class Tool:
-    """A function schema exposed to the model and its local implementation."""
-
-    schema: dict[str, object]
-    execute: ToolExecutor
 
 
 class TextGenerator(Protocol):
