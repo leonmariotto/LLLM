@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Any, Literal
 
+from .tool_common import ToolCall
+
 
 class Message(BaseModel):
     """A text message in the conversation."""
@@ -16,20 +18,6 @@ class Message(BaseModel):
     type: Literal["message"] = "message"
     role: Literal["system", "user", "assistant"]
     content: str
-
-
-class AgentToolCall(BaseModel):
-    """
-    Agent request to execute a tool.
-    The only difference with Generator ToolCall is the tool_call_id, used by
-    agent to differenciate tool calls.
-    LLM's output ToolCall, agent give it an id and it become AgentToolCall.
-    """
-
-    type: Literal["tool_call"] = "tool_call"
-    tool_call_id: str
-    name: str
-    arguments: dict[str, Any]
 
 
 class AgentToolResult(BaseModel):
@@ -45,7 +33,8 @@ class AgentToolResult(BaseModel):
     content: list[Any]
 
 
-ContentItem = Message | AgentToolCall | AgentToolResult
+ContentItem = Message | ToolCall | AgentToolResult
+AgentToolCall = ToolCall
 
 
 def _empty_content() -> list[ContentItem]:
@@ -123,3 +112,12 @@ class ExecutionContext:
     def increment_step(self) -> None:
         """Move to the next execution step."""
         self.current_step += 1
+
+
+@dataclass
+class AgentResult:
+    """Result of an agent execution."""
+
+    output: Any  # str | BaseModel
+    context: ExecutionContext
+    status: str = "complete"  # "complete" | "pending" | "error"

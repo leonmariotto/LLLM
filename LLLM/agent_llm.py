@@ -9,7 +9,7 @@ from typing import Literal, cast
 from dataclasses import dataclass, field
 
 from .agent_context import ContentItem, Message
-from .agent_context import AgentToolCall
+from .tool_common import ToolCall
 from .agent_context import AgentToolResult
 from .generator import (
     Generator,
@@ -66,7 +66,7 @@ def build_messages(request: LlmRequest) -> list[ChatMessage]:
             messages.append(
                 cast(ChatMessage, {"role": item.role, "content": item.content})
             )
-        elif isinstance(item, AgentToolCall):
+        elif isinstance(item, ToolCall):
             tool_call = GeneratorToolCall(
                 name=item.name,
                 arguments=dict(item.arguments),
@@ -157,7 +157,7 @@ class LlmClient:
             content=[
                 *assistant_messages,
                 *[
-                    AgentToolCall(
+                    ToolCall(
                         tool_call_id=f"call_{index}",
                         name=tool_call.name,
                         arguments=dict(tool_call.arguments),

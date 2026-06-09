@@ -35,7 +35,7 @@ from typing import cast
 from loguru import logger
 
 from .generator_with_tool import GeneratorWithTool
-from .tool_common import ToolMessage
+from .generator import ChatMessage
 
 _FACTORY_ENV = "LLLM_GENERATOR_FACTORY"
 _FACTORY_KWARGS_ENV = "LLLM_GENERATOR_FACTORY_KWARGS"
@@ -141,7 +141,7 @@ def execute_generate_payload(
     if not isinstance(messages, list):
         raise ValueError("messages must be a list")
     return generator.generate(
-        cast(list[ToolMessage], messages),
+        cast(list[ChatMessage], messages),
         stop_at_eos=_optional_bool(payload, "stop_at_eos", True),
         max_generated_token=_optional_int(payload, "max_generated_token", 20),
         cache_length=_optional_int_or_none(payload, "cache_length"),

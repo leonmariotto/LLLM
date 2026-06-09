@@ -33,7 +33,7 @@ from typing import Any, cast
 import requests
 from loguru import logger
 
-from .tool_common import ToolMessage
+from .generator import ChatMessage
 
 # Basic debian with network utility needed to download uv.
 DEFAULT_DOCKER_IMAGE = "buildpack-deps:bookworm-curl"
@@ -245,7 +245,7 @@ class ContainerizedGeneratorWithTool:
 
     def generate(
         self,
-        messages: Sequence[ToolMessage],
+        messages: Sequence[ChatMessage],
         *,
         stop_at_eos: bool = True,
         max_generated_token: int = 20,

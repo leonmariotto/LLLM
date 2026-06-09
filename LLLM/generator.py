@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import time
 from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast, List
 
+from .tool_common import ToolCall
+
 from loguru import logger
 import torch
 
@@ -31,14 +33,6 @@ class Tokenizer(Protocol):
     def decode(self, tok: list[int]) -> str: ...
 
     def get_eos(self) -> int | None: ...
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    """A parsed assistant request to call one tool."""
-
-    name: str
-    arguments: dict[str, object]
 
 
 @dataclass(frozen=True)

@@ -8,20 +8,20 @@ from ..LLLM.generator import ChatCompletion, CompletionParseError
 from ..LLLM.generator_with_tool import (
     AssistantOutput,
     GeneratorWithTool,
+    ChatMessage,
 )
-from ..LLLM.tool_common import ToolMessage, Tool
-from ..LLLM.generator import ToolCall
+from ..LLLM.tool_common import Tool, ToolCall
 
 
 class FakeToolTokenizer:
     def __init__(self, parsed_outputs: dict[str, AssistantOutput | ValueError]) -> None:
         self.parsed_outputs = parsed_outputs
-        self.histories: list[list[ToolMessage]] = []
+        self.histories: list[list[ChatMessage]] = []
         self.schemas: list[list[dict[str, object]]] = []
 
     def apply_chat_template(
         self,
-        messages: Sequence[ToolMessage],
+        messages: Sequence[ChatMessage],
         *,
         tools: Sequence[dict[str, object]] | None = None,
         tokenize: bool = True,
@@ -63,7 +63,7 @@ class FakeTextGenerator:
 
     def generate_completion(
         self,
-        messages: Sequence[ToolMessage],
+        messages: Sequence[ChatMessage],
         *,
         tools: Sequence[dict[str, object]] | None = None,
         stop_at_eos: bool = True,
@@ -119,7 +119,7 @@ def tool(name: str, execute: Any) -> Tool:
 def test_tool_generator_returns_final_response_without_mutating_input() -> None:
     generator = FakeTextGenerator(["done"], {"done": AssistantOutput("finished")})
     tool_generator = GeneratorWithTool(generator, [])
-    messages: list[ToolMessage] = [{"role": "user", "content": "question"}]
+    messages: list[ChatMessage] = [{"role": "user", "content": "question"}]
 
     result = tool_generator.generate(
         messages,

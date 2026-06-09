@@ -16,8 +16,8 @@ from ..LLLM.generator_container_worker import (
     execute_generate_payload,
     load_factory,
 )
-from ..LLLM.tool_common import ToolMessage
-from ..LLLM.generator import ToolCall
+from ..LLLM.generator import ChatMessage
+from ..LLLM.tool_common import ToolCall
 
 
 class FakeContainer:
@@ -76,7 +76,7 @@ class FakeGeneratorWithTool:
 
     def generate(
         self,
-        messages: Sequence[ToolMessage],
+        messages: Sequence[ChatMessage],
         *,
         stop_at_eos: bool = True,
         max_generated_token: int = 20,

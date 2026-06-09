@@ -22,7 +22,7 @@ from .generator import (
     CompletionParseError,
     ToolCall,
 )
-from .tool_common import Tool, ToolMessage
+from .tool_common import Tool
 
 # Use code execution or programming tools for running code, checking syntax,
 # inspecting files, tests, data processing, or reproducible technical work.
@@ -117,7 +117,7 @@ class GeneratorWithTool:
 
     def generate(
         self,
-        messages: Sequence[ToolMessage],
+        messages: Sequence[ChatMessage],
         *,
         stop_at_eos: bool = True,
         max_generated_token: int = 20,
@@ -231,10 +231,10 @@ class GeneratorWithTool:
             tool_rounds += 1
 
     @staticmethod
-    def _copy_messages(messages: Sequence[ToolMessage]) -> list[ToolMessage]:
-        history: list[ToolMessage] = []
+    def _copy_messages(messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+        history: list[ChatMessage] = []
         for message in messages:
-            copied: ToolMessage = {
+            copied: ChatMessage = {
                 "role": message["role"],
                 "content": message["content"],
             }
