@@ -4,10 +4,10 @@ from typing import Any, Callable, cast
 from transformers import Qwen2Config as TransformersQwen2Config
 from transformers import Qwen2ForCausalLM
 
-from ..LLLM.generator import ToolCall
 from ..LLLM.hf_loader import model_ir_from_hf
 from ..LLLM.kv_cache import KVCache
 from ..LLLM.qwen2 import Qwen2Config, Qwen2Model, Qwen2Tokenizer
+from ..LLLM.tool_common import ToolCall
 
 
 def _tiny_hf_qwen2_config() -> dict[str, object]:
@@ -158,7 +158,7 @@ def test_qwen2_chat_template_renders_tools_calls_and_responses() -> None:
             {
                 "role": "assistant",
                 "content": "",
-                "tool_calls": [ToolCall("weather", {"city": "Paris"})],
+                "tool_calls": [ToolCall(name="weather", arguments={"city": "Paris"})],
             },
             {"role": "tool", "content": "warm"},
             {"role": "tool", "content": "dry"},
@@ -225,8 +225,8 @@ def test_qwen2_parses_assistant_text_and_multiple_tool_calls() -> None:
 
     assert output.content == "Checking."
     assert output.tool_calls == (
-        ToolCall("a", {"x": 1}),
-        ToolCall("b", {}),
+        ToolCall(name="a", arguments={"x": 1}),
+        ToolCall(name="b", arguments={}),
     )
 
 
@@ -240,7 +240,7 @@ def test_qwen2_parse_assistant_output_strips_thinking_blocks() -> None:
     )
 
     assert output.content == "Checking."
-    assert output.tool_calls == (ToolCall("a", {"x": 1}),)
+    assert output.tool_calls == (ToolCall(name="a", arguments={"x": 1}),)
 
 
 def test_qwen2_parse_assistant_output_strips_trailing_unclosed_thinking() -> None:

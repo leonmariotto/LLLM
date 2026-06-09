@@ -6,7 +6,8 @@ import pytest
 import torch
 from torch import nn
 
-from ..LLLM.generator import AssistantOutput, Generator, ToolCall
+from ..LLLM.generator import AssistantOutput, Generator
+from ..LLLM.tool_common import ToolCall
 
 
 class DigitTokenizer:
@@ -51,7 +52,7 @@ class DigitChatTokenizer(DigitTokenizer):
 
     def parse_assistant_output(self, completion: str) -> AssistantOutput:
         if completion == "45":
-            return AssistantOutput("parsed", (ToolCall("lookup", {"x": 1}),))
+            return AssistantOutput("parsed", (ToolCall(name="lookup", arguments={"x": 1}),))
         return AssistantOutput(completion)
 
 
@@ -135,7 +136,7 @@ def test_generator_completion_uses_chat_template_and_parses_output() -> None:
     assert completion.raw_completion == "45"
     assert completion.message == AssistantOutput(
         "parsed",
-        (ToolCall("lookup", {"x": 1}),),
+        (ToolCall(name="lookup", arguments={"x": 1}),),
     )
     assert completion.prompt_tokens == 3
     assert completion.generated_tokens == 2

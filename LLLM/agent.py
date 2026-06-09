@@ -26,10 +26,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import cast
 
-from .agent_context import ContentItem, ExecutionContext, Message
+from .agent_context import ExecutionContext, Message
 from .tool_common import ToolCall
 from .agent_context import AgentToolResult
 from .agent_context import AgentResult
+from .agent_context import Event
 from .agent_llm import (
     LlmClient,
     LlmRequest,
@@ -72,7 +73,7 @@ class Agent:
         prompt: str,
         *,
         context: ExecutionContext | None = None,
-    ) -> str:
+    ) -> AgentResult:
         """
         Run the agent until the model returns an assistant answer.
 
@@ -91,25 +92,45 @@ class Agent:
         # Set up code execution environment if needed
         # TODO
 
-        # while execution_context.final_result is None:
-        #     result = self.step(execution_context)
-        #     self.step(execution_context)
-        #
-        #     # Check if the last event is a final response
-        #     if context.events:
-        #         last_event = context.events[-1]
-        #         if self._is_final_response(last_event):
-        #             context.final_result = self._extract_final_result(last_event)
-        #     if final_answer is not None:
-        #         return final_answer
-        #
-        # return AgentResult(output=context.final_result, context=context)
-        while execution_context.final_result is None:
-            final_answer = self.step(execution_context)
-            if final_answer is not None:
-                return final_answer
+        while (
+            execution_context.final_result is None
+            and execution_context.current_step < self.max_tool_rounds
+        ):
+            _ = self.step(execution_context)
+            self.step(execution_context)
 
-        return str(execution_context.final_result)
+            # Check if the last event is a final response
+            if execution_context.events:
+                last_event = execution_context.events[-1]
+                if self._is_final_response(last_event):
+                    execution_context.final_result = self._extract_final_result(
+                        last_event
+                    )
+
+        return AgentResult(
+            output=execution_context.final_result, context=execution_context
+        )
+
+    def _is_final_response(self, event: Event) -> bool:
+        """
+        Check if this event contains a final response.
+        Return true if no ToolCall nor AgentToolResult in event contents.
+        """
+        # TODO check final_answer tool call at this point.
+        has_tool_calls = any(isinstance(c, ToolCall) for c in event.content)
+        has_tool_results = any(isinstance(c, AgentToolResult) for c in event.content)
+        return not has_tool_calls and not has_tool_results
+
+    def _extract_final_result(self, event: Event) -> str:
+        """
+        Extract the final result from an event.
+        Return the first assistant message in the event contents.
+        """
+        # TODO extract the output of final_answer tool
+        for item in event.content:
+            if isinstance(item, Message) and item.role == "assistant":
+                return item.content
+        return "Woops!!"
 
     def step(self, context: ExecutionContext) -> AgentResult | None:
         """
@@ -118,48 +139,36 @@ class Agent:
         @param context: execution context to update.
         @return final assistant answer when the run is complete, otherwise None.
         """
-        # Prepare llm request
+        # Prepare what to send to the LLM
         request = LlmRequest(
             instructions=self.system_instructions,
             content=context.items(),
             tool_schemas=[tool.schema for tool in self.tools],
         )
+
+        # Get LLM's decision
         response = self.think(request)
 
-        if response.error_message is not None and not response.content:
-            raise RuntimeError(response.error_message)
+        # TODO pretty print LlmResposne
+        logger.debug("LlmResponse=[{}]", response)
 
-        assistant_items = self._response_items(
-            response,
-            step=context.current_step,
+        # Record LLM response as an event
+        response_event = Event(
+            execution_id=context.execution_id,
+            author="agent",
+            content=response.content,
         )
-        context.add_agent_items("assistant", assistant_items)
+        context.add_event(response_event)
 
-        tool_calls = [item for item in assistant_items if isinstance(item, ToolCall)]
-        # If not tool call its a final answer....
-        # TODO do a final_answer tool call !
-        if not tool_calls:
-            final_answer = ""
-            if len(assistant_items) < 1:
-                logger.error("No assistant item and no tool call\n")
-            else:
-                item = assistant_items[-1]
-                if isinstance(item, Message):
-                    final_answer = item.content
-
-            context.final_result = final_answer
-            return final_answer
-
-        if context.current_step >= self.max_tool_rounds:
-            raise RuntimeError(f"maximum tool rounds exceeded ({self.max_tool_rounds})")
-        self.act(context, tool_calls)
+        tool_calls = [item for item in response.content if isinstance(item, ToolCall)]
+        if tool_calls:
+            _ = self.act(context, tool_calls)
+        context.increment_step()
         return None
 
     def think(self, request: LlmRequest) -> LlmResponse:
         """
         Ask the LLM for the next assistant message or tool call.
-        Prepare the request using current ExecutionContext.
-        Context management happen here !
 
         @param request: request.
         @return parsed LLM response.
@@ -169,8 +178,8 @@ class Agent:
     def act(
         self,
         context: ExecutionContext,
-        tool_calls: ToolCall | Sequence[ToolCall],
-    ) -> list[AgentToolResult]:
+        tool_calls: Sequence[ToolCall],
+    ) -> None:
         """
         Execute tool calls and append their results to the context.
 
@@ -178,38 +187,20 @@ class Agent:
         @param tool_calls: tool calls emitted by the last think phase.
         @return stored tool results.
         """
-        pending_tool_calls = (
-            [tool_calls] if isinstance(tool_calls, ToolCall) else tool_calls
+        tool_results = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+        tool_event = Event(
+            execution_id=context.execution_id,
+            author="tool",
+            content=tool_results,
         )
-        tool_results = [
-            self._execute_tool_call(tool_call) for tool_call in pending_tool_calls
-        ]
-        context.add_agent_items("tool", tool_results)
-        context.increment_step()
-        return tool_results
+        context.add_event(tool_event)
+        return None
 
     @staticmethod
     def _normalize_instructions(instructions: str | Sequence[str]) -> list[str]:
         if isinstance(instructions, str):
             return [instructions] if instructions else []
         return [instruction for instruction in instructions if instruction]
-
-    @staticmethod
-    def _response_items(response: LlmResponse, *, step: int) -> list[ContentItem]:
-        """Convert an LLM response into agent event items with local tool IDs."""
-        items: list[ContentItem] = []
-        tool_call_index = 0
-        for item in response.content:
-            if isinstance(item, ToolCall):
-                items.append(
-                    item.model_copy(
-                        update={"tool_call_id": f"call_{step}_{tool_call_index}"}
-                    )
-                )
-                tool_call_index += 1
-            else:
-                items.append(item)
-        return items
 
     @classmethod
     def _index_tools(cls, tools: Sequence[Tool]) -> dict[str, Tool]:
@@ -253,7 +244,7 @@ class Agent:
             )
 
         try:
-            result = tool.execute(cast(dict[str, object], tool_call.arguments))
+            result = tool.execute(tool_call.arguments)
         except Exception as error:
             return AgentToolResult(
                 tool_call_id=tool_call.tool_call_id,

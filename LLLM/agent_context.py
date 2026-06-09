@@ -34,7 +34,6 @@ class AgentToolResult(BaseModel):
 
 
 ContentItem = Message | ToolCall | AgentToolResult
-AgentToolCall = ToolCall
 
 
 def _empty_content() -> list[ContentItem]:
@@ -56,7 +55,7 @@ class Event(BaseModel):
     execution_id: str
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
     author: str
-    content: list[ContentItem] = Field(default_factory=_empty_content)
+    content: Sequence[ContentItem] = Field(default_factory=_empty_content)
 
 
 @dataclass
@@ -84,22 +83,6 @@ class ExecutionContext:
             )
         )
         return message
-
-    def add_agent_items(
-        self,
-        author: str,
-        items: Sequence[ContentItem],
-    ) -> None:
-        """Record one assistant/tool event when there is content to store."""
-        if not items:
-            return
-        self.add_event(
-            Event(
-                execution_id=self.execution_id,
-                author=author,
-                content=list(items),
-            )
-        )
 
     def items(self) -> list[ContentItem]:
         """Return all content items in event order."""

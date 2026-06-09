@@ -163,7 +163,10 @@ def test_tool_generator_executes_multiple_calls_in_order_and_regenerates() -> No
         {
             "calls": AssistantOutput(
                 "",
-                (ToolCall("a", {"value": 1}), ToolCall("b", {"value": 2})),
+                (
+                    ToolCall(name="a", arguments={"value": 1}),
+                    ToolCall(name="b", arguments={"value": 2}),
+                ),
             ),
             "answer": AssistantOutput("complete"),
         },
@@ -190,7 +193,10 @@ def test_tool_generator_executes_multiple_calls_in_order_and_regenerates() -> No
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [ToolCall("a", {"value": 1}), ToolCall("b", {"value": 2})],
+            "tool_calls": [
+                ToolCall(name="a", arguments={"value": 1}),
+                ToolCall(name="b", arguments={"value": 2}),
+            ],
         },
         {"role": "tool", "content": "result-a"},
         {"role": "tool", "content": "result-b"},
@@ -203,12 +209,12 @@ def test_tool_generator_executes_multiple_calls_in_order_and_regenerates() -> No
         ("bad", ValueError("invalid JSON"), "invalid tool call output: invalid JSON"),
         (
             "unknown",
-            AssistantOutput("", (ToolCall("missing", {}),)),
+            AssistantOutput("", (ToolCall(name="missing", arguments={}),)),
             "unknown tool 'missing'",
         ),
         (
             "failed",
-            AssistantOutput("", (ToolCall("explode", {}),)),
+            AssistantOutput("", (ToolCall(name="explode", arguments={}),)),
             "'explode' failed: failure",
         ),
     ],
@@ -248,7 +254,7 @@ def test_tool_generator_rejects_invalid_and_duplicate_tool_registration() -> Non
 def test_tool_generator_raises_when_tool_round_limit_is_exhausted() -> None:
     generator = FakeTextGenerator(
         ["call", "call"],
-        {"call": AssistantOutput("", (ToolCall("a", {}),))},
+        {"call": AssistantOutput("", (ToolCall(name="a", arguments={}),))},
     )
     tool_generator = GeneratorWithTool(
         generator,

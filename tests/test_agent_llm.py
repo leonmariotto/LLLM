@@ -1,14 +1,14 @@
 from collections.abc import Sequence
 
-from ..LLLM.agent_context import Message, AgentToolCall, AgentToolResult
+from ..LLLM.agent_context import Message, AgentToolResult
 from ..LLLM.agent_llm import LlmClient, LlmRequest, build_messages
 from ..LLLM.generator import (
     AssistantOutput,
     ChatCompletion,
     ChatMessage,
     CompletionParseError,
-    ToolCall as GeneratorToolCall,
 )
+from ..LLLM.tool_common import ToolCall
 
 
 class FakeGenerator:
@@ -62,7 +62,7 @@ def test_build_messages_converts_context_items() -> None:
         content=[
             Message(role="user", content="question"),
             Message(role="assistant", content="checking"),
-            AgentToolCall(tool_call_id="call_2_0", name="lookup", arguments={"q": "x"}),
+            ToolCall(tool_call_id="call_2_0", name="lookup", arguments={"q": "x"}),
             AgentToolResult(
                 tool_call_id="call_2_0",
                 name="lookup",
@@ -78,7 +78,7 @@ def test_build_messages_converts_context_items() -> None:
         {
             "role": "assistant",
             "content": "checking",
-            "tool_calls": [GeneratorToolCall("lookup", {"q": "x"})],
+            "tool_calls": [ToolCall(name="lookup", arguments={"q": "x"})],
         },
         {"role": "tool", "content": "Tool result: found"},
     ]
@@ -90,7 +90,7 @@ def test_llm_client_complete_returns_text_tool_calls_and_usage() -> None:
         [
             AssistantOutput(
                 "I will check",
-                (GeneratorToolCall("lookup", {"q": "x"}),),
+                (ToolCall(name="lookup", arguments={"q": "x"}),),
             )
         ]
     )
@@ -111,7 +111,7 @@ def test_llm_client_complete_returns_text_tool_calls_and_usage() -> None:
     }
     assert response.content == [
         Message(role="assistant", content="I will check"),
-        AgentToolCall(tool_call_id="call_0", name="lookup", arguments={"q": "x"}),
+        ToolCall(tool_call_id="call_0", name="lookup", arguments={"q": "x"}),
     ]
     assert generator.messages == [[{"role": "user", "content": "question"}]]
     assert generator.tool_schemas == [[schema]]

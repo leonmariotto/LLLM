@@ -1,4 +1,5 @@
-from ..LLLM.agent_context import ExecutionContext, Message, AgentToolCall, AgentToolResult
+from ..LLLM.agent_context import Event, ExecutionContext, Message, AgentToolResult
+from ..LLLM.tool_common import ToolCall
 
 
 def test_execution_context_records_and_flattens_events() -> None:
@@ -7,7 +8,7 @@ def test_execution_context_records_and_flattens_events() -> None:
     user_message = context.add_user_message("hello")
     agent_items = [
         Message(role="assistant", content="checking"),
-        AgentToolCall(tool_call_id="call_0_0", name="lookup", arguments={"q": "x"}),
+        ToolCall(tool_call_id="call_0_0", name="lookup", arguments={"q": "x"}),
         AgentToolResult(
             tool_call_id="call_0_0",
             name="lookup",
@@ -15,7 +16,13 @@ def test_execution_context_records_and_flattens_events() -> None:
             content=["found"],
         ),
     ]
-    context.add_agent_items("assistant", agent_items)
+    context.add_event(
+        Event(
+            execution_id=context.execution_id,
+            author="assistant",
+            content=agent_items,
+        )
+    )
     context.final_result = "done"
 
     assert user_message == Message(role="user", content="hello")

@@ -3,15 +3,14 @@ from collections.abc import Sequence
 import pytest
 
 from ..LLLM.agent import Agent
-from ..LLLM.agent_context import ExecutionContext, Message, AgentToolCall, AgentToolResult
+from ..LLLM.agent_context import ExecutionContext, Message, AgentToolResult
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.generator import (
     AssistantOutput,
     ChatCompletion,
     ChatMessage,
-    ToolCall as GeneratorToolCall,
 )
-from ..LLLM.tool_common import Tool
+from ..LLLM.tool_common import Tool, ToolCall
 
 
 class FakeGenerator:
@@ -62,22 +61,30 @@ def tool(name: str, result: str | Exception) -> Tool:
 
 def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     context = ExecutionContext()
-    generator = FakeGenerator([AssistantOutput("finished")])
+    generator = FakeGenerator([AssistantOutput("thinking"), AssistantOutput("finished")])
     llm = LlmClient(generator, max_generated_token=11, temperature=0.2)
     agent = Agent(llm, [], instructions="be brief")
 
-    assert agent.run("question", context=context) == "finished"
+    result = agent.run("question", context=context)
 
+    assert result.output == "finished"
+    assert result.context is context
     assert context.final_result == "finished"
     assert context.messages() == [
         Message(role="user", content="question"),
+        Message(role="assistant", content="thinking"),
         Message(role="assistant", content="finished"),
     ]
     assert generator.messages == [
         [
             {"role": "system", "content": "be brief"},
             {"role": "user", "content": "question"},
-        ]
+        ],
+        [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "thinking"},
+        ],
     ]
 
 
@@ -86,21 +93,23 @@ def test_agent_run_executes_successful_tool_round_then_final_answer() -> None:
         [
             AssistantOutput(
                 "checking",
-                (GeneratorToolCall("lookup", {"q": "x"}),),
+                (ToolCall(name="lookup", arguments={"q": "x"}),),
             ),
             AssistantOutput("answer"),
         ]
     )
     agent = Agent(LlmClient(generator), [tool("lookup", "found")])
 
-    assert agent.run("question") == "answer"
+    result = agent.run("question")
+
+    assert result.output == "answer"
 
     assert generator.messages[1] == [
         {"role": "user", "content": "question"},
         {
             "role": "assistant",
             "content": "checking",
-            "tool_calls": [GeneratorToolCall("lookup", {"q": "x"})],
+            "tool_calls": [ToolCall(name="lookup", arguments={"q": "x"})],
         },
         {"role": "tool", "content": "Tool result: found:x"},
     ]
@@ -110,19 +119,19 @@ def test_agent_run_executes_successful_tool_round_then_final_answer() -> None:
     ("first_call", "registered_tools", "expected_tool_message"),
     [
         (
-            GeneratorToolCall("missing", {}),
+            ToolCall(name="missing", arguments={}),
             [],
             "Tool error: unknown tool 'missing'",
         ),
         (
-            GeneratorToolCall("explode", {}),
+            ToolCall(name="explode", arguments={}),
             [tool("explode", RuntimeError("failure"))],
             "Tool error: 'explode' failed: failure",
         ),
     ],
 )
 def test_agent_feeds_unknown_tool_and_exceptions_back_for_recovery(
-    first_call: GeneratorToolCall,
+    first_call: ToolCall,
     registered_tools: list[Tool],
     expected_tool_message: str,
 ) -> None:
@@ -134,43 +143,51 @@ def test_agent_feeds_unknown_tool_and_exceptions_back_for_recovery(
     )
     agent = Agent(LlmClient(generator), registered_tools)
 
-    assert agent.run("go") == "recovered"
+    result = agent.run("go")
+
+    assert result.output == "recovered"
     assert generator.messages[1][-1] == {
         "role": "tool",
         "content": expected_tool_message,
     }
 
 
-def test_agent_raises_when_tool_round_limit_is_exhausted() -> None:
+def test_agent_returns_without_final_result_when_tool_round_limit_is_exhausted() -> None:
     generator = FakeGenerator(
         [
-            AssistantOutput("", (GeneratorToolCall("again", {}),)),
-            AssistantOutput("", (GeneratorToolCall("again", {}),)),
+            AssistantOutput("", (ToolCall(name="again", arguments={}),)),
+            AssistantOutput("", (ToolCall(name="again", arguments={}),)),
         ]
     )
     agent = Agent(LlmClient(generator), [tool("again", "loop")], max_tool_rounds=1)
 
-    with pytest.raises(RuntimeError, match="maximum tool rounds exceeded"):
-        agent.run("loop")
+    result = agent.run("loop")
+
+    assert result.output is None
+    assert result.context.final_result is None
+    assert result.context.current_step == 2
 
 
 def test_agent_context_records_tool_events_and_final_result() -> None:
     context = ExecutionContext()
     generator = FakeGenerator(
         [
-            AssistantOutput("", (GeneratorToolCall("lookup", {"q": "x"}),)),
+            AssistantOutput("", (ToolCall(name="lookup", arguments={"q": "x"}),)),
             AssistantOutput("done"),
         ]
     )
     agent = Agent(LlmClient(generator), [tool("lookup", "found")])
 
-    assert agent.run("go", context=context) == "done"
+    result = agent.run("go", context=context)
+
+    assert result.output == "done"
+    assert result.context is context
 
     assert context.items() == [
         Message(role="user", content="go"),
-        AgentToolCall(tool_call_id="call_0_0", name="lookup", arguments={"q": "x"}),
+        ToolCall(tool_call_id="call_0", name="lookup", arguments={"q": "x"}),
         AgentToolResult(
-            tool_call_id="call_0_0",
+            tool_call_id="call_0",
             name="lookup",
             status="success",
             content=["found:x"],

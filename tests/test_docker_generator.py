@@ -368,6 +368,6 @@ def test_load_factory_rejects_invalid_path() -> None:
 
 
 def test_tool_call_dataclass_stays_importable_for_rpc_payloads() -> None:
-    call = ToolCall("compute", {"expression": "2 + 2"})
+    call = ToolCall(name="compute", arguments={"expression": "2 + 2"})
 
     assert call.name == "compute"
