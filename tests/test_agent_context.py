@@ -1,4 +1,4 @@
-from ..LLLM.agent_context import ExecutionContext, Message, AgentToolCall, ToolResult
+from ..LLLM.agent_context import ExecutionContext, Message, AgentToolCall, AgentToolResult
 
 
 def test_execution_context_records_and_flattens_events() -> None:
@@ -8,7 +8,7 @@ def test_execution_context_records_and_flattens_events() -> None:
     agent_items = [
         Message(role="assistant", content="checking"),
         AgentToolCall(tool_call_id="call_0_0", name="lookup", arguments={"q": "x"}),
-        ToolResult(
+        AgentToolResult(
             tool_call_id="call_0_0",
             name="lookup",
             status="success",

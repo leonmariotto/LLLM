@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from .agent_context import ContentItem, Message
 from .agent_context import AgentToolCall
-from .agent_context import ToolResult
+from .agent_context import AgentToolResult
 from .generator import (
     Generator,
     ChatMessage,
@@ -174,7 +174,7 @@ class LlmClient:
         )
 
 
-def _format_tool_result(result: ToolResult) -> str:
+def _format_tool_result(result: AgentToolResult) -> str:
     prefix_by_status: dict[Literal["success", "error"], str] = {
         "success": "Tool result",
         "error": "Tool error",

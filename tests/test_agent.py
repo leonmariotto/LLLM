@@ -3,7 +3,7 @@ from collections.abc import Sequence
 import pytest
 
 from ..LLLM.agent import Agent
-from ..LLLM.agent_context import ExecutionContext, Message, AgentToolCall, ToolResult
+from ..LLLM.agent_context import ExecutionContext, Message, AgentToolCall, AgentToolResult
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.generator import (
     AssistantOutput,
@@ -169,7 +169,7 @@ def test_agent_context_records_tool_events_and_final_result() -> None:
     assert context.items() == [
         Message(role="user", content="go"),
         AgentToolCall(tool_call_id="call_0_0", name="lookup", arguments={"q": "x"}),
-        ToolResult(
+        AgentToolResult(
             tool_call_id="call_0_0",
             name="lookup",
             status="success",

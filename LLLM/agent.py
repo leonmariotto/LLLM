@@ -5,7 +5,7 @@ Use LlmClient as backend, handle tool execution.
 Do context management.
 
 All the agent runtime is stored in a single entity ExecutionContext.
-Execution context contain a list of Event, which can be ToolResult,
+Execution context contain a list of Event, which can be AgentToolResult,
 ToolCall, or Message from user, system or assistant.
 
 This context is used to forge a LLMRequest, at this point we can do
@@ -28,7 +28,7 @@ from typing import cast
 
 from .agent_context import ContentItem, ExecutionContext, Message
 from .agent_context import AgentToolCall
-from .agent_context import ToolResult
+from .agent_context import AgentToolResult
 from .agent_llm import (
     LlmClient,
     LlmRequest,
@@ -153,7 +153,7 @@ class Agent:
         self,
         context: ExecutionContext,
         tool_calls: AgentToolCall | Sequence[AgentToolCall],
-    ) -> list[ToolResult]:
+    ) -> list[AgentToolResult]:
         """
         Execute tool calls and append their results to the context.
 
@@ -221,14 +221,14 @@ class Agent:
             raise ValueError("tool schema function must include a non-empty name")
         return name
 
-    def _execute_tool_call(self, tool_call: AgentToolCall) -> ToolResult:
+    def _execute_tool_call(self, tool_call: AgentToolCall) -> AgentToolResult:
         """
         Lookup in tool dictionary and execute tool.
-        Return ToolResult.
+        Return AgentToolResult.
         """
         tool = self._tools_by_name.get(tool_call.name)
         if tool is None:
-            return ToolResult(
+            return AgentToolResult(
                 tool_call_id=tool_call.tool_call_id,
                 name=tool_call.name,
                 status="error",
@@ -238,14 +238,14 @@ class Agent:
         try:
             result = tool.execute(cast(dict[str, object], tool_call.arguments))
         except Exception as error:
-            return ToolResult(
+            return AgentToolResult(
                 tool_call_id=tool_call.tool_call_id,
                 name=tool_call.name,
                 status="error",
                 content=[f"{tool_call.name!r} failed: {error}"],
             )
 
-        return ToolResult(
+        return AgentToolResult(
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             status="success",

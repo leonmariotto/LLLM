@@ -19,7 +19,12 @@ class Message(BaseModel):
 
 
 class AgentToolCall(BaseModel):
-    """LLM's request to execute a tool."""
+    """
+    Agent request to execute a tool.
+    The only difference with Generator ToolCall is the tool_call_id, used by
+    agent to differenciate tool calls.
+    LLM's output ToolCall, agent give it an id and it become AgentToolCall.
+    """
 
     type: Literal["tool_call"] = "tool_call"
     tool_call_id: str
@@ -27,11 +32,10 @@ class AgentToolCall(BaseModel):
     arguments: dict[str, Any]
 
 
-class ToolResult(BaseModel):
+class AgentToolResult(BaseModel):
     """
     Result from tool execution.
-    This is not returned by tools, its built by agent before feeding the
-    ExecutionContext.
+    Built by agent before feeding the ExecutionContext.
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -41,7 +45,7 @@ class ToolResult(BaseModel):
     content: list[Any]
 
 
-ContentItem = Message | AgentToolCall | ToolResult
+ContentItem = Message | AgentToolCall | AgentToolResult
 
 
 def _empty_content() -> list[ContentItem]:

@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 
-from ..LLLM.agent_context import Message, AgentToolCall, ToolResult
+from ..LLLM.agent_context import Message, AgentToolCall, AgentToolResult
 from ..LLLM.agent_llm import LlmClient, LlmRequest, build_messages
 from ..LLLM.generator import (
     AssistantOutput,
@@ -63,7 +63,7 @@ def test_build_messages_converts_context_items() -> None:
             Message(role="user", content="question"),
             Message(role="assistant", content="checking"),
             AgentToolCall(tool_call_id="call_2_0", name="lookup", arguments={"q": "x"}),
-            ToolResult(
+            AgentToolResult(
                 tool_call_id="call_2_0",
                 name="lookup",
                 status="success",
