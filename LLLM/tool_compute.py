@@ -15,6 +15,8 @@ import subprocess
 
 from .tool_common import Tool
 
+from loguru import logger
+
 _BC_TIMEOUT_SECONDS = 5
 _PI_PATTERN = re.compile(r"\bpi\b")
 
@@ -52,6 +54,7 @@ def compute_tool() -> Tool:
 def execute_compute(arguments: dict[str, object]) -> str:
     """Execute the compute tool with a ``{"expression": "..."}`` argument."""
     expression = arguments.get("expression")
+    logger.info("compute call ! expression=[{}]", expression)
     if not isinstance(expression, str):
         raise ValueError("expression must be a string")
     if not expression.strip():

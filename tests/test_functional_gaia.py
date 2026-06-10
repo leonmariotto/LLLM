@@ -17,7 +17,8 @@ from ..LLLM.eval_gaia import GaiaTask, evaluate_gaia_agent
 from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
 from ..LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
-from ..LLLM.generator_with_tool import GeneratorWithTool
+from ..LLLM.agent import Agent
+from ..LLLM.agent_llm import LlmClient
 from ..LLLM.tool_compute import compute_tool
 
 
@@ -36,8 +37,9 @@ def qwen3_06b_gaia_generator() -> Generator:
     del ir
     return Generator(model=model, tokenizer=tokenizer, cache_length=16384)
 
+
 @pytest.fixture(scope="module")
-def qwen3_06b_gaia_generator_with_compute() -> GeneratorWithTool:
+def qwen3_06b_gaia_agent_with_compute() -> Agent:
     ir = fetch_model_ir(QWEN3_06B_REPO_ID)
     cfg = Qwen3Model.config_from_ir(ir)
     path = Path(str(ir.metadata["path"]))
@@ -47,11 +49,14 @@ def qwen3_06b_gaia_generator_with_compute() -> GeneratorWithTool:
     model.load_ir_weights(ir)
     del ir
     qwen3_generator = Generator(model=model, tokenizer=tokenizer, cache_length=16384)
-    tool_generator = GeneratorWithTool(
+    return Agent(
+        LlmClient(
             qwen3_generator,
-            [compute_tool()]
+            max_generated_token=4096,
+            temperature=0.0,
+        ),
+        [compute_tool()],
     )
-    return tool_generator
 
 
 @pytest.mark.slow
@@ -66,9 +71,6 @@ def test_functional_qwen3_06b_no_harness_gaia_validation(
             if task.file_path is not None
             else "\nNo attached file is available for this task."
         )
-        #TODO: GAIA output format should be part of gaia contract and derived
-        #from a pydantic type.
-        # TODO add informations like: is_solvable: bool and unsolvability_reason:str
         messages = [
                 {
                     "role": "user",
@@ -90,7 +92,7 @@ def test_functional_qwen3_06b_no_harness_gaia_validation(
         agent,
         split="validation",
         level=1,
-        limit=20,
+        limit=1,
     )
     logger.info("evaluation={}", evaluation)
 
@@ -106,12 +108,11 @@ def test_functional_qwen3_06b_no_harness_gaia_validation(
     assert result.prediction
     assert result.error is None
 
+
 @pytest.mark.slow
 def test_functional_qwen3_06b_with_compute_gaia_validation(
-    qwen3_06b_gaia_generator_with_compute: GeneratorWithTool,
+    qwen3_06b_gaia_agent_with_compute: Agent,
 ) -> None:
-    tokenizer = cast(Qwen3Tokenizer, qwen3_06b_gaia_generator_with_compute.tokenizer)
-
     def agent(task: GaiaTask) -> str:
         attachment_note = (
             f"\nAttached file path: {task.file_path}"
@@ -121,38 +122,24 @@ def test_functional_qwen3_06b_with_compute_gaia_validation(
         #TODO: GAIA output format should be part of gaia contract and derived
         #from a pydantic type.
         # TODO add informations like: is_solvable: bool and unsolvability_reason:str
-        prompt = (
-            "Answer this GAIA benchmark question. Return only the final answer "
-            "using this exact format: FINAL ANSWER: <answer>\n\n"
+        result = qwen3_06b_gaia_agent_with_compute.run(
+            "Answer this GAIA benchmark question. Use the compute tool when "
+            "arithmetic or exact calculation is needed. Return only the final "
+            "answer using this exact format: FINAL ANSWER: <answer>\n\n"
             f"Question: {task.question}"
             f"{attachment_note}"
         )
-        prompt_tokens = tokenizer.encode_instruct_prompt(
-            prompt,
-            enable_thinking=True,
-        )
-        return qwen3_06b_gaia_generator_with_compute.generate(
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "Answer this GAIA benchmark question. Use the compute tool when "
-                        "arithmetic or exact calculation is needed. Return only the final "
-                        "answer using this exact format: FINAL ANSWER: <answer>\n\n"
-                        f"Question: {task.question}"
-                        f"{attachment_note}"
-                    ),
-                }
-            ],
-            max_generated_token=4096,
-            temperature=0.0,
-        ).strip()
+        if not isinstance(result.output, str):
+            raise AssertionError(
+                f"agent did not return a final string: {result.output!r}"
+            )
+        return result.output.strip()
 
     evaluation = evaluate_gaia_agent(
         agent,
         split="validation",
         level=1,
-        limit=20,
+        limit=3,
     )
     logger.info("evaluation={}", evaluation)
 

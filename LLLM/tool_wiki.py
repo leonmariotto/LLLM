@@ -20,6 +20,8 @@ from urllib.parse import quote, unquote, urlparse
 
 import requests
 
+from loguru import logger
+
 from .tool_common import Tool
 
 _DEFAULT_WIKI = "https://en.wikipedia.org"
@@ -180,6 +182,7 @@ class _WikiExecutor:
 
     def execute(self, arguments: dict[str, object]) -> str:
         action = arguments.get("action")
+        logger.info("running wiki tool action={}", action)
         if not isinstance(action, str):
             raise ValueError("action must be a string")
         if action == "search":
@@ -188,17 +191,21 @@ class _WikiExecutor:
             max_results = _optional_int(arguments, "max_results", default=5)
             if max_results < 1 or max_results > 10:
                 raise ValueError("max_results must be between 1 and 10")
+            logger.info("search: query={}", query)
             return _execute_search(query, wiki, max_results)
         if action == "open":
             target = _open_target(arguments)
             max_chars = _validated_max_chars(arguments)
+            logger.info("open: target={}", target)
             return self._execute_open(target, max_chars)
         if action == "search_in_page":
             target = _open_target(arguments)
             query = _require_non_empty_string(arguments, "query")
             max_chars = _validated_max_chars(arguments)
+            logger.info("search_in_page: target={} query={}", target, query)
             return self._execute_search_in_page(target, query, max_chars)
         if action == "read_chunk":
+            logger.info("read_chunk")
             max_chars = _validated_max_chars(arguments)
             return self._read_chunk(max_chars)
         raise ValueError(
@@ -254,7 +261,7 @@ _DEFAULT_EXECUTOR = _WikiExecutor()
 
 
 def _execute_search(
-    query: str, wiki: str, max_results: int, include_snippet: bool = True
+    query: str, wiki: str, max_results: int, include_snippet: bool = False
 ) -> str:
     payload = _api_get(
         wiki,
@@ -294,8 +301,8 @@ def _execute_search(
     lines: list[str] = []
     for index, result in enumerate(results, start=1):
         lines.append(f"{index}. {result.title}\nURL: {result.url}")
-        # if result.snippet and include_snippet is True:
-        #     lines.append(f"Snippet: {result.snippet}")
+        if result.snippet and include_snippet is True:
+            lines.append(f"Snippet: {result.snippet}")
     if lines != []:
         lines.append(
             "Search results only list candidate pages. You must call "
