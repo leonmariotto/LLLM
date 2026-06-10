@@ -54,19 +54,19 @@ class Agent:
         *,
         instruction: str = "",
         instructions: str | Sequence[str] | None = None,
-        max_tool_rounds: int = 8,
+        max_step: int = 8,
     ) -> None:
         if instruction and instructions is not None:
             raise ValueError("use either instruction or instructions, not both")
-        if max_tool_rounds < 0:
-            raise ValueError("max_tool_rounds must be non-negative")
+        if max_step < 0:
+            raise ValueError("max_step must be non-negative")
         self.llm = llm
         self.tools = tuple(tools)
         self._tools_by_name = self._index_tools(self.tools)
         self.system_instructions = self._normalize_instructions(
             instructions if instructions is not None else instruction
         )
-        self.max_tool_rounds = max_tool_rounds
+        self.max_step = max_step
 
     def run(
         self,
@@ -94,10 +94,9 @@ class Agent:
 
         while (
             execution_context.final_result is None
-            and execution_context.current_step < self.max_tool_rounds
+            and execution_context.current_step < self.max_step
         ):
             _ = self.step(execution_context)
-            self.step(execution_context)
 
             # Check if the last event is a final response
             if execution_context.events:
@@ -106,6 +105,8 @@ class Agent:
                     execution_context.final_result = self._extract_final_result(
                         last_event
                     )
+        if execution_context.current_step >= self.max_step:
+            logger.warning("reached max_tool_round, return final_result=None")
 
         return AgentResult(
             output=execution_context.final_result, context=execution_context
@@ -132,12 +133,12 @@ class Agent:
                 return item.content
         return "Woops!!"
 
-    def step(self, context: ExecutionContext) -> AgentResult | None:
+    def step(self, context: ExecutionContext) -> None:
         """
         Perform one ReAct think-act cycle.
 
         @param context: execution context to update.
-        @return final assistant answer when the run is complete, otherwise None.
+        @return None.
         """
         # Prepare what to send to the LLM
         request = LlmRequest(

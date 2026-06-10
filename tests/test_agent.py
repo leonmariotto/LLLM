@@ -61,7 +61,7 @@ def tool(name: str, result: str | Exception) -> Tool:
 
 def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     context = ExecutionContext()
-    generator = FakeGenerator([AssistantOutput("thinking"), AssistantOutput("finished")])
+    generator = FakeGenerator([AssistantOutput("finished")])
     llm = LlmClient(generator, max_generated_token=11, temperature=0.2)
     agent = Agent(llm, [], instructions="be brief")
 
@@ -72,18 +72,12 @@ def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     assert context.final_result == "finished"
     assert context.messages() == [
         Message(role="user", content="question"),
-        Message(role="assistant", content="thinking"),
         Message(role="assistant", content="finished"),
     ]
     assert generator.messages == [
         [
             {"role": "system", "content": "be brief"},
             {"role": "user", "content": "question"},
-        ],
-        [
-            {"role": "system", "content": "be brief"},
-            {"role": "user", "content": "question"},
-            {"role": "assistant", "content": "thinking"},
         ],
     ]
 
@@ -159,13 +153,13 @@ def test_agent_returns_without_final_result_when_tool_round_limit_is_exhausted()
             AssistantOutput("", (ToolCall(name="again", arguments={}),)),
         ]
     )
-    agent = Agent(LlmClient(generator), [tool("again", "loop")], max_tool_rounds=1)
+    agent = Agent(LlmClient(generator), [tool("again", "loop")], max_step=1)
 
     result = agent.run("loop")
 
     assert result.output is None
     assert result.context.final_result is None
-    assert result.context.current_step == 2
+    assert result.context.current_step == 1
 
 
 def test_agent_context_records_tool_events_and_final_result() -> None:
