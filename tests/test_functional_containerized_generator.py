@@ -8,28 +8,29 @@ import pytest
 
 pytestmark = pytest.mark.slow
 
-from LLLM.docker_generator import (
+from LLLM.containerized_agent_client import (
     DEFAULT_CONTAINER_HF_CACHE_PATH,
     DEFAULT_CONTAINER_UV_CACHE_PATH,
     DEFAULT_HOST_HF_CACHE_PATH,
     DEFAULT_HOST_UV_CACHE_PATH,
-    ContainerizedGeneratorWithTool,
+    ContainerizedAgent,
     DockerMount,
 )
+from LLLM.agent import Agent
+from LLLM.agent_llm import LlmClient
 from LLLM.fetch import fetch_model_ir
 from LLLM.generator import Generator
-from LLLM.generator_with_tool import GeneratorWithTool
 from LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
 from LLLM.tool_common import Tool
 from LLLM.tool_python import execute_python, python_tool
 
 
 QWEN3_06B_REPO_ID = "Qwen/Qwen3-0.6B"
-CONTAINER_TMP_PATH = "/tmp/lllm-containerized-generator"
+CONTAINER_TMP_PATH = "/tmp/lllm-containerized-agent"
 
 
-def create_qwen3_06b_agent(*, marker_path: str | None = None) -> GeneratorWithTool:
-    """Factory imported by ``LLLM.generator_container_worker`` inside Docker."""
+def create_qwen3_06b_agent(*, marker_path: str | None = None) -> Agent:
+    """Factory imported by ``LLLM.containerized_agent_server`` inside Docker."""
     ir = fetch_model_ir(QWEN3_06B_REPO_ID)
     cfg = Qwen3Model.config_from_ir(ir)
     path = Path(str(ir.metadata["path"]))
@@ -46,8 +47,14 @@ def create_qwen3_06b_agent(*, marker_path: str | None = None) -> GeneratorWithTo
             marker.write_text(json.dumps(arguments, sort_keys=True), encoding="utf-8")
         return "containerized-qwen3-tool-ok"
 
-    return GeneratorWithTool(
-        generator,
+    return Agent(
+        LlmClient(
+            generator,
+            max_generated_token=1024,
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+        ),
         [
             Tool(
                 schema={
@@ -73,12 +80,12 @@ def create_qwen3_06b_agent(*, marker_path: str | None = None) -> GeneratorWithTo
                 execute=container_marker,
             )
         ],
-        max_tool_rounds=3,
+        max_step=3,
     )
 
 
-def create_qwen3_06b_python_agent(*, marker_path: str | None = None) -> GeneratorWithTool:
-    """Factory imported by ``LLLM.generator_container_worker`` inside Docker."""
+def create_qwen3_06b_python_agent(*, marker_path: str | None = None) -> Agent:
+    """Factory imported by ``LLLM.containerized_agent_server`` inside Docker."""
     ir = fetch_model_ir(QWEN3_06B_REPO_ID)
     cfg = Qwen3Model.config_from_ir(ir)
     path = Path(str(ir.metadata["path"]))
@@ -104,10 +111,16 @@ def create_qwen3_06b_python_agent(*, marker_path: str | None = None) -> Generato
             )
         return result
 
-    return GeneratorWithTool(
-        generator,
+    return Agent(
+        LlmClient(
+            generator,
+            max_generated_token=1024,
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+        ),
         [Tool(schema=base_tool.schema, execute=record_python)],
-        max_tool_rounds=3,
+        max_step=3,
     )
 
 
@@ -117,7 +130,7 @@ def test_functional_qwen3_06b_agent_runs_inside_container(tmp_path: Path) -> Non
     container_tmp = f"{CONTAINER_TMP_PATH}/{tmp_path.name}"
     marker_path = f"{container_tmp}/tool-call.json"
 
-    with ContainerizedGeneratorWithTool(
+    with ContainerizedAgent(
         "tests.test_functional_containerized_generator:create_qwen3_06b_agent",
         factory_kwargs={"marker_path": marker_path},
         mount_points=[
@@ -129,30 +142,20 @@ def test_functional_qwen3_06b_agent_runs_inside_container(tmp_path: Path) -> Non
         startup_timeout_seconds=3000,
         auto_remove=False,
     ) as agent:
-        response = agent.generate(
-            [
-                {
-                    "role": "user",
-                    "content": (
-                        "/no_think\n"
-                        "Call the container_marker tool exactly once with "
-                        '{"proof": "docker-worker-qwen3"}. First reply only '
-                        "with a valid <tool_call></tool_call> block. After the "
-                        "tool response, answer with the tool response exactly "
-                        "and no extra text."
-                    ),
-                }
-            ],
-            max_generated_token=1024,
-            temperature=0.6,
-            top_p=0.95,
-            top_k=20,
+        response = agent.run(
+            "/no_think\n"
+            "Call the container_marker tool exactly once with "
+            '{"proof": "docker-worker-qwen3"}. First reply only '
+            "with a valid <tool_call></tool_call> block. After the "
+            "tool response, answer with the tool response exactly "
+            "and no extra text."
         )
 
     assert (tmp_path / "tool-call.json").read_text(encoding="utf-8") == (
         '{"proof": "docker-worker-qwen3"}'
     )
-    assert "containerized-qwen3-tool-ok" in response
+    assert isinstance(response.output, str)
+    assert "containerized-qwen3-tool-ok" in response.output
 
 
 @pytest.mark.slow
@@ -208,7 +211,7 @@ def test_functional_qwen3_06b_containerized_python_tool_executes_real_python(
     container_tmp = f"{CONTAINER_TMP_PATH}/{tmp_path.name}"
     marker_path = f"{container_tmp}/python-tool-call.json"
 
-    with ContainerizedGeneratorWithTool(
+    with ContainerizedAgent(
         "tests.test_functional_containerized_generator:create_qwen3_06b_python_agent",
         factory_kwargs={"marker_path": marker_path},
         mount_points=[
@@ -220,22 +223,12 @@ def test_functional_qwen3_06b_containerized_python_tool_executes_real_python(
         startup_timeout_seconds=3000,
         auto_remove=False,
     ) as agent:
-        response = agent.generate(
-            [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_generated_token=1024,
-            temperature=0.6,
-            top_p=0.95,
-            top_k=20,
-        )
+        response = agent.run(prompt)
 
     record = json.loads((tmp_path / "python-tool-call.json").read_text("utf-8"))
     assert "Exit code: 0" in record["result"]
-    assert expected_in_response in response
+    assert isinstance(response.output, str)
+    assert expected_in_response in response.output
 
 
 def _require_docker_client() -> Any:

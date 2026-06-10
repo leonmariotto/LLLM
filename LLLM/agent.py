@@ -106,7 +106,7 @@ class Agent:
                         last_event
                     )
         if execution_context.current_step >= self.max_step:
-            logger.warning("reached max_tool_round, return final_result=None")
+            logger.warning("reached max_step, return final_result=None")
 
         return AgentResult(
             output=execution_context.final_result, context=execution_context

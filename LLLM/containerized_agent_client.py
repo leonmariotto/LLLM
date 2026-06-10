@@ -1,15 +1,15 @@
 """
-Host-side proxy for running ``GeneratorWithTool`` inside a container.
+Host-side proxy for running ``Agent`` inside a container.
 
-The caller owns this proxy outside the container.  The real generator is
+The caller owns this proxy outside the container.  The real agent is
 constructed by an importable factory inside a long-lived Docker/Podman
-container, and every ``generate`` call is transmitted over HTTP to that worker.
+container, and every ``run`` call is transmitted over HTTP to that worker.
 
 To use the caller must define a factory function that create the
-GeneratorWithTool with optional serializable arguments. The factory function
-will be executed in the newly created container.
-We can't serialize an initialized instance of GeneratorWithTool to a container,
-so the GeneratorWithTool instance have to be created in-place.
+Agent with optional serializable arguments. The factory function will be
+executed in the newly created container. We can't serialize an initialized
+instance of Agent to a container, so the Agent instance have to be created
+in-place.
 
 The uv cache and project environment are both placed under a mounted cache path
 so repeated container runs do not recreate the heavyweight ML environment.
@@ -33,11 +33,11 @@ from typing import Any, cast
 import requests
 from loguru import logger
 
-from .generator import ChatMessage
+from .agent_context import AgentResult, ExecutionContext, Event
 
 # Basic debian with network utility needed to download uv.
 DEFAULT_DOCKER_IMAGE = "buildpack-deps:bookworm-curl"
-DEFAULT_CONTAINER_REPO_PATH = "/workspace/LLLM"
+DEFAULT_CONTAINER_REPO_PATH = "/tmp/lllm-repo/LLLM"
 DEFAULT_CONTAINER_REPO_SOURCE_PATH = "/workspace/LLLM-src"
 DEFAULT_REPO_PATH = Path(__file__).resolve().parents[1]
 DEFAULT_CONTAINER_USER = "1000:1000"
@@ -74,40 +74,40 @@ class DockerMount:
         }
 
 
-class ContainerizedGeneratorWithTool:
-    """Proxy ``GeneratorWithTool.generate`` calls into a long-lived container.
+class ContainerizedAgent:
+    """Proxy ``Agent.run`` calls into a long-lived container.
 
     The host process owns this lightweight proxy. The real
-    ``GeneratorWithTool`` is built inside the container by importing
-    ``factory`` and calling it with ``factory_kwargs``. Requests to
-    :meth:`generate` are serialized to JSON, sent to the worker HTTP server in
-    the container, executed there, and returned as a string.
+    ``Agent`` is built inside the container by importing ``factory`` and calling
+    it with ``factory_kwargs``. Requests to :meth:`run` are serialized to JSON,
+    sent to the worker HTTP server in the container, executed there, and
+    returned as an ``AgentResult``.
 
     ``factory`` must use ``"module:callable"`` syntax. For example,
     ``"tests.test_functional_containerized_generator:create_qwen3_06b_agent"``
     imports ``tests.test_functional_containerized_generator`` inside the
     container and calls ``create_qwen3_06b_agent(**factory_kwargs)``. The
-    callable must return a ``GeneratorWithTool`` instance and must be importable
-    from the container's working directory.
+    callable must return an ``Agent`` instance and must be importable from the
+    container's working directory.
 
     Args:
-        factory: Import path for the container-side generator factory in
+        factory: Import path for the container-side agent factory in
             ``"module:callable"`` format.
         factory_kwargs: JSON-serializable keyword arguments passed to the
             factory inside the container.
         docker_image: Docker image used to run the worker. The image must have
             ``uv`` available because the worker command is ``uv run python -m
-            LLLM.generator_container_worker``.
+            LLLM.containerized_agent_server``.
         mount_points: Extra bind mounts made available to the container, for
             example model caches or test scratch directories.
         repo_path: Host checkout mounted read-only at ``/workspace/LLLM-src``
-            inside the container, then copied to ``/workspace/LLLM`` at
+            inside the container, then copied to a writable path at
             container startup. Defaults to this repository.
         docker_base_url: Optional Docker daemon URL passed to
             ``docker.DockerClient``. When omitted, ``docker.from_env()`` is
             used.
         client: Optional prebuilt Docker client, mainly useful for tests.
-        timeout_seconds: HTTP timeout for each ``generate`` request.
+        timeout_seconds: HTTP timeout for each ``run`` request.
         startup_timeout_seconds: Maximum time to wait for the worker health
             endpoint after starting the container.
         worker_port: Host port used by the worker. When omitted, a free local
@@ -163,7 +163,7 @@ class ContainerizedGeneratorWithTool:
         self._container_log_offset = 0
         self._container_log_file_path: Path | None = None
 
-    def __enter__(self) -> ContainerizedGeneratorWithTool:
+    def __enter__(self) -> ContainerizedAgent:
         self.start()
         return self
 
@@ -179,7 +179,7 @@ class ContainerizedGeneratorWithTool:
     def start(self) -> None:
         """Start the worker container if it is not already running.
 
-        Called in every generate().
+        Called in every run().
 
         The repository is mounted read-only into the container and copied to a
         writable container-local working tree, the factory configuration is
@@ -197,13 +197,13 @@ class ContainerizedGeneratorWithTool:
             self.worker_port = _find_free_local_port()
         client = self._get_client()
         logger.info(
-            "Starting GeneratorWithTool container image={} factory={} port={}",
+            "Starting Agent container image={} factory={} port={}",
             self.docker_image,
             self.factory,
             self.worker_port,
         )
         uv_version = _detect_host_uv_version()
-        logger.info("Installing uv {} in generator container", uv_version)
+        logger.info("Installing uv {} in agent container", uv_version)
         self._container_log_offset = 0
         self._container_log_file_path = self._create_container_log_file()
         self._container = client.containers.run(
@@ -213,12 +213,12 @@ class ContainerizedGeneratorWithTool:
             remove=self.auto_remove,
             network_mode="host",
             user=self.container_user,
-            working_dir=str(Path(DEFAULT_CONTAINER_REPO_PATH).parent),
+            working_dir="/tmp",
             environment={
-                "LLLM_GENERATOR_FACTORY": self.factory,
-                "LLLM_GENERATOR_FACTORY_KWARGS": json.dumps(self.factory_kwargs),
-                "LLLM_GENERATOR_WORKER_HOST": "127.0.0.1",
-                "LLLM_GENERATOR_WORKER_PORT": str(self.worker_port),
+                "LLLM_AGENT_FACTORY": self.factory,
+                "LLLM_AGENT_FACTORY_KWARGS": json.dumps(self.factory_kwargs),
+                "LLLM_AGENT_WORKER_HOST": "127.0.0.1",
+                "LLLM_AGENT_WORKER_PORT": str(self.worker_port),
                 "HF_HOME": DEFAULT_CONTAINER_HF_CACHE_PATH,
                 "UV_CACHE_DIR": DEFAULT_CONTAINER_UV_CACHE_PATH,
                 "UV_PROJECT_ENVIRONMENT": (
@@ -240,58 +240,31 @@ class ContainerizedGeneratorWithTool:
         container = self._container
         self._emit_new_container_logs()
         self._container = None
-        logger.info("Stopping GeneratorWithTool container")
+        logger.info("Stopping Agent container")
         container.stop(timeout=5)
 
-    def generate(
+    def run(
         self,
-        messages: Sequence[ChatMessage],
-        *,
-        stop_at_eos: bool = True,
-        max_generated_token: int = 20,
-        cache_length: int | None = None,
-        temperature: float = 0.0,
-        top_k: int | None = None,
-        top_p: float | None = None,
-    ) -> str:
-        """Forward a generation request into the container.
+        prompt: str,
+    ) -> AgentResult:
+        """Forward an agent run request into the container.
 
         Args:
-            messages: Chat messages accepted by ``GeneratorWithTool.generate``.
-                Each message is JSON-serialized and sent to the worker.
-            stop_at_eos: Stop generation when the tokenizer EOS token is
-                produced.
-            max_generated_token: Maximum number of new tokens to generate for
-                each assistant turn.
-            cache_length: Optional per-request KV cache length override.
-            temperature: Sampling temperature. ``0.0`` uses deterministic
-                greedy decoding.
-            top_k: Optional top-k sampling cutoff.
-            top_p: Optional nucleus sampling cutoff. The underlying generator
-                uses this instead of ``top_k`` when provided.
+            prompt: User prompt passed to ``Agent.run`` in the container.
 
         Returns:
-            Final assistant response returned by the container-side
-            ``GeneratorWithTool`` after any tool rounds.
+            AgentResult returned by the container-side ``Agent``.
 
         Raises:
             RuntimeError: If the worker returns an HTTP error, a serialized
                 remote exception, or an invalid response payload.
         """
         self.start()
-        payload: dict[str, object] = {
-            "messages": list(messages),
-            "stop_at_eos": stop_at_eos,
-            "max_generated_token": max_generated_token,
-            "cache_length": cache_length,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
-        }
-        logger.info("Forwarding generate request to container")
+        payload: dict[str, object] = {"prompt": prompt}
+        logger.info("Forwarding agent run request to container")
         try:
             response = requests.post(
-                self._url("/generate"),
+                self._url("/run"),
                 json=payload,
                 timeout=self.timeout_seconds,
             )
@@ -299,10 +272,10 @@ class ContainerizedGeneratorWithTool:
             self._emit_new_container_logs()
         if response.status_code != 200:
             raise RuntimeError(
-                f"container generate request failed with HTTP {response.status_code}: "
+                f"container run request failed with HTTP {response.status_code}: "
                 f"{response.text}"
             )
-        return _decode_generate_response(cast(object, response.json()))
+        return _decode_run_response(cast(object, response.json()))
 
     def _get_client(self) -> Any:
         if self._client is not None:
@@ -356,12 +329,12 @@ class ContainerizedGeneratorWithTool:
         while time.monotonic() < deadline:
             if not self._container_is_running():
                 self._emit_new_container_logs()
-                raise RuntimeError("generator container exited before becoming ready")
+                raise RuntimeError("agent container exited before becoming ready")
             try:
                 response = requests.get(self._url("/health"), timeout=1)
                 if response.status_code == 200:
                     self._emit_new_container_logs()
-                    logger.info("GeneratorWithTool container is ready")
+                    logger.info("Agent container is ready")
                     return
             except requests.RequestException as error:
                 last_error = error
@@ -372,7 +345,7 @@ class ContainerizedGeneratorWithTool:
             time.sleep(0.2)
         self._emit_new_container_logs()
         raise RuntimeError(
-            f"generator container did not become ready within "
+            f"agent container did not become ready within "
             f"{self.startup_timeout_seconds}s: {last_error}"
         )
 
@@ -382,7 +355,7 @@ class ContainerizedGeneratorWithTool:
         try:
             raw_logs = self._container.logs(stdout=True, stderr=True)
         except Exception as error:
-            logger.debug("Could not read generator container logs: {}", error)
+            logger.debug("Could not read agent container logs: {}", error)
             return
         if isinstance(raw_logs, str):
             raw_bytes = raw_logs.encode("utf-8", errors="replace")
@@ -405,9 +378,9 @@ class ContainerizedGeneratorWithTool:
         log_dir = self.repo_path.expanduser().resolve() / DEFAULT_CONTAINER_LOG_DIR_NAME
         log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        path = log_dir / f"containerized-generator-{timestamp}.log"
+        path = log_dir / f"containerized-agent-{timestamp}.log"
         path.touch()
-        logger.info("Recording generator container logs to {}", path)
+        logger.info("Recording agent container logs to {}", path)
         return path
 
     def _append_container_log_file(self, logs: bytes) -> None:
@@ -418,7 +391,7 @@ class ContainerizedGeneratorWithTool:
                 log_file.write(logs)
         except OSError as error:
             logger.warning(
-                "Could not write generator container log file {}: {}",
+                "Could not write agent container log file {}: {}",
                 self._container_log_file_path,
                 error,
             )
@@ -444,13 +417,13 @@ class ContainerizedGeneratorWithTool:
         return f"http://127.0.0.1:{self.worker_port}{path}"
 
 
-def _decode_generate_response(payload: object) -> str:
+def _decode_run_response(payload: object) -> AgentResult:
     if not isinstance(payload, dict):
         raise RuntimeError("container returned invalid JSON payload")
     payload_dict = cast(dict[str, object], payload)
     result = payload_dict.get("result")
-    if isinstance(result, str):
-        return result
+    if isinstance(result, dict):
+        return _decode_agent_result(cast(dict[str, object], result))
     error = payload_dict.get("error")
     if isinstance(error, dict):
         error_dict = cast(dict[str, object], error)
@@ -460,7 +433,46 @@ def _decode_generate_response(payload: object) -> str:
             logger.debug("Remote container traceback:\n{}", traceback)
         if isinstance(message, str):
             raise RuntimeError(message)
-    raise RuntimeError("container returned invalid generate response")
+    raise RuntimeError("container returned invalid run response")
+
+
+def _decode_agent_result(payload: dict[str, object]) -> AgentResult:
+    context_payload = payload.get("context")
+    if not isinstance(context_payload, dict):
+        raise RuntimeError("container returned invalid agent context")
+    return AgentResult(
+        output=payload.get("output"),
+        context=_decode_execution_context(cast(dict[str, object], context_payload)),
+        status=str(payload.get("status", "complete")),
+    )
+
+
+def _decode_execution_context(payload: dict[str, object]) -> ExecutionContext:
+    events_payload = payload.get("events", [])
+    if not isinstance(events_payload, list):
+        raise RuntimeError("container returned invalid context events")
+    events = []
+    for event_payload in events_payload:
+        if not isinstance(event_payload, dict):
+            raise RuntimeError("container returned invalid context event")
+        events.append(Event.model_validate(event_payload))
+    execution_id = payload.get("execution_id")
+    current_step = payload.get("current_step", 0)
+    state = payload.get("state", {})
+    final_result = payload.get("final_result")
+    if not isinstance(execution_id, str):
+        raise RuntimeError("container returned invalid context execution_id")
+    if isinstance(current_step, bool) or not isinstance(current_step, int):
+        raise RuntimeError("container returned invalid context current_step")
+    if not isinstance(state, dict):
+        raise RuntimeError("container returned invalid context state")
+    return ExecutionContext(
+        execution_id=execution_id,
+        events=events,
+        current_step=current_step,
+        state=cast(dict[str, Any], state),
+        final_result=final_result,
+    )
 
 
 def _find_free_local_port() -> int:
@@ -504,6 +516,7 @@ def _container_boot_command(uv_version: str) -> list[str]:
                 'export PATH="$UV_INSTALL_DIR:$PATH"',
                 'mkdir -p "$HOME" "$UV_INSTALL_DIR"',
                 "echo '[lllm-boot] copying repository'",
+                f"mkdir -p {Path(DEFAULT_CONTAINER_REPO_PATH).parent}",
                 f"rm -rf {DEFAULT_CONTAINER_REPO_PATH}",
                 (
                     f"cp -R {DEFAULT_CONTAINER_REPO_SOURCE_PATH} "
@@ -517,7 +530,7 @@ def _container_boot_command(uv_version: str) -> list[str]:
                 "echo '[lllm-boot] uv sync starting'",
                 "uv sync",
                 "echo '[lllm-boot] worker starting'",
-                "uv run --no-sync python -m LLLM.generator_container_worker",
+                "uv run --no-sync python -m LLLM.containerized_agent_server",
             ]
         ),
     ]

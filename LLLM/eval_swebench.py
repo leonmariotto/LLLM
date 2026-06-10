@@ -7,13 +7,13 @@ workspace for each task, invokes a caller-provided agent, applies the task test
 patch, runs tests, and records JSONL results.
 
 The containerization layer is required for running SWE-bench tests on produced
-code, so tool containerization alone is not enough. Use
-ContainerizedGeneratorWithTool to isolate tool execution.
+code, so tool containerization alone is not enough. Use ContainerizedAgent to
+isolate tool execution.
 
 DockerSwebenchRunner clones the repository into a mounted volume:
 "{host_root}/repo" -> "/workspace/repo". The agent runs in this Python process
 against the host path and must modify the repository directly.
-"{host_root}/repo" need to be available to ContainerizedGeneratorWithTool.
+"{host_root}/repo" need to be available to ContainerizedAgent.
 
 WIP: to be updated when I'll have a real agent capable of doing SWE-bench tests.
 """
