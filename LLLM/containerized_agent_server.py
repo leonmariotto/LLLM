@@ -159,11 +159,12 @@ def _jsonable(value: object) -> object:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")  # type: ignore[no-any-return, attr-defined]
     if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
+        typed_value = cast(dict[object, object], value)
+        return {str(key): _jsonable(item) for key, item in typed_value.items()}
     if isinstance(value, list):
-        return [_jsonable(item) for item in value]
+        return [_jsonable(item) for item in cast(list[object], value)]
     if isinstance(value, tuple):
-        return [_jsonable(item) for item in value]
+        return [_jsonable(item) for item in cast(tuple[object, ...], value)]
     return value
 
 

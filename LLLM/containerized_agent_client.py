@@ -451,11 +451,13 @@ def _decode_execution_context(payload: dict[str, object]) -> ExecutionContext:
     events_payload = payload.get("events", [])
     if not isinstance(events_payload, list):
         raise RuntimeError("container returned invalid context events")
-    events = []
-    for event_payload in events_payload:
+    events_payload_list = cast(list[object], events_payload)
+    events: list[Event] = []
+    for event_payload in events_payload_list:
         if not isinstance(event_payload, dict):
             raise RuntimeError("container returned invalid context event")
-        events.append(Event.model_validate(event_payload))
+        event_dict = cast(dict[str, object], event_payload)
+        events.append(Event.model_validate(event_dict))
     execution_id = payload.get("execution_id")
     current_step = payload.get("current_step", 0)
     state = payload.get("state", {})
@@ -466,6 +468,8 @@ def _decode_execution_context(payload: dict[str, object]) -> ExecutionContext:
         raise RuntimeError("container returned invalid context current_step")
     if not isinstance(state, dict):
         raise RuntimeError("container returned invalid context state")
+    if final_result is not None and not isinstance(final_result, str):
+        raise RuntimeError("container returned invalid context final_result")
     return ExecutionContext(
         execution_id=execution_id,
         events=events,
