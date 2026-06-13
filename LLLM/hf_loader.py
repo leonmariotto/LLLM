@@ -1,6 +1,6 @@
 """
 Hugging Face artifact loader that produces ``ModelIR``.
-HF format parser, provide only decode functions.
+Only decode function (only HF -> IR, no IR -> HF)
 """
 
 from __future__ import annotations

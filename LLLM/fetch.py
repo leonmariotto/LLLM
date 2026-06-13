@@ -13,6 +13,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Callable, cast
 
+from .embedding_model_ir import EmbeddingModelIR
 from .model_ir import ModelIR
 from .quantization import WeightMode
 
@@ -150,5 +151,61 @@ def _download_snapshot(
         revision=revision,
         local_files_only=local_files_only,
         allow_patterns=allow_patterns,
+    )
+    return Path(path)
+
+
+def fetch_embedding_model_ir(
+    repo_id: str,
+    *,
+    revision: str | None = None,
+    local_files_only: bool = False,
+) -> EmbeddingModelIR:
+    """
+    Fetch or locate an embedding model repository and parse it into IR.
+
+    Args:
+        repo_id: Hugging Face repository id or local filesystem path.
+        revision: Optional Hugging Face revision to download.
+        local_files_only: Restrict downloads to the Hugging Face cache.
+
+    Returns:
+        Source-independent embedding model IR.
+    """
+    from .hf_embedding_loader import load_hf_embedding_model_ir
+
+    local_path = Path(repo_id).expanduser()
+    if local_path.exists():
+        return load_hf_embedding_model_ir(local_path)
+    path = _download_embedding_snapshot(
+        repo_id,
+        revision=revision,
+        local_files_only=local_files_only,
+    )
+    return load_hf_embedding_model_ir(Path(path).expanduser())
+
+
+def _download_embedding_snapshot(
+    repo_id: str,
+    *,
+    revision: str | None,
+    local_files_only: bool,
+) -> Path:
+    hf_hub = cast(Any, import_module("huggingface_hub"))
+    download = cast(Callable[..., str], hf_hub.snapshot_download)
+    logging.debug("embedding repo_id=%s revision=%s", repo_id, revision)
+    path = download(
+        repo_id=repo_id,
+        revision=revision,
+        local_files_only=local_files_only,
+        allow_patterns=[
+            "config.json",
+            "modules.json",
+            "1_Pooling/config.json",
+            "*.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+        ],
     )
     return Path(path)

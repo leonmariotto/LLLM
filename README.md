@@ -125,12 +125,11 @@ space before storing them in the KV cache.
 - Improve output metrics. Use sklearn/evaluate to add metrics.
 - Add an optional cache to detect specialized neural regions activated for tasks.
 - bitsandbytes for memory pressure
-- Do a pass of documentation on docstring models because some has been dropped by refactor.
 - Add a training app that exports native IR checkpoints and persists optimizer/scheduler state for training resumption.
 - Add Hugging Face and GGUF exporters for distributing fine-tuned native IR checkpoints outside this project.
 
-- Tools support ! WIP
-- Integrate GAIA dataset in eval.py.
+- create EmbeddingDB: function to produce, load and search into embedding database. + an app to use it.
+
 - litellm completion have a response_format variable that define the expected
 structured output. This must be a prompt formatting technics, see with current
 Tokenizer what we can do. Using pydantic it's handy because we can generate a JSon schema from a pydantic type easily.
@@ -167,3 +166,28 @@ Here's some technics to do that :
     - Define when not use tool : "Do not search for timeless information,
         fundamental concepts, definitions, or well- established technical facts."
     - Provide concrete examples.
+
+## Embedded models inference
+
+A causal LLM answer :
+```
+Given this prefix, what would be the next tokens ?
+```
+An embedding model answer:
+```
+Given this whole text, what vector represent it's meaning ?
+```
+Causal LLM are **unidirectional** whereas embedding models are **bi-drectional**, 
+both previous and nexts tokens are used, no causal mask is applied. 
+An embedding model produce hidden_state, and then pools them into one vector :
+```
+Without pool: in -> model -> embedding [batch, seq_len, hidden_size]
+With pool: in -> model -> embedding [batch, embedding_size]
+```
+**Pooling step is central**, can be `mean` or `cls`, depending on the model.
+Optionaly a projection head can be used at this point.
+Embedding normalization is often required.
+
+**Hidden states** are the transformers blocks output. Embedding models don't 
+include final normalization, but use directly the last hidden state returned by
+the transformer forward pass. This hidden states is then pooled, and normalized.
