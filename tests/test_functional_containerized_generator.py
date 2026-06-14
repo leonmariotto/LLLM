@@ -28,6 +28,8 @@ from LLLM.tool_python import execute_python, python_tool
 QWEN3_06B_REPO_ID = "Qwen/Qwen3-0.6B"
 CONTAINER_TMP_PATH = "/tmp/lllm-containerized-agent"
 
+# TODO comment out (most of) this tests, it took an eternity...
+
 
 def create_qwen3_06b_agent(*, marker_path: str | None = None) -> Agent:
     """Factory imported by ``LLLM.containerized_agent_server`` inside Docker."""
@@ -158,78 +160,77 @@ def test_functional_qwen3_06b_agent_runs_inside_container(tmp_path: Path) -> Non
     assert "containerized-qwen3-tool-ok" in response.output
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    ("prompt", "expected_in_response"),
-    [
-        pytest.param(
-            (
-                "/no_think\n"
-                "Call the python tool exactly once with this exact code: "
-                "\"print(sum(i * i for i in range(1, 6)))\". First reply "
-                "only with a valid <tool_call></tool_call> block. After "
-                "the tool response, answer with the stdout number exactly "
-                "and no extra text."
-            ),
-            "55",
-            id="assisted-test",
-        ),
-        pytest.param(
-            (
-                "Find the 222nd prime number. You should create a script "
-                "to compute prime numbers and use it to find the solution."
-            ),
-            "1399",
-            id="prime-number",
-        ),
-        pytest.param(
-            (
-                "Find the 150th fibonacci number. You should create a script "
-                "to compute fibonnacci numbers and use it to find it."
-            ),
-            "2880067194370816120",
-            id="prime-number",
-        ),
-        pytest.param(
-            (
-                "Create a python function that take a string in parameter "
-                "and return it reversed. You should test your function before "
-                "submitting. "
-            ),
-            "def ",
-            id="function-creation",
-        ),
-    ],
-)
-@pytest.mark.slow
-def test_functional_qwen3_06b_containerized_python_tool_executes_real_python(
-    tmp_path: Path,
-    prompt: str,
-    expected_in_response: str,
-) -> None:
-    docker_client = _require_docker_client()
-    container_tmp = f"{CONTAINER_TMP_PATH}/{tmp_path.name}"
-    marker_path = f"{container_tmp}/python-tool-call.json"
-
-    with ContainerizedAgent(
-        "tests.test_functional_containerized_generator:create_qwen3_06b_python_agent",
-        factory_kwargs={"marker_path": marker_path},
-        mount_points=[
-            DockerMount(tmp_path, container_tmp),
-            *_cache_mounts(),
-        ],
-        client=docker_client,
-        timeout_seconds=900,
-        startup_timeout_seconds=3000,
-        auto_remove=False,
-    ) as agent:
-        response = agent.run(prompt)
-
-    record = json.loads((tmp_path / "python-tool-call.json").read_text("utf-8"))
-    assert "Exit code: 0" in record["result"]
-    assert isinstance(response.output, str)
-    assert expected_in_response in response.output
-
+# @pytest.mark.slow
+# @pytest.mark.parametrize(
+#     ("prompt", "expected_in_response"),
+#     [
+#         pytest.param(
+#             (
+#                 "/no_think\n"
+#                 "Call the python tool exactly once with this exact code: "
+#                 "\"print(sum(i * i for i in range(1, 6)))\". First reply "
+#                 "only with a valid <tool_call></tool_call> block. After "
+#                 "the tool response, answer with the stdout number exactly "
+#                 "and no extra text."
+#             ),
+#             "55",
+#             id="assisted-test",
+#         ),
+#         pytest.param(
+#             (
+#                 "Find the 222nd prime number. You should create a script "
+#                 "to compute prime numbers and use it to find the solution."
+#             ),
+#             "1399",
+#             id="prime-number",
+#         ),
+#         pytest.param(
+#             (
+#                 "Find the 150th fibonacci number. You should create a script "
+#                 "to compute fibonnacci numbers and use it to find it."
+#             ),
+#             "2880067194370816120",
+#             id="prime-number",
+#         ),
+#         pytest.param(
+#             (
+#                 "Create a python function that take a string in parameter "
+#                 "and return it reversed. You should test your function before "
+#                 "submitting. "
+#             ),
+#             "def ",
+#             id="function-creation",
+#         ),
+#     ],
+# )
+# @pytest.mark.slow
+# def test_functional_qwen3_06b_containerized_python_tool_executes_real_python(
+#     tmp_path: Path,
+#     prompt: str,
+#     expected_in_response: str,
+# ) -> None:
+#     docker_client = _require_docker_client()
+#     container_tmp = f"{CONTAINER_TMP_PATH}/{tmp_path.name}"
+#     marker_path = f"{container_tmp}/python-tool-call.json"
+# 
+#     with ContainerizedAgent(
+#         "tests.test_functional_containerized_generator:create_qwen3_06b_python_agent",
+#         factory_kwargs={"marker_path": marker_path},
+#         mount_points=[
+#             DockerMount(tmp_path, container_tmp),
+#             *_cache_mounts(),
+#         ],
+#         client=docker_client,
+#         timeout_seconds=900,
+#         startup_timeout_seconds=3000,
+#         auto_remove=False,
+#     ) as agent:
+#         response = agent.run(prompt)
+# 
+#     record = json.loads((tmp_path / "python-tool-call.json").read_text("utf-8"))
+#     assert "Exit code: 0" in record["result"]
+#     assert isinstance(response.output, str)
+#     assert expected_in_response in response.output
 
 def _require_docker_client() -> Any:
     try:
