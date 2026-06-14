@@ -1,6 +1,8 @@
 """
-Small tensor utilities for cosine vector search and  high level vector
+Small tensor utilities for cosine vector search and high level vector
 search API.
+Provide a pre-computed API for searching into existing embedding.
+Provide an API that build an embedding from a text and search into it.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ class SearchResult:
 
 
 class TextEmbedder(Protocol):
-    """Minimal text embedding interface required by ``vector_search``."""
+    """Minimal text embedding interface."""
 
     def embed(self, text: str) -> torch.Tensor: ...
 
@@ -64,39 +66,42 @@ def cosine_similarity(query: torch.Tensor, vectors: torch.Tensor) -> torch.Tenso
     return scores
 
 
-def vector_search(
+def _chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap must be non-negative")
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
+    if text == "":
+        return []
+
+    step = chunk_size - chunk_overlap
+    return [text[start : start + chunk_size] for start in range(0, len(text), step)]
+
+
+def _rank_embeddings(
     query: str,
     sequences: Sequence[str],
+    embedding_vectors: torch.Tensor,
     embedder: TextEmbedder,
     *,
     top_k: int = 5,
 ) -> list[SearchResult]:
-    """
-    Embed a string query and return top cosine-similarity sequence matches.
-
-    Args:
-        query: Query text.
-        sequences: Candidate text sequences to search.
-        embedder: Object providing ``embed`` and ``embed_batch``.
-        top_k: Maximum number of matches to return.
-
-    Returns:
-        Results sorted by descending similarity.
-    """
-
     if top_k < 0:
         raise ValueError("top_k must be non-negative")
     if not sequences or top_k == 0:
         return []
+    if embedding_vectors.dim() != 2:
+        raise ValueError("embedding_vectors must have shape [items, dim]")
+    if embedding_vectors.shape[0] != len(sequences):
+        raise ValueError("embedding_vectors must align with sequences")
 
     query_embedding = embedder.embed(query)
-    candidate_embeddings = embedder.embed_batch(sequences)
     if query_embedding.dim() != 1:
         raise ValueError("embedder.embed must return a vector with shape [dim]")
-    if candidate_embeddings.shape[0] != len(sequences):
-        raise ValueError("embedder.embed_batch must return one vector per sequence")
 
-    scores = cosine_similarity(query_embedding, candidate_embeddings)
+    scores = cosine_similarity(query_embedding, embedding_vectors)
     limit = min(top_k, len(sequences))
     values, indices = torch.topk(scores, k=limit)
     return [
@@ -109,15 +114,17 @@ def vector_search(
     ]
 
 
-def vector_search_into(
+def vector_search(
     query: str,
     embedding_vectors: torch.Tensor,
     sequences: Sequence[str],
     embedder: TextEmbedder,
-) -> str:
+    *,
+    top_k: int = 5,
+) -> list[SearchResult]:
     """
-    Search a query string into an existing embedding batch and decode the best hit.
-    This function can be used to search into pre-computed vectors.
+    Search a query string into an existing embedding batch.
+    This function can be used to search into precomputed vectors.
     We can't recover text from embedding, so texts matching embedding must be
     included in the API.
 
@@ -127,19 +134,44 @@ def vector_search_into(
             ``[items, dim]``.
         sequences: Candidate text sequences aligned with ``embedding_vectors``.
         embedder: Object providing ``embed`` for the query.
+        top_k: Maximum number of matches to return.
 
     Returns:
-        The best matching candidate sequence.
+        Results sorted by descending similarity.
     """
 
-    if len(sequences) == 0:
-        raise ValueError("sequences must not be empty")
-    if embedding_vectors.dim() != 2:
-        raise ValueError("embedding_vectors must have shape [items, dim]")
-    if embedding_vectors.shape[0] != len(sequences):
-        raise ValueError("embedding_vectors must align with sequences")
+    return _rank_embeddings(query, sequences, embedding_vectors, embedder, top_k=top_k)
 
-    query_embedding = embedder.embed(query)
-    scores = cosine_similarity(query_embedding, embedding_vectors)
-    best_index = int(torch.argmax(scores))
-    return sequences[best_index]
+
+def vector_build_and_search(
+    query: str,
+    text: str,
+    embedder: TextEmbedder,
+    *,
+    top_k: int = 5,
+    chunk_size: int = 1000,
+    chunk_overlap: int = 0,
+) -> list[SearchResult]:
+    """
+    Chunk text, embed each chunk, and return top cosine-similarity matches.
+
+    Args:
+        query: Query text.
+        text: Text to split into candidate chunks.
+        embedder: Object providing ``embed`` and ``embed_batch``.
+        top_k: Maximum number of matches to return.
+        chunk_size: Maximum character length for each chunk.
+        chunk_overlap: Number of characters shared by adjacent chunks.
+
+    Returns:
+        Results sorted by descending similarity.
+    """
+
+    chunks = _chunk_text(text, chunk_size, chunk_overlap)
+    if not chunks or top_k == 0:
+        if top_k < 0:
+            raise ValueError("top_k must be non-negative")
+        return []
+
+    chunk_embeddings = embedder.embed_batch(chunks)
+    return _rank_embeddings(query, chunks, chunk_embeddings, embedder, top_k=top_k)
