@@ -1,12 +1,15 @@
 # pyright: reportPrivateUsage=false
 
 from collections.abc import Sequence
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from click.testing import CliRunner
 import pytest
 
 from ..LLLM import chat as chat_module
+from ..LLLM.vector_db import VectorDB
+from ..LLLM.vector_search import SearchResult
 
 
 class FakeTokenizer:
@@ -121,6 +124,43 @@ class FakeGeneratorWithModel(FakeGenerator):
         self.cache_length = 8
 
 
+class FakeVectorDB:
+    def __init__(self, results: Sequence[SearchResult]) -> None:
+        self.results = list(results)
+        self.calls: list[dict[str, object]] = []
+
+    def search(
+        self,
+        query_str: str,
+        metadata_filter: Sequence[str] | None = None,
+        *,
+        top_k: int = 5,
+    ) -> list[SearchResult]:
+        self.calls.append(
+            {
+                "query_str": query_str,
+                "metadata_filter": metadata_filter,
+                "top_k": top_k,
+            }
+        )
+        return self.results[:top_k]
+
+
+def _fake_rag_context(
+    fake_db: FakeVectorDB,
+    *,
+    score_cutoff: float = 0.3,
+    max_entries: int = 5,
+) -> chat_module.ChatRAGContext:
+    return chat_module.ChatRAGContext(
+        vector_db=cast(VectorDB, fake_db),
+        options=chat_module.ChatRAGOptions(
+            score_cutoff=score_cutoff,
+            max_entries=max_entries,
+        ),
+    )
+
+
 def test_generate_chat_response_enables_and_strips_thinking_by_default() -> None:
     generator = FakeGenerator(["<think>hidden</think>\nHello"])
 
@@ -166,6 +206,35 @@ def test_generate_chat_response_can_disable_thinking() -> None:
     assert generator.calls[0]["prompt_tokens"] == [9, 0]
 
 
+def test_generate_chat_response_augments_prompt_with_rag_context() -> None:
+    generator = FakeGenerator(["answer"])
+    fake_db = FakeVectorDB(
+        [
+            SearchResult(index=0, score=0.9, sequence="relevant chunk"),
+            SearchResult(index=1, score=0.2, sequence="weak chunk"),
+        ]
+    )
+
+    response = chat_module.generate_chat_response(
+        generator,
+        "question",
+        max_generated_token=32,
+        temperature=0.0,
+        top_k=None,
+        top_p=None,
+        rag_context=_fake_rag_context(fake_db, score_cutoff=0.3, max_entries=2),
+    )
+
+    assert response == "answer"
+    assert fake_db.calls == [
+        {"query_str": "question", "metadata_filter": None, "top_k": 2}
+    ]
+    prompt = generator.tokenizer.prompts[0]
+    assert "Relevant context:\n[1] relevant chunk" in prompt
+    assert "weak chunk" not in prompt
+    assert prompt.endswith("User question:\nquestion")
+
+
 def test_generate_chat_messages_response_keeps_full_history() -> None:
     generator = FakeGenerator(["<think>hidden</think>\nanswer"])
     messages: list[chat_module.ChatMessage] = [
@@ -188,6 +257,33 @@ def test_generate_chat_messages_response_keeps_full_history() -> None:
     assert generator.tokenizer.chat_enable_thinking == [True]
     assert len(generator.calls[0]["prompt_tokens"]) == 49
     assert generator.calls[0]["include_prompt"] is False
+
+
+def test_generate_chat_messages_response_augments_latest_user_without_mutating_history() -> None:
+    generator = FakeGenerator(["answer"])
+    fake_db = FakeVectorDB([SearchResult(index=0, score=0.9, sequence="context")])
+    messages: list[chat_module.ChatMessage] = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "second"},
+        {"role": "user", "content": "third"},
+    ]
+
+    response = chat_module._generate_chat_messages_response(
+        generator,
+        messages,
+        max_generated_token=16,
+        temperature=0.0,
+        top_k=None,
+        top_p=None,
+        rag_context=_fake_rag_context(fake_db),
+    )
+
+    assert response == "answer"
+    assert messages[-1]["content"] == "third"
+    encoded_messages = generator.tokenizer.messages[0]
+    assert encoded_messages[0]["content"] == "first"
+    assert encoded_messages[2]["content"].startswith("Relevant context:\n[1] context")
+    assert encoded_messages[2]["content"].endswith("User question:\nthird")
 
 
 def test_chat_status_estimates_model_and_context_memory() -> None:
@@ -298,6 +394,81 @@ def test_chat_cli_no_think_disables_stdin_thinking(
     assert generator.tokenizer.enable_thinking == [False]
 
 
+def test_chat_cli_stdin_uses_rag_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    generator = FakeGenerator(["answer"])
+    vector_db_path = tmp_path / "vectors.json"
+    vector_db_path.write_text("[]\n", encoding="utf-8")
+    fake_db = FakeVectorDB(
+        [
+            SearchResult(index=0, score=0.8, sequence="kept context"),
+            SearchResult(index=1, score=0.1, sequence="dropped context"),
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    def fake_build_qwen3_generator(
+        repo_id: str,
+        **kwargs: object,
+    ) -> FakeGenerator:
+        return generator
+
+    def fake_build_rag_context(
+        *,
+        vector_db_path: Path,
+        embedding_model: str,
+        score_cutoff: float,
+        max_entries: int,
+    ) -> chat_module.ChatRAGContext:
+        captured["vector_db_path"] = vector_db_path
+        captured["embedding_model"] = embedding_model
+        captured["score_cutoff"] = score_cutoff
+        captured["max_entries"] = max_entries
+        return _fake_rag_context(
+            fake_db,
+            score_cutoff=score_cutoff,
+            max_entries=max_entries,
+        )
+
+    monkeypatch.setattr(
+        chat_module,
+        "_build_qwen3_generator",
+        fake_build_qwen3_generator,
+    )
+    monkeypatch.setattr(chat_module, "_build_rag_context", fake_build_rag_context)
+
+    result = CliRunner().invoke(
+        chat_module.chat_cli,
+        [
+            "--rag-vector-db-path",
+            str(vector_db_path),
+            "--rag-embedding-model",
+            "embedding-model",
+            "--rag-score-cutoff",
+            "0.3",
+            "--rag-max-entries",
+            "2",
+        ],
+        input="question\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "vector_db_path": vector_db_path,
+        "embedding_model": "embedding-model",
+        "score_cutoff": 0.3,
+        "max_entries": 2,
+    }
+    assert fake_db.calls == [
+        {"query_str": "question\n", "metadata_filter": None, "top_k": 2}
+    ]
+    prompt = generator.tokenizer.prompts[0]
+    assert "kept context" in prompt
+    assert "dropped context" not in prompt
+
+
 def test_chat_cli_launches_textual_app_for_interactive_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -317,10 +488,12 @@ def test_chat_cli_launches_textual_app_for_interactive_stdin(
         *,
         cache_length: int,
         options: chat_module.ChatGenerationOptions,
+        rag_context: chat_module.ChatRAGContext | None = None,
     ) -> None:
         captured["app_generator"] = app_generator
         captured["cache_length"] = cache_length
         captured["options"] = options
+        captured["rag_context"] = rag_context
 
     monkeypatch.setattr(
         chat_module,
@@ -346,10 +519,87 @@ def test_chat_cli_launches_textual_app_for_interactive_stdin(
     assert captured["kwargs"]["cache_length"] == chat_module.DEFAULT_CACHE_LENGTH
     assert captured["app_generator"] is generator
     assert captured["cache_length"] == chat_module.DEFAULT_CACHE_LENGTH
+    assert captured["rag_context"] is None
     options = captured["options"]
     assert isinstance(options, chat_module.ChatGenerationOptions)
     assert options.max_generated_token == 8
     assert options.enable_thinking is True
+
+
+def test_chat_cli_interactive_passes_rag_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    generator = FakeGenerator(["unused"])
+    vector_db_path = tmp_path / "vectors.json"
+    vector_db_path.write_text("[]\n", encoding="utf-8")
+    fake_db = FakeVectorDB([])
+    rag_context = _fake_rag_context(fake_db, score_cutoff=0.4, max_entries=3)
+    captured: dict[str, object] = {}
+
+    def fake_build_qwen3_generator(
+        repo_id: str,
+        **kwargs: object,
+    ) -> FakeGenerator:
+        return generator
+
+    def fake_build_rag_context(
+        *,
+        vector_db_path: Path,
+        embedding_model: str,
+        score_cutoff: float,
+        max_entries: int,
+    ) -> chat_module.ChatRAGContext:
+        captured["vector_db_path"] = vector_db_path
+        captured["embedding_model"] = embedding_model
+        captured["score_cutoff"] = score_cutoff
+        captured["max_entries"] = max_entries
+        return rag_context
+
+    def fake_run_textual_chat_app(
+        app_generator: chat_module.TextGenerator,
+        *,
+        cache_length: int,
+        options: chat_module.ChatGenerationOptions,
+        rag_context: chat_module.ChatRAGContext | None = None,
+    ) -> None:
+        captured["app_generator"] = app_generator
+        captured["rag_context"] = rag_context
+
+    monkeypatch.setattr(
+        chat_module,
+        "_build_qwen3_generator",
+        fake_build_qwen3_generator,
+    )
+    monkeypatch.setattr(chat_module, "_build_rag_context", fake_build_rag_context)
+    monkeypatch.setattr(chat_module, "_stdin_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        chat_module,
+        "_run_textual_chat_app",
+        fake_run_textual_chat_app,
+    )
+
+    result = CliRunner().invoke(
+        chat_module.chat_cli,
+        [
+            "--rag-vector-db-path",
+            str(vector_db_path),
+            "--rag-embedding-model",
+            "embedding-model",
+            "--rag-score-cutoff",
+            "0.4",
+            "--rag-max-entries",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["app_generator"] is generator
+    assert captured["rag_context"] is rag_context
+    assert captured["vector_db_path"] == vector_db_path
+    assert captured["embedding_model"] == "embedding-model"
+    assert captured["score_cutoff"] == 0.4
+    assert captured["max_entries"] == 3
 
 
 def test_chat_cli_no_think_reaches_textual_app(
@@ -369,8 +619,10 @@ def test_chat_cli_no_think_reaches_textual_app(
         *,
         cache_length: int,
         options: chat_module.ChatGenerationOptions,
+        rag_context: chat_module.ChatRAGContext | None = None,
     ) -> None:
         captured["options"] = options
+        captured["rag_context"] = rag_context
 
     monkeypatch.setattr(
         chat_module,
@@ -390,3 +642,4 @@ def test_chat_cli_no_think_reaches_textual_app(
     options = captured["options"]
     assert isinstance(options, chat_module.ChatGenerationOptions)
     assert options.enable_thinking is False
+    assert captured["rag_context"] is None

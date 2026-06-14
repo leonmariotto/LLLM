@@ -18,6 +18,9 @@ import click
 from loguru import logger
 from rich.text import Text
 
+from .vector_db import DEFAULT_EMBEDDING_MODEL, VectorDB
+from .vector_search import SearchResult, TextEmbedder
+
 
 DEFAULT_CHAT_MODEL_REPO_ID = "Qwen/Qwen3-0.6B"
 DEFAULT_CACHE_LENGTH = 16384
@@ -53,6 +56,18 @@ class ChatGenerationOptions:
     top_k: int | None
     top_p: float | None
     enable_thinking: bool
+
+
+@dataclass(frozen=True)
+class ChatRAGOptions:
+    score_cutoff: float
+    max_entries: int
+
+
+@dataclass(frozen=True)
+class ChatRAGContext:
+    vector_db: VectorDB
+    options: ChatRAGOptions
 
 
 @dataclass(frozen=True)
@@ -96,6 +111,100 @@ def _build_qwen3_generator(
     return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
 
 
+def _build_rag_embedder(model: str) -> TextEmbedder:
+    from .fetch import fetch_embedding_model_ir
+    from .sentence_transformer import SentenceTransformerEmbedder
+
+    ir = fetch_embedding_model_ir(model)
+    return SentenceTransformerEmbedder.from_ir(ir)
+
+
+def _build_rag_context(
+    *,
+    vector_db_path: Path,
+    embedding_model: str,
+    score_cutoff: float,
+    max_entries: int,
+) -> ChatRAGContext:
+    logger.info(
+        "Loading RAG VectorDB: path={}, embedding_model={}, score_cutoff={}, max_entries={}",
+        vector_db_path,
+        embedding_model,
+        score_cutoff,
+        max_entries,
+    )
+    embedder = _build_rag_embedder(embedding_model)
+    vector_db = VectorDB.load(vector_db_path, embedder)
+    return ChatRAGContext(
+        vector_db=vector_db,
+        options=ChatRAGOptions(score_cutoff=score_cutoff, max_entries=max_entries),
+    )
+
+
+def _format_rag_context(results: list[SearchResult]) -> str:
+    return "\n\n".join(
+        f"[{index}] {result.sequence}" for index, result in enumerate(results, start=1)
+    )
+
+
+def _augment_prompt_with_rag(prompt: str, rag_context: ChatRAGContext | None) -> str:
+    if rag_context is None:
+        return prompt
+
+    results = rag_context.vector_db.search(
+        prompt,
+        top_k=rag_context.options.max_entries,
+    )
+    filtered_results = [
+        result for result in results if result.score >= rag_context.options.score_cutoff
+    ]
+    logger.info(
+        "RAG search completed: results={}, accepted={}",
+        len(results),
+        len(filtered_results),
+    )
+    for i, result in enumerate(filtered_results):
+        logger.debug("RAG result {} (score={}): {}", i, result.score, result.sequence)
+    if not filtered_results:
+        return prompt
+
+    return (
+        "Relevant context:\n"
+        f"{_format_rag_context(filtered_results)}\n\n"
+        "User question:\n"
+        f"{prompt}"
+    )
+
+
+def _augment_messages_with_rag(
+    messages: list[ChatMessage],
+    rag_context: ChatRAGContext | None,
+) -> list[ChatMessage]:
+    if rag_context is None or not messages:
+        return messages
+
+    augmented_messages: list[ChatMessage] = [
+        {"role": message["role"], "content": message["content"]} for message in messages
+    ]
+    latest_user_index = next(
+        (
+            index
+            for index in range(len(augmented_messages) - 1, -1, -1)
+            if augmented_messages[index]["role"] == "user"
+        ),
+        None,
+    )
+    if latest_user_index is None:
+        return augmented_messages
+
+    latest_user_message = augmented_messages[latest_user_index]
+    latest_user_message["content"] = _augment_prompt_with_rag(
+        latest_user_message["content"],
+        rag_context,
+    )
+    return augmented_messages
+
+
 def _encode_chat_messages(
     generator: TextGenerator,
     messages: list[ChatMessage],
@@ -135,8 +244,10 @@ def _generate_chat_messages_response(
     top_k: int | None,
     top_p: float | None,
     enable_thinking: bool = True,
+    rag_context: ChatRAGContext | None = None,
 ) -> str:
     """Generate one assistant response from the complete structured history."""
+    messages = _augment_messages_with_rag(messages, rag_context)
     prompt_tokens = _encode_chat_messages(
         generator,
         messages,
@@ -163,8 +274,10 @@ def generate_chat_response(
     top_k: int | None,
     top_p: float | None,
     enable_thinking: bool = True,
+    rag_context: ChatRAGContext | None = None,
 ) -> str:
     """Generate a one-shot response from a single user prompt string."""
+    prompt = _augment_prompt_with_rag(prompt, rag_context)
     tokenizer = getattr(generator, "tokenizer", None)
     encode_prompt = getattr(tokenizer, "encode_instruct_prompt", None)
     if encode_prompt is None:
@@ -337,6 +450,7 @@ def _run_textual_chat_app(
     *,
     cache_length: int,
     options: ChatGenerationOptions,
+    rag_context: ChatRAGContext | None = None,
 ) -> None:
     """Run the full-screen TUI and keep all turns in the model context."""
     from textual import events
@@ -453,6 +567,7 @@ def _run_textual_chat_app(
                     top_k=options.top_k,
                     top_p=options.top_p,
                     enable_thinking=options.enable_thinking,
+                    rag_context=rag_context,
                 )
             except Exception as exc:  # pragma: no cover - visible in app.
                 self.call_from_thread(self._finish_response, f"Error: {exc}", True)
@@ -588,6 +703,31 @@ def _message_renderable(message: ChatMessage) -> Text:
     help="Disable Qwen thinking mode in chat prompts.",
 )
 @click.option(
+    "--rag-embedding-model",
+    default=DEFAULT_EMBEDDING_MODEL,
+    show_default=True,
+    help="Embedding model repo id or local path used for RAG VectorDB search.",
+)
+@click.option(
+    "--rag-vector-db-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a VectorDB JSON file. Enables RAG when provided.",
+)
+@click.option(
+    "--rag-score-cutoff",
+    default=0.3,
+    show_default=True,
+    type=float,
+    help="Minimum vector search score required for a RAG entry to be added.",
+)
+@click.option(
+    "--rag-max-entries",
+    default=5,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Maximum number of RAG search results to add to the prompt.",
+)
+@click.option(
     "--verbosity",
     default="warning",
     show_default=True,
@@ -603,6 +743,10 @@ def chat_cli(
     top_p: float | None,
     local_files_only: bool,
     no_think: bool,
+    rag_embedding_model: str,
+    rag_vector_db_path: Path | None,
+    rag_score_cutoff: float,
+    rag_max_entries: int,
     verbosity: str,
 ) -> None:
     _configure_cli_logging(verbosity)
@@ -610,6 +754,16 @@ def chat_cli(
         model,
         cache_length=cache_length,
         local_files_only=local_files_only,
+    )
+    rag_context = (
+        _build_rag_context(
+            vector_db_path=rag_vector_db_path,
+            embedding_model=rag_embedding_model,
+            score_cutoff=rag_score_cutoff,
+            max_entries=rag_max_entries,
+        )
+        if rag_vector_db_path is not None
+        else None
     )
 
     if _stdin_is_interactive():
@@ -623,6 +777,7 @@ def chat_cli(
                 top_p=top_p,
                 enable_thinking=not no_think,
             ),
+            rag_context=rag_context,
         )
         return
 
@@ -638,5 +793,6 @@ def chat_cli(
         top_k=top_k,
         top_p=top_p,
         enable_thinking=not no_think,
+        rag_context=rag_context,
     )
     click.echo(response)
