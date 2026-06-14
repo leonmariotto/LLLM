@@ -6,14 +6,18 @@ Manage KVCache: KVCache is created and destroyed in a single generation.
 Tool-less version. May be archived in a future iteration.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+import json
+import math
 import time
+import weakref
 from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast, List
 
 from .tool_common import ToolCall
 
 from loguru import logger
+from pydantic import BaseModel
 import torch
 
 from .kv_cache import KVCache
@@ -87,6 +91,485 @@ class ChatTokenizer(Tokenizer, Protocol):
     def parse_assistant_output(self, completion: str) -> AssistantOutput: ...
 
 
+JsonKind = Literal["str", "int", "float", "bool"]
+
+
+class ConstraintTokenizer(Protocol):
+    """Tokenizer operations needed to build token-level JSON masks."""
+
+    def decode(self, tok: list[int]) -> str: ...
+
+    def get_eos(self) -> int | None: ...
+
+
+@dataclass(frozen=True)
+class JsonValueSpec:
+    """Minimal JSON value specification supported by the constrained decoder."""
+
+    kind: JsonKind | Literal["list"]
+    item: "JsonValueSpec | None" = None
+
+
+@dataclass(frozen=True)
+class JsonFieldSpec:
+    """Fixed-order JSON object field specification."""
+
+    name: str
+    value: JsonValueSpec
+
+
+@dataclass(frozen=True)
+class JsonObjectSpec:
+    """Minimal fixed-order object schema extracted from a Pydantic model."""
+
+    model: type[BaseModel]
+    fields: tuple[JsonFieldSpec, ...]
+
+    @property
+    def name(self) -> str:
+        """Return the schema model name for logs and errors."""
+        return self.model.__name__
+
+
+@dataclass
+class JsonConstraintStats:
+    """Runtime counters for constrained decoding performance visibility."""
+
+    trie_build_seconds: float = 0.0
+    vocabulary_size: int = 0
+    mask_cache_hits: int = 0
+    mask_cache_misses: int = 0
+
+
+class _TrieNode:
+    def __init__(self) -> None:
+        self.children: dict[str, _TrieNode] = {}
+        self.token_ids: list[int] = []
+
+
+class TokenTrie:
+    """
+    Trie over decoded token strings used to collect valid token ids.
+    Stores every token’s decoded text, independent of any schema.
+    This could be replaced by a dictionary lookup, but tries are more
+    efficient, as for a given prefix, et search only a subset matching this
+    prefix.
+    """
+
+    def __init__(self, tokenizer: ConstraintTokenizer) -> None:
+        start = time.perf_counter()
+        self.root = _TrieNode()
+        self.vocabulary_size = _tokenizer_vocabulary_size(tokenizer)
+        for token_id in range(self.vocabulary_size):
+            try:
+                token_text = tokenizer.decode([token_id])
+            except Exception as error:  # pragma: no cover - defensive for tokenizers
+                logger.debug("Skip undecodable token_id={} error={}", token_id, error)
+                continue
+            if token_text == "":
+                continue
+            self._insert(token_text, token_id)
+        self.build_seconds = time.perf_counter() - start
+        logger.info(
+            "Built constrained decoding token trie vocabulary_size={} seconds={:.6f}",
+            self.vocabulary_size,
+            self.build_seconds,
+        )
+
+    def _insert(self, token_text: str, token_id: int) -> None:
+        node = self.root
+        for char in token_text:
+            node = node.children.setdefault(char, _TrieNode())
+        node.token_ids.append(token_id)
+
+    def valid_token_ids(self, is_valid_prefix: "PrefixChecker") -> list[int]:
+        """Return tokens whose decoded text keeps the JSON prefix valid."""
+        token_ids: list[int] = []
+        self._collect(self.root, "", is_valid_prefix, token_ids)
+        return token_ids
+
+    def _collect(
+        self,
+        node: _TrieNode,
+        token_text: str,
+        is_valid_prefix: "PrefixChecker",
+        token_ids: list[int],
+    ) -> None:
+        if token_text and not is_valid_prefix(token_text):
+            return
+        token_ids.extend(node.token_ids)
+        for char, child in node.children.items():
+            self._collect(child, token_text + char, is_valid_prefix, token_ids)
+
+
+PrefixChecker = Callable[[str], bool]
+
+
+_TRIE_CACHE: weakref.WeakKeyDictionary[object, TokenTrie] = weakref.WeakKeyDictionary()
+
+
+def schema_from_pydantic(response_format: type[BaseModel]) -> JsonObjectSpec:
+    """Extract the supported schema subset from a Pydantic BaseModel class."""
+    schema = response_format.model_json_schema()
+    properties = cast(object, schema.get("properties"))
+    required = cast(object, schema.get("required"))
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise ValueError("response_format must define an object with required fields")
+    schema_properties = cast(dict[str, object], properties)
+    schema_required = cast(list[object], required)
+
+    required_names = [name for name in schema_required if isinstance(name, str)]
+    if len(required_names) != len(schema_properties) or set(required_names) != set(
+        schema_properties
+    ):
+        raise ValueError("all response_format fields must be required")
+
+    fields: list[JsonFieldSpec] = []
+    for name in response_format.model_fields:
+        raw_property = schema_properties.get(name)
+        if not isinstance(raw_property, dict):
+            raise ValueError(f"missing JSON schema for field {name!r}")
+        fields.append(
+            JsonFieldSpec(
+                name=name,
+                value=_value_spec_from_schema(cast(dict[str, Any], raw_property), name),
+            )
+        )
+
+    logger.info(
+        "Accepted constrained response_format={} fields={}",
+        response_format.__name__,
+        [field.name for field in fields],
+    )
+    return JsonObjectSpec(model=response_format, fields=tuple(fields))
+
+
+class JsonConstrainedDecoder:
+    """
+    Stateful token-mask builder for one constrained JSON completion.
+    Binded to a type.
+    """
+
+    def __init__(
+        self,
+        *,
+        spec: JsonObjectSpec,
+        tokenizer: ConstraintTokenizer,
+        trie: TokenTrie,
+    ) -> None:
+        self.spec = spec
+        self.tokenizer = tokenizer
+        self.trie = trie
+        self.generated_text = ""
+        self._mask_cache: dict[str, torch.Tensor] = {}
+        self.stats = JsonConstraintStats(
+            trie_build_seconds=trie.build_seconds,
+            vocabulary_size=trie.vocabulary_size,
+        )
+        logger.info("Constrained JSON decoding enabled schema={}", spec.name)
+
+    def is_complete(self) -> bool:
+        """Return whether the current generated text is a complete valid object."""
+        return _parse_complete_object(self.generated_text, self.spec)
+
+    def append_token(self, token_id: int) -> None:
+        """Append one selected token to the tracked JSON completion."""
+        self.generated_text += self.tokenizer.decode([token_id])
+
+    def mask_for_next_token(
+        self, logits: torch.Tensor, eos: int | None
+    ) -> torch.Tensor:
+        """Return a boolean mask where true entries are valid next tokens."""
+        cache_key = self.generated_text
+        cached = self._mask_cache.get(cache_key)
+        if cached is not None:
+            self.stats.mask_cache_hits += 1
+            return cached.to(device=logits.device)
+
+        self.stats.mask_cache_misses += 1
+        if self.is_complete():
+            mask = torch.zeros(logits.shape[-1], dtype=torch.bool)
+            if eos is not None and eos < logits.shape[-1]:
+                mask[eos] = True
+            self._mask_cache[cache_key] = mask
+            return mask.to(device=logits.device)
+
+        def is_valid_token_suffix(token_text: str) -> bool:
+            # Tokens may span several JSON grammar transitions, so validate the
+            # whole appended prefix instead of checking one character at a time.
+            return _parse_valid_prefix(self.generated_text + token_text, self.spec)
+
+        token_ids = self.trie.valid_token_ids(is_valid_token_suffix)
+        mask = torch.zeros(logits.shape[-1], dtype=torch.bool)
+        valid_ids = [token_id for token_id in token_ids if token_id < logits.shape[-1]]
+        if valid_ids:
+            mask[torch.tensor(valid_ids, dtype=torch.long)] = True
+        if eos is not None and eos < logits.shape[-1]:
+            mask[eos] = False
+        self._mask_cache[cache_key] = mask
+        return mask.to(device=logits.device)
+
+    def validate_final(self) -> None:
+        """Validate the completed JSON text with the original Pydantic model."""
+        try:
+            self.spec.model.model_validate_json(self.generated_text)
+        except ValueError as error:
+            logger.error(
+                "Constrained JSON final validation failed schema={} text={!r}",
+                self.spec.name,
+                self.generated_text,
+            )
+            raise ValueError(
+                "generated JSON failed response_format validation"
+            ) from error
+        logger.info(
+            "Constrained JSON final validation succeeded schema={} chars={} "
+            "mask_cache_hits={} mask_cache_misses={}",
+            self.spec.name,
+            len(self.generated_text),
+            self.stats.mask_cache_hits,
+            self.stats.mask_cache_misses,
+        )
+
+
+def apply_json_constraint_mask(
+    logits: torch.Tensor,
+    decoder: JsonConstrainedDecoder,
+    eos: int | None,
+) -> torch.Tensor:
+    """Mask logits to tokens accepted by the constrained JSON decoder."""
+    mask = decoder.mask_for_next_token(logits, eos)
+    if not bool(mask.any().item()):
+        logger.error(
+            "No valid constrained JSON token schema={} partial={!r}",
+            decoder.spec.name,
+            decoder.generated_text,
+        )
+        raise RuntimeError("no valid token remains for constrained JSON output")
+    return logits.masked_fill(~mask.unsqueeze(0), float("-inf"))
+
+
+def _trie_for_tokenizer(tokenizer: ConstraintTokenizer) -> TokenTrie:
+    """
+    Try to return an existing trie for this tokenizer.
+    If none exists, build a new TokenTrie. Try to cache it.
+    Return it either way.
+
+    _TRIE_CACHE is a weakref.WeakKeyDictionary, that mean it's garbage collected
+    with tokenizer.
+    """
+    try:
+        cached = _TRIE_CACHE.get(cast(object, tokenizer))
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cached
+
+    trie = TokenTrie(tokenizer)
+    try:
+        _TRIE_CACHE[cast(object, tokenizer)] = trie
+    except TypeError:
+        logger.debug("Tokenizer does not support weakref trie caching")
+    return trie
+
+
+def _tokenizer_vocabulary_size(tokenizer: ConstraintTokenizer) -> int:
+    direct = getattr(tokenizer, "vocabulary_size", None)
+    if isinstance(direct, int):
+        return direct
+    tiktok = getattr(tokenizer, "tiktok", None)
+    n_vocab = getattr(tiktok, "n_vocab", None)
+    if isinstance(n_vocab, int):
+        return n_vocab
+    tok = getattr(tokenizer, "tok", None)
+    get_vocab_size = getattr(tok, "get_vocab_size", None)
+    if callable(get_vocab_size):
+        value = get_vocab_size()
+        if isinstance(value, int):
+            return value
+    raise TypeError(
+        "response_format requires a tokenizer exposing vocabulary_size, "
+        "tiktok.n_vocab, or tok.get_vocab_size()"
+    )
+
+
+def _value_spec_from_schema(schema: dict[str, Any], path: str) -> JsonValueSpec:
+    schema_type = schema.get("type")
+    if schema_type == "string":
+        return JsonValueSpec("str")
+    if schema_type == "integer":
+        return JsonValueSpec("int")
+    if schema_type == "number":
+        return JsonValueSpec("float")
+    if schema_type == "boolean":
+        return JsonValueSpec("bool")
+    if schema_type == "array":
+        items = schema.get("items")
+        if not isinstance(items, dict):
+            raise ValueError(f"list field {path!r} must define item schema")
+        item = _value_spec_from_schema(cast(dict[str, Any], items), f"{path}[]")
+        if item.kind == "list":
+            raise ValueError(f"nested lists are not supported at {path!r}")
+        return JsonValueSpec("list", item=item)
+    logger.error(
+        "Rejected unsupported response_format field={} schema={}", path, schema
+    )
+    raise ValueError(f"unsupported response_format field {path!r}")
+
+
+def _parse_valid_prefix(text: str, spec: JsonObjectSpec) -> bool:
+    try:
+        position = _parse_object(text, 0, spec)
+    except _Incomplete:
+        return True
+    except _Invalid:
+        return False
+    return position == len(text)
+
+
+def _parse_complete_object(text: str, spec: JsonObjectSpec) -> bool:
+    try:
+        position = _parse_object(text, 0, spec)
+    except (_Incomplete, _Invalid):
+        return False
+    return position == len(text)
+
+
+def _parse_object(text: str, position: int, spec: JsonObjectSpec) -> int:
+    position = _literal(text, position, "{")
+    for index, field_spec in enumerate(spec.fields):
+        if index > 0:
+            position = _literal(text, position, ",")
+        position = _literal(text, position, json.dumps(field_spec.name))
+        position = _literal(text, position, ":")
+        position = _parse_value(text, position, field_spec.value)
+    return _literal(text, position, "}")
+
+
+def _parse_value(text: str, position: int, spec: JsonValueSpec) -> int:
+    if spec.kind == "str":
+        return _parse_string(text, position)
+    if spec.kind == "int":
+        return _parse_number(text, position, allow_float=False)
+    if spec.kind == "float":
+        return _parse_number(text, position, allow_float=True)
+    if spec.kind == "bool":
+        return _parse_bool(text, position)
+    if spec.kind == "list":
+        if spec.item is None:
+            raise AssertionError("list spec must include item spec")
+        return _parse_list(text, position, spec.item)
+    raise AssertionError(f"unsupported JSON value kind {spec.kind!r}")
+
+
+def _literal(text: str, position: int, literal: str) -> int:
+    remaining = text[position:]
+    if len(remaining) < len(literal) and literal.startswith(remaining):
+        raise _Incomplete
+    if text.startswith(literal, position):
+        return position + len(literal)
+    raise _Invalid
+
+
+def _parse_bool(text: str, position: int) -> int:
+    for literal in ("true", "false"):
+        try:
+            return _literal(text, position, literal)
+        except _Incomplete:
+            raise
+        except _Invalid:
+            pass
+    if position == len(text):
+        raise _Incomplete
+    raise _Invalid
+
+
+def _parse_string(text: str, position: int) -> int:
+    if position >= len(text):
+        raise _Incomplete
+    if text[position] != '"':
+        raise _Invalid
+
+    index = position + 1
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            candidate = text[position : index + 1]
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError:
+                raise _Invalid
+            if not isinstance(value, str):
+                raise _Invalid
+            return index + 1
+        elif ord(char) < 0x20:
+            raise _Invalid
+        index += 1
+    raise _Incomplete
+
+
+def _parse_number(text: str, position: int, *, allow_float: bool) -> int:
+    if position >= len(text):
+        raise _Incomplete
+    index = position
+    while index < len(text) and text[index] in "-+0123456789.eE":
+        index += 1
+    if index == position:
+        raise _Invalid
+
+    candidate = text[position:index]
+    if candidate in {"-", "+", ".", "-.", "+."}:
+        raise _Incomplete
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError:
+        if index == len(text):
+            raise _Incomplete
+        raise _Invalid
+    if isinstance(value, bool):
+        raise _Invalid
+    if allow_float:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise _Invalid
+    elif not isinstance(value, int):
+        raise _Invalid
+    return index
+
+
+def _parse_list(text: str, position: int, item: JsonValueSpec) -> int:
+    position = _literal(text, position, "[")
+    if position >= len(text):
+        raise _Incomplete
+    if text[position] == "]":
+        return position + 1
+
+    while True:
+        position = _parse_value(text, position, item)
+        if position >= len(text):
+            raise _Incomplete
+        if text[position] == ",":
+            position += 1
+            if position >= len(text):
+                raise _Incomplete
+            continue
+        if text[position] == "]":
+            return position + 1
+        raise _Invalid
+
+
+class _Incomplete(Exception):
+    pass
+
+
+class _Invalid(Exception):
+    pass
+
+
 class Generator:
     """High level text generation class."""
 
@@ -115,6 +598,7 @@ class Generator:
         top_k: int | None = None,
         top_p: float | None = None,
         include_prompt: bool = True,
+        response_format: type[BaseModel] | None = None,
     ) -> str:
         """
         Generate text from a prompt.
@@ -137,6 +621,8 @@ class Generator:
                 least ``top_p``. Uses top-p instead of top-k.
             include_prompt: When ``True``, return prompt plus generated text.
                 When ``False``, return only the generated completion.
+            response_format: Optional Pydantic model that enables hard
+                constrained compact JSON output for the generated completion.
 
         Returns:
             Decoded text from the selected output tokens. The returned string is
@@ -155,6 +641,7 @@ class Generator:
             top_k=top_k,
             top_p=top_p,
             include_prompt=include_prompt,
+            response_format=response_format,
         )
 
     def generate_from_tokens(
@@ -168,6 +655,7 @@ class Generator:
         top_k: int | None = None,
         top_p: float | None = None,
         include_prompt: bool = True,
+        response_format: type[BaseModel] | None = None,
     ) -> str:
         """
         Generate text from already-encoded prompt tokens.
@@ -188,6 +676,7 @@ class Generator:
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            response_format=response_format,
         )
         self._record_metrics(
             generated_token_count,
@@ -214,6 +703,7 @@ class Generator:
         top_k: int | None = None,
         top_p: float | None = None,
         enable_thinking: bool = True,
+        response_format: type[BaseModel] | None = None,
     ) -> ChatCompletion:
         """Generate and parse one assistant turn from structured chat messages.
 
@@ -238,6 +728,7 @@ class Generator:
             top_k=top_k,
             top_p=top_p,
             include_prompt=False,
+            response_format=response_format,
         )
         try:
             message = tokenizer.parse_assistant_output(raw_completion)
@@ -290,6 +781,7 @@ class Generator:
         temperature: float,
         top_k: int | None,
         top_p: float | None,
+        response_format: type[BaseModel] | None,
     ) -> tuple[list[int], int, float]:
         """
         Implement top-k/top-p sampling and temperature.
@@ -301,9 +793,10 @@ class Generator:
         """
         if cache_length <= 0:
             raise ValueError("cache_length must be positive")
+        constrained_decoder = self._constrained_decoder(response_format)
         logger.info(
             "input_length={} cache_length={} max_generated_token={} "
-            "temperature={} top_k={} top_p={} stop_at_eos={}",
+            "temperature={} top_k={} top_p={} stop_at_eos={} response_format={}",
             len(input_tokens),
             cache_length,
             max_generated_token,
@@ -311,6 +804,7 @@ class Generator:
             top_k,
             top_p,
             stop_at_eos,
+            response_format.__name__ if response_format is not None else None,
         )
         self.model.eval()
         idx = torch.tensor(
@@ -327,6 +821,8 @@ class Generator:
         for step in range(max_generated_token):
             logits = logits[:, -1, :]
             logits = self._filter_logits(logits, top_k, top_p)
+            if constrained_decoder is not None:
+                logits = apply_json_constraint_mask(logits, constrained_decoder, eos)
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 logger.info(
@@ -341,6 +837,14 @@ class Generator:
             )
             idx = torch.cat((idx, idx_next), dim=1)
             generated_token_count += int(idx_next.shape[0])
+            if constrained_decoder is not None:
+                constrained_decoder.append_token(int(idx_next.item()))
+                if constrained_decoder.is_complete():
+                    logger.info(
+                        "Constrained JSON complete generated_token_count={}",
+                        generated_token_count,
+                    )
+                    break
             if step + 1 < max_generated_token:
                 with torch.no_grad():
                     logits = self.model(idx_next, kv_cache=kv_cache)
@@ -349,11 +853,25 @@ class Generator:
                     "Generating.. generated_token_count={}", generated_token_count
                 )
 
+        if constrained_decoder is not None:
+            constrained_decoder.validate_final()
+
         return (
             cast(list[int], cast(Any, idx.squeeze(0)).tolist()),
             generated_token_count,
             generated_sequence_logprob,
         )
+
+    def _constrained_decoder(
+        self, response_format: type[BaseModel] | None
+    ) -> JsonConstrainedDecoder | None:
+        """Create a constrained JSON decoder when typed output is requested."""
+        if response_format is None:
+            logger.debug("Constrained JSON decoding disabled")
+            return None
+        spec = schema_from_pydantic(response_format)
+        trie = _trie_for_tokenizer(self.tokenizer)
+        return JsonConstrainedDecoder(spec=spec, tokenizer=self.tokenizer, trie=trie)
 
     def _prefill(
         self,

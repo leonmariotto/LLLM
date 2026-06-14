@@ -1,12 +1,19 @@
 import logging
 import math
+import time
 from typing import Any, cast
 
+from pydantic import BaseModel
 import pytest
 import torch
 from torch import nn
 
-from ..LLLM.generator import AssistantOutput, Generator
+from ..LLLM.generator import (
+    AssistantOutput,
+    Generator,
+    TokenTrie,
+    schema_from_pydantic,
+)
 from ..LLLM.tool_common import ToolCall
 
 
@@ -22,6 +29,94 @@ class DigitTokenizer:
 
     def get_eos(self) -> int | None:
         return self.eos
+
+
+class JsonTokenizer:
+    def __init__(self) -> None:
+        self.tokens = [
+            "",
+            "{",
+            "}",
+            '"',
+            ":",
+            ",",
+            "[",
+            "]",
+            "n",
+            "a",
+            "m",
+            "e",
+            "o",
+            "c",
+            "k",
+            "t",
+            "r",
+            "u",
+            "f",
+            "l",
+            "s",
+            "1",
+            "2",
+            "3",
+            ".",
+            "-",
+            "x",
+            "bad",
+            "<eos>",
+        ]
+        self.token_to_id = {token: index for index, token in enumerate(self.tokens)}
+        self.eos = self.token_to_id["<eos>"]
+
+    @property
+    def vocabulary_size(self) -> int:
+        return len(self.tokens)
+
+    def encode(self, input: str) -> list[int]:
+        return [0] if input == "" else [self.token_to_id[char] for char in input]
+
+    def decode(self, tok: list[int]) -> str:
+        output = ""
+        for token_id in tok:
+            token = self.tokens[token_id]
+            if token != "<eos>":
+                output += token
+        return output
+
+    def get_eos(self) -> int | None:
+        return self.eos
+
+
+class ScriptedJsonModel(nn.Module):
+    def __init__(self, tokenizer: JsonTokenizer, target: str) -> None:
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.target_ids = tokenizer.encode(target)
+        self.step = 0
+        self.invalid_high_steps = {0}
+
+    def forward(
+        self, idx: torch.Tensor, *, kv_cache: object | None = None
+    ) -> torch.Tensor:
+        batch_size, seq_len = idx.shape
+        logits = torch.full(
+            (batch_size, seq_len, self.tokenizer.vocabulary_size),
+            -100.0,
+            device=idx.device,
+        )
+        if self.step in self.invalid_high_steps:
+            logits[:, -1, self.tokenizer.token_to_id["bad"]] = 100.0
+        if self.step < len(self.target_ids):
+            logits[:, -1, self.target_ids[self.step]] = 1.0
+        else:
+            logits[:, -1, self.tokenizer.eos] = 1.0
+        self.step += 1
+        return logits
+
+
+class JsonProbe(BaseModel):
+    name: str
+    ok: bool
+    scores: list[int]
 
 
 class DigitChatTokenizer(DigitTokenizer):
@@ -280,3 +375,125 @@ def test_filter_logits_rejects_invalid_top_p() -> None:
 
     with pytest.raises(ValueError, match="top_p"):
         generator.filter_logits_for_test(torch.zeros(1, 4), top_k=None, top_p=0.0)
+
+
+def test_response_format_masks_invalid_tokens_and_returns_json_string() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max","ok":true,"scores":[1,2,3]}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=JsonProbe,
+    )
+
+    assert generated == target
+    assert JsonProbe.model_validate_json(generated) == JsonProbe(
+        name="max",
+        ok=True,
+        scores=[1, 2, 3],
+    )
+
+
+def test_response_format_is_compatible_with_generate_completion() -> None:
+    class JsonChatTokenizer(JsonTokenizer):
+        def apply_chat_template(
+            self,
+            messages: list[dict[str, object]],
+            *,
+            tools: list[dict[str, object]] | None = None,
+            tokenize: bool = True,
+            add_generation_prompt: bool = False,
+            enable_thinking: bool = True,
+        ) -> dict[str, list[int]] | str:
+            _ = messages, tools, add_generation_prompt, enable_thinking
+            if not tokenize:
+                return ""
+            return {"input_ids": [0]}
+
+        def parse_assistant_output(self, completion: str) -> AssistantOutput:
+            return AssistantOutput(completion)
+
+    tokenizer = JsonChatTokenizer()
+    target = '{"name":"max","ok":false,"scores":[]}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    completion = generator.generate_completion(
+        [{"role": "user", "content": "typed"}],
+        max_generated_token=128,
+        response_format=JsonProbe,
+    )
+
+    assert completion.raw_completion == target
+    assert completion.message == AssistantOutput(target)
+
+
+def test_response_format_rejects_unsupported_schema() -> None:
+    class Nested(BaseModel):
+        value: str
+
+    class Unsupported(BaseModel):
+        nested: Nested
+
+    with pytest.raises(ValueError, match="unsupported"):
+        schema_from_pydantic(Unsupported)
+
+
+def test_token_trie_returns_only_valid_tokens_for_current_prefix() -> None:
+    tokenizer = JsonTokenizer()
+    trie = TokenTrie(tokenizer)
+
+    token_ids = trie.valid_token_ids(lambda token_text: token_text.startswith("{"))
+    token_texts = {tokenizer.decode([token_id]) for token_id in token_ids}
+
+    assert "{" in token_texts
+    assert "bad" not in token_texts
+
+
+def test_response_format_performance_overhead_is_logged_and_bounded() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max","ok":true,"scores":[1,2,3]}'
+
+    baseline_generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+    constrained_generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    baseline_start = time.perf_counter()
+    baseline_generator.generate("", max_generated_token=len(target), include_prompt=False)
+    baseline_seconds = time.perf_counter() - baseline_start
+
+    constrained_start = time.perf_counter()
+    constrained_generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=JsonProbe,
+    )
+    constrained_seconds = time.perf_counter() - constrained_start
+
+    overhead_ratio = constrained_seconds / max(baseline_seconds, 1e-9)
+    logging.getLogger(__name__).info(
+        "structured output overhead ratio %.3f "
+        "baseline_seconds=%.6f constrained_seconds=%.6f",
+        overhead_ratio,
+        baseline_seconds,
+        constrained_seconds,
+    )
+    assert overhead_ratio < 250.0

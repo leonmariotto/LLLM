@@ -2,9 +2,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
 import pytest
-
-pytestmark = pytest.mark.slow
 
 from ..LLLM.eval import (
     DatasetAdapter,
@@ -18,18 +17,23 @@ from ..LLLM.eval import (
     squad_score,
 )
 from ..LLLM.fetch import fetch_model_ir
+from ..LLLM.generator import Generator
 from ..LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
+
+pytestmark = pytest.mark.slow
 
 QWEN3_06B_REPO_ID = "Qwen/Qwen3-0.6B"
 QWEN3_06B_BASE_REPO_ID = "Qwen/Qwen3-0.6B-base"
 
 
+class StructuredQwen3Smoke(BaseModel):
+    ok: bool
+    l: list[str]
+    s: str
+
+
 def _qwen3_encode_instruction_prompt(tokenizer: Any, prompt: str) -> list[int]:
     return tokenizer.encode_instruct_prompt(prompt)
-
-
-def _qwen3_eos_token(tokenizer: Any) -> int | None:
-    return tokenizer.eos_token_id
 
 
 qwen3_boolq_adapter = DatasetAdapter(
@@ -100,6 +104,28 @@ def qwen3_06b_model_and_tokenizer() -> tuple[Qwen3Model, Qwen3Tokenizer]:
     model.load_ir_weights(ir)
     del ir
     return model, tokenizer
+
+
+@pytest.mark.slow
+def test_functional_qwen3_06b_generates_constrained_response_format(
+    qwen3_06b_model_and_tokenizer: tuple[Qwen3Model, Qwen3Tokenizer],
+) -> None:
+    model, tokenizer = qwen3_06b_model_and_tokenizer
+    generator = Generator(model=model, tokenizer=tokenizer, cache_length=16384)
+    prompt_tokens = tokenizer.encode_instruct_prompt(
+        f"Return a JSON object matching this schema: {StructuredQwen3Smoke.model_json_schema()}.",
+        enable_thinking=False,
+    )
+
+    generated_text = generator.generate_from_tokens(
+        prompt_tokens,
+        max_generated_token=32,
+        include_prompt=False,
+        response_format=StructuredQwen3Smoke,
+    )
+
+    parsed = StructuredQwen3Smoke.model_validate_json(generated_text)
+    assert isinstance(parsed.ok, bool)
 
 
 @pytest.mark.slow
