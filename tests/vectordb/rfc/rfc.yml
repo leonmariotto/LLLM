@@ -1,0 +1,7 @@
+
+files:
+  - file_path: "rfc1180.txt"
+    chunk_size: 1000
+    chunk_overlap: 100
+    metadata:
+      - "rfc1180"

@@ -8,11 +8,11 @@ import torch
 
 from ..LLLM.vector_search import (
     SearchResult,
-    VectorDB,
     cosine_similarity,
     vector_build_and_search,
     vector_search,
 )
+from ..LLLM.vector_db import VectorDB
 
 
 class FakeEmbedder:

@@ -38,6 +38,7 @@ build-backend = "setuptools.build_meta"
 coder = "LLLM.coder:coder_cli"
 chat = "LLLM.chat:chat_cli"
 planner = "LLLM.planner:planner_cli"
+vector_db = "LLLM.vector_db:vector_db_builder_cli"
 # 
 # [tool.uv]
 # package = true
