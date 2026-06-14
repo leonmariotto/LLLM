@@ -1,11 +1,14 @@
+import json
 import math
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 import torch
 
 from ..LLLM.vector_search import (
     SearchResult,
+    VectorDB,
     cosine_similarity,
     vector_build_and_search,
     vector_search,
@@ -21,6 +24,21 @@ class FakeEmbedder:
 
     def embed_batch(self, texts: Sequence[str]) -> torch.Tensor:
         return torch.stack([self.embeddings[text] for text in texts])
+
+
+class DynamicFakeEmbedder:
+    def embed(self, text: str) -> torch.Tensor:
+        if text == "query":
+            return torch.tensor([1.0, 0.0])
+        return torch.tensor([0.0, 1.0])
+
+    def embed_batch(self, texts: Sequence[str]) -> torch.Tensor:
+        return torch.stack(
+            [
+                torch.tensor([float(index + 1), 0.0])
+                for index, _ in enumerate(texts)
+            ]
+        )
 
 
 def test_cosine_similarity_scores_single_query_against_vectors() -> None:
@@ -152,3 +170,95 @@ def test_vector_search_validates_inputs() -> None:
         )
     with pytest.raises(ValueError, match="dimension mismatch"):
         cosine_similarity(torch.ones(3), torch.eye(2))
+
+
+def test_vector_db_add_text_chunks_embeds_and_stores_metadata() -> None:
+    db = VectorDB(DynamicFakeEmbedder())
+
+    db.add_text("abcdefghijklmnopqrstuvwxyz012345678", chunk_size=25, metadata=["doc:1"])
+
+    assert len(db.records) == 7
+    assert db.records[0] == {
+        "embedding": [1.0, 0.0],
+        "text": "abcdefghijklmnopqrstuvwxy",
+        "metadata": ["doc:1"],
+    }
+    assert db.records[1]["text"] == "fghijklmnopqrstuvwxyz0123"
+
+
+def test_vector_db_search_returns_ranked_results_and_remaps_indices() -> None:
+    db = VectorDB(
+        FakeEmbedder({"query": torch.tensor([1.0, 0.0])}),
+        records=[
+            {"embedding": [0.0, 1.0], "text": "unrelated", "metadata": ["a"]},
+            {"embedding": [1.0, 0.0], "text": "exact", "metadata": ["b"]},
+            {"embedding": [1.0, 1.0], "text": "close", "metadata": ["a", "b"]},
+        ],
+    )
+
+    results = db.search("query", top_k=2)
+
+    assert results[0] == SearchResult(index=1, score=1.0, sequence="exact")
+    assert results[1].index == 2
+    assert results[1].sequence == "close"
+    assert math.isclose(results[1].score, 2.0**-0.5, rel_tol=1e-6, abs_tol=1e-6)
+
+
+def test_vector_db_search_filters_by_metadata_membership() -> None:
+    db = VectorDB(
+        FakeEmbedder({"query": torch.tensor([1.0, 0.0])}),
+        records=[
+            {"embedding": [1.0, 0.0], "text": "wrong metadata", "metadata": ["public"]},
+            {"embedding": [0.8, 0.0], "text": "right metadata", "metadata": ["public", "manual"]},
+        ],
+    )
+
+    results = db.search("query", ["manual"])
+
+    assert results == [SearchResult(index=1, score=1.0, sequence="right metadata")]
+
+
+def test_vector_db_search_handles_empty_matches_and_zero_top_k() -> None:
+    embedder = FakeEmbedder({"query": torch.tensor([1.0, 0.0])})
+    empty_db = VectorDB(embedder)
+    db = VectorDB(
+        embedder,
+        records=[{"embedding": [1.0, 0.0], "text": "exact", "metadata": ["public"]}],
+    )
+
+    assert empty_db.search("query") == []
+    assert db.search("query", ["missing"]) == []
+    assert db.search("query", top_k=0) == []
+
+
+def test_vector_db_exports_human_readable_json_and_loads(tmp_path: Path) -> None:
+    path = tmp_path / "vectors.json"
+    embedder = FakeEmbedder({"query": torch.tensor([1.0, 0.0])})
+    db = VectorDB(
+        embedder,
+        records=[
+            {"embedding": [1.0, 0.0], "text": "exact", "metadata": ["doc:1"]},
+            {"embedding": [0.0, 1.0], "text": "unrelated", "metadata": ["doc:2"]},
+        ],
+    )
+
+    db.export(path)
+    loaded = VectorDB.load(path, embedder)
+
+    assert path.read_text(encoding="utf-8").startswith("[\n  {")
+    assert json.loads(path.read_text(encoding="utf-8")) == db.records
+    assert loaded.records == db.records
+    assert loaded.search("query", ["doc:1"], top_k=1) == [
+        SearchResult(index=0, score=1.0, sequence="exact")
+    ]
+
+
+def test_vector_db_load_rejects_malformed_records(tmp_path: Path) -> None:
+    path = tmp_path / "malformed.json"
+    path.write_text(
+        json.dumps([{"embedding": ["bad"], "text": "candidate", "metadata": []}]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="embedding"):
+        VectorDB.load(path, DynamicFakeEmbedder())
