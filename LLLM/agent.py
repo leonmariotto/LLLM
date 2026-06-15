@@ -90,6 +90,21 @@ Examples:
   use file/code tools if repository or local files must be inspected.
 """
 
+# Number of items that stay untouched by summarization.
+SUM_KEEP_RECENTS = 5
+
+# Prompt used to summarize items in context.
+SUMMARY_PROMPT = """Summarize the prior conversation and tool history into concise state for the next assistant turn.
+
+Include only durable information needed to continue:
+- user goals and constraints
+- facts, decisions, and assumptions established so far
+- unresolved tasks or next actions
+- important tool calls and tool outputs
+
+Do not answer the user. Do not invent details. Keep it brief and concrete.
+"""
+
 
 class Agent:
     """
@@ -185,10 +200,16 @@ class Agent:
         @param context: execution context to update.
         @return None.
         """
+        # Tool-specific compaction pass
+        compacted_content = self._compact_request_content(context.items())
+
+        # Request-only history summarization pass.
+        request_content = self._summarize_request_content(compacted_content)
+
         # Prepare what to send to the LLM
         request = LlmRequest(
             instructions=self.system_instructions,
-            content=self._compact_request_content(context.items()),
+            content=request_content,
             tool_schemas=[tool.schema for tool in self.tools],
         )
 
@@ -219,6 +240,78 @@ class Agent:
         @return parsed LLM response.
         """
         return self.llm.complete(request)
+
+    def _summarize_request_content(
+        self, content: Sequence[ContentItem]
+    ) -> list[ContentItem]:
+        """
+        Summarize older request history without mutating execution context.
+        Keep last SUM_KEEP_RECENTS items untouched.
+        TODO: we should check the context size in terms of tokens.
+        """
+        if len(content) <= SUM_KEEP_RECENTS + 1:
+            logger.debug(
+                "skip history summarization because history is short item_count={}",
+                len(content),
+            )
+            return list(content)
+
+        first_item = content[0]
+        middle_items = content[1:-SUM_KEEP_RECENTS]
+        recent_items = content[-SUM_KEEP_RECENTS:]
+        summary = self._generate_history_summary(middle_items)
+        if summary is None:  # In case of error use un-summarized content.
+            return list(content)
+
+        logger.info(
+            "history summarization completed summarized_count={} preserved_recent_count={} summary_chars={}",
+            len(middle_items),
+            len(recent_items),
+            len(summary),
+        )
+        return [
+            first_item,
+            Message(
+                role="system",
+                content=f"Conversation summary so far:\n{summary}",
+            ),
+            *recent_items,
+        ]
+
+    def _generate_history_summary(self, items: Sequence[ContentItem]) -> str | None:
+        """
+        Ask the model for a concise summary of older request content.
+        Use SUMMARY_PROMPT.
+        """
+        try:
+            response = self.llm.complete(
+                LlmRequest(
+                    instructions=[SUMMARY_PROMPT],
+                    content=list(items),
+                    tool_schemas=[],
+                )
+            )
+        except Exception as error:
+            logger.warning("history summarization model call failed error={}", error)
+            return None
+
+        if response.error_message is not None:
+            logger.warning(
+                "history summarization response has error error={}",
+                response.error_message,
+            )
+            return None
+
+        for item in response.content:
+            if isinstance(item, Message) and item.role == "assistant":
+                summary = item.content.strip()
+                if summary:
+                    return summary
+                logger.warning("history summarization returned empty assistant text")
+                return None
+
+        logger.error("history summarization returned no assistant message")
+        return None
 
     def act(
         self,

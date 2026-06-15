@@ -2,7 +2,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from ..LLLM.agent import Agent
+from ..LLLM.agent import Agent, SUMMARY_PROMPT, SUM_KEEP_RECENTS
 from ..LLLM.agent_context import ExecutionContext, Event, Message, AgentToolResult
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.generator import (
@@ -14,7 +14,7 @@ from ..LLLM.tool_common import Tool, ToolCall, ToolContextPolicy
 
 
 class FakeGenerator:
-    def __init__(self, outputs: Sequence[AssistantOutput]) -> None:
+    def __init__(self, outputs: Sequence[AssistantOutput | Exception]) -> None:
         self.outputs = list(outputs)
         self.messages: list[list[ChatMessage]] = []
         self.tool_schemas: list[list[dict[str, object]]] = []
@@ -35,6 +35,8 @@ class FakeGenerator:
         self.messages.append([dict(message) for message in messages])
         self.tool_schemas.append(list(tools or []))
         output = self.outputs[len(self.messages) - 1]
+        if isinstance(output, Exception):
+            raise output
         return ChatCompletion(
             message=output,
             raw_completion="raw",
@@ -57,6 +59,24 @@ def tool(name: str, result: str | Exception) -> Tool:
         },
         execute=execute,
     )
+
+
+def long_message_context() -> ExecutionContext:
+    context = ExecutionContext()
+    for index in range(SUM_KEEP_RECENTS + 3):
+        message = (
+            Message(role="user", content=f"item {index}")
+            if index % 2 == 0
+            else Message(role="assistant", content=f"item {index}")
+        )
+        context.add_event(
+            Event(
+                execution_id=context.execution_id,
+                author=message.role,
+                content=[message],
+            )
+        )
+    return context
 
 
 def test_agent_run_returns_simple_answer_and_updates_context() -> None:
@@ -238,6 +258,109 @@ def test_agent_keeps_latest_tool_answer_raw_in_llm_request() -> None:
         status="success",
         content=[raw_answer],
     )
+
+
+def test_agent_does_not_summarize_short_history() -> None:
+    context = ExecutionContext()
+    for index in range(SUM_KEEP_RECENTS + 1):
+        context.add_user_message(f"item {index}")
+    generator = FakeGenerator([AssistantOutput("done")])
+    agent = Agent(LlmClient(generator), [])
+
+    agent.step(context)
+
+    assert len(generator.messages) == 1
+    assert generator.messages[0] == [
+        {"role": "user", "content": f"item {index}"}
+        for index in range(SUM_KEEP_RECENTS + 1)
+    ]
+
+
+def test_agent_summarizes_middle_history_only_in_llm_request() -> None:
+    context = long_message_context()
+    raw_items = context.items()
+    generator = FakeGenerator(
+        [
+            AssistantOutput("summary text"),
+            AssistantOutput("done"),
+        ]
+    )
+    agent = Agent(LlmClient(generator), [])
+
+    agent.step(context)
+
+    assert len(generator.messages) == 2
+    assert generator.tool_schemas == [[], []]
+    assert generator.messages[0] == [
+        {"role": "system", "content": SUMMARY_PROMPT},
+        {"role": "assistant", "content": "item 1"},
+        {"role": "user", "content": "item 2"},
+    ]
+    assert generator.messages[1] == [
+        {"role": "user", "content": "item 0"},
+        {
+            "role": "system",
+            "content": "Conversation summary so far:\nsummary text",
+        },
+        {"role": "assistant", "content": "item 3"},
+        {"role": "user", "content": "item 4"},
+        {"role": "assistant", "content": "item 5"},
+        {"role": "user", "content": "item 6"},
+        {"role": "assistant", "content": "item 7"},
+    ]
+    assert context.items() == [*raw_items, Message(role="assistant", content="done")]
+
+
+def test_agent_falls_back_to_unsummarized_history_on_summary_error() -> None:
+    context = long_message_context()
+    generator = FakeGenerator(
+        [
+            ValueError("summary failed"),
+            AssistantOutput("done"),
+        ]
+    )
+    agent = Agent(LlmClient(generator), [])
+
+    agent.step(context)
+
+    assert len(generator.messages) == 2
+    assert generator.messages[1] == [
+        {"role": "user", "content": "item 0"},
+        {"role": "assistant", "content": "item 1"},
+        {"role": "user", "content": "item 2"},
+        {"role": "assistant", "content": "item 3"},
+        {"role": "user", "content": "item 4"},
+        {"role": "assistant", "content": "item 5"},
+        {"role": "user", "content": "item 6"},
+        {"role": "assistant", "content": "item 7"},
+    ]
+    assert context.messages()[-1] == Message(role="assistant", content="done")
+
+
+def test_agent_falls_back_to_unsummarized_history_without_assistant_summary() -> None:
+    context = long_message_context()
+    generator = FakeGenerator(
+        [
+            AssistantOutput("", (ToolCall(name="noop", arguments={}),)),
+            AssistantOutput("done"),
+        ]
+    )
+    agent = Agent(LlmClient(generator), [])
+
+    agent.step(context)
+
+    assert len(generator.messages) == 2
+    assert generator.messages[1] == [
+        {"role": "user", "content": "item 0"},
+        {"role": "assistant", "content": "item 1"},
+        {"role": "user", "content": "item 2"},
+        {"role": "assistant", "content": "item 3"},
+        {"role": "user", "content": "item 4"},
+        {"role": "assistant", "content": "item 5"},
+        {"role": "user", "content": "item 6"},
+        {"role": "assistant", "content": "item 7"},
+    ]
+    assert context.messages()[-1] == Message(role="assistant", content="done")
 
 
 def test_agent_compacts_previous_tool_answer_only_in_llm_request() -> None:
