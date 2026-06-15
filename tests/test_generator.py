@@ -35,6 +35,11 @@ class JsonTokenizer:
     def __init__(self) -> None:
         self.tokens = [
             "",
+            "\n",
+            " ",
+            "<",
+            ">",
+            "/",
             "{",
             "}",
             '"',
@@ -44,6 +49,7 @@ class JsonTokenizer:
             "]",
             "n",
             "a",
+            "d",
             "m",
             "e",
             "o",
@@ -53,6 +59,8 @@ class JsonTokenizer:
             "r",
             "u",
             "f",
+            "h",
+            "i",
             "l",
             "s",
             "1",
@@ -395,6 +403,31 @@ def test_response_format_masks_invalid_tokens_and_returns_json_string() -> None:
 
     assert generated == target
     assert JsonProbe.model_validate_json(generated) == JsonProbe(
+        name="max",
+        ok=True,
+        scores=[1, 2, 3],
+    )
+
+
+def test_response_format_allows_think_block_before_json() -> None:
+    tokenizer = JsonTokenizer()
+    target = '<think>hidden</think>\n\n{"name":"max","ok":true,"scores":[1,2,3]}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=JsonProbe,
+    )
+
+    assert generated == target
+    json_payload = generated.rsplit("</think>", maxsplit=1)[-1].strip()
+    assert JsonProbe.model_validate_json(json_payload) == JsonProbe(
         name="max",
         ok=True,
         scores=[1, 2, 3],

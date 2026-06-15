@@ -28,7 +28,7 @@ QWEN3_06B_BASE_REPO_ID = "Qwen/Qwen3-0.6B-base"
 
 class StructuredQwen3Smoke(BaseModel):
     ok: bool
-    l: list[str]
+    values: list[str]
     s: str
 
 
@@ -125,6 +125,36 @@ def test_functional_qwen3_06b_generates_constrained_response_format(
     )
 
     parsed = StructuredQwen3Smoke.model_validate_json(generated_text)
+    assert isinstance(parsed.ok, bool)
+
+
+@pytest.mark.slow
+def test_functional_qwen3_06b_constrained_response_format_allows_thinking(
+    qwen3_06b_model_and_tokenizer: tuple[Qwen3Model, Qwen3Tokenizer],
+) -> None:
+    model, tokenizer = qwen3_06b_model_and_tokenizer
+    generator = Generator(model=model, tokenizer=tokenizer, cache_length=16384)
+    prompt_tokens = tokenizer.encode_instruct_prompt(
+        "Think very briefly in a <think></think> block, then return only a JSON "
+        "object matching this schema after the think block: "
+        f"{StructuredQwen3Smoke.model_json_schema()}.",
+        enable_thinking=True,
+    )
+
+    generated_text = generator.generate_from_tokens(
+        prompt_tokens,
+        max_generated_token=2048,
+        include_prompt=False,
+        response_format=StructuredQwen3Smoke,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
+    )
+
+    assert generated_text.startswith("<think>")
+    assert "</think>" in generated_text
+    json_payload = generated_text.rsplit("</think>", maxsplit=1)[-1].strip()
+    parsed = StructuredQwen3Smoke.model_validate_json(json_payload)
     assert isinstance(parsed.ok, bool)
 
 

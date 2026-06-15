@@ -248,7 +248,10 @@ class JsonConstrainedDecoder:
     """
     Stateful token-mask builder for one constrained JSON completion.
     Binded to a type.
-    TODO contrained decoding should still allow the model to think.
+
+    The generated completion may be either a JSON object or a Qwen-style
+    ``<think>...</think>`` block followed by a JSON object. Only the JSON
+    payload is used for completion detection and final schema validation.
     """
 
     def __init__(
@@ -271,7 +274,10 @@ class JsonConstrainedDecoder:
 
     def is_complete(self) -> bool:
         """Return whether the current generated text is a complete valid object."""
-        return _parse_complete_object(self.generated_text, self.spec)
+        payload = _json_payload_after_optional_think(self.generated_text)
+        if payload is None:
+            return False
+        return _parse_complete_object(payload, self.spec)
 
     def append_token(self, token_id: int) -> None:
         """Append one selected token to the tracked JSON completion."""
@@ -298,7 +304,10 @@ class JsonConstrainedDecoder:
         def is_valid_token_suffix(token_text: str) -> bool:
             # Tokens may span several JSON grammar transitions, so validate the
             # whole appended prefix instead of checking one character at a time.
-            return _parse_valid_prefix(self.generated_text + token_text, self.spec)
+            return _parse_valid_constrained_prefix(
+                self.generated_text + token_text,
+                self.spec,
+            )
 
         token_ids = self.trie.valid_token_ids(is_valid_token_suffix)
         mask = torch.zeros(logits.shape[-1], dtype=torch.bool)
@@ -312,8 +321,16 @@ class JsonConstrainedDecoder:
 
     def validate_final(self) -> None:
         """Validate the completed JSON text with the original Pydantic model."""
+        payload = _json_payload_after_optional_think(self.generated_text)
+        if payload is None:
+            logger.error(
+                "Constrained JSON final validation failed schema={} text={!r}",
+                self.spec.name,
+                self.generated_text,
+            )
+            raise ValueError("generated text ended before constrained JSON payload")
         try:
-            self.spec.model.model_validate_json(self.generated_text)
+            self.spec.model.model_validate_json(payload)
         except ValueError as error:
             logger.error(
                 "Constrained JSON final validation failed schema={} text={!r}",
@@ -327,7 +344,7 @@ class JsonConstrainedDecoder:
             "Constrained JSON final validation succeeded schema={} chars={} "
             "mask_cache_hits={} mask_cache_misses={}",
             self.spec.name,
-            len(self.generated_text),
+            len(payload),
             self.stats.mask_cache_hits,
             self.stats.mask_cache_misses,
         )
@@ -434,6 +451,39 @@ def _parse_complete_object(text: str, spec: JsonObjectSpec) -> bool:
     except (_Incomplete, _Invalid):
         return False
     return position == len(text)
+
+
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def _parse_valid_constrained_prefix(text: str, spec: JsonObjectSpec) -> bool:
+    """Return whether text can become optional-think-plus-JSON output."""
+    if _THINK_OPEN.startswith(text):
+        return True
+
+    payload = _json_payload_after_optional_think(text)
+    if payload is None:
+        return text.startswith(_THINK_OPEN)
+    if payload == "":
+        return True
+    return _parse_valid_prefix(payload, spec)
+
+
+def _json_payload_after_optional_think(text: str) -> str | None:
+    """
+    Return the JSON payload after an optional complete Qwen think block.
+
+    ``None`` means generation is still inside an opened think block. Leading
+    whitespace before the JSON payload is ignored in both direct and thinking
+    modes.
+    """
+    if text.startswith(_THINK_OPEN):
+        close_index = text.find(_THINK_CLOSE)
+        if close_index == -1:
+            return None
+        return text[close_index + len(_THINK_CLOSE) :].lstrip()
+    return text.lstrip()
 
 
 def _parse_object(text: str, position: int, spec: JsonObjectSpec) -> int:

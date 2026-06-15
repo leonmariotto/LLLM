@@ -91,19 +91,9 @@ space before storing them in the KV cache.
 - Add a training app that exports native IR checkpoints and persists optimizer/scheduler state for training resumption.
 - Add Hugging Face and GGUF exporters for distributing fine-tuned native IR checkpoints outside this project.
 
-- create EmbeddingDB: function to produce, load and search into embedding database. + an app to use it.
-
-- litellm completion have a response_format variable that define the expected
-structured output. This must be a prompt formatting technics, see with current
-Tokenizer what we can do. Using pydantic it's handy because we can generate a JSon schema from a pydantic type easily.
-Note that it's not litellm that implement constrained decoding it's the "provider": the
-inference service/server.
-Here's some technics to do that :
-    - Prompt-only formating: no hard garantee.
-    - Some model are trained for schema, so we can output them a JSON schema directly.
-    - Constrained decoding, we tweaks the generation so that invalid token are masked
-    out in token probability. That's the hard-lock. It's fun, I should do that. Not so
-    simple to implement though.
+- add support for optional field in constrained decoder
+- add suport for tool_choice="required"
+- add a strong hard constrined generation for tool calls.
 
 ## Development note.
 
