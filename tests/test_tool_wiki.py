@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 import requests
 
+from ..LLLM.agent_context import AgentToolResult
 from ..LLLM.tool_common import Tool
 from ..LLLM.tool_wiki import execute_wiki, wiki_tool
 
@@ -45,6 +46,72 @@ def test_wiki_tool_returns_registered_tool() -> None:
     action = properties["action"]
     assert isinstance(action, dict)
     assert action["enum"] == ["search", "open", "search_in_page", "read_chunk"]
+    assert tool.context_policy is not None
+    assert tool.context_policy.compact_answer is not None
+
+
+def test_wiki_context_policy_compacts_long_success_answer() -> None:
+    tool = wiki_tool()
+    assert tool.context_policy is not None
+    assert tool.context_policy.compact_answer is not None
+    raw_content = (
+        "URL: https://en.wikipedia.org/wiki/Long\n"
+        "Title: Long\n\n"
+        f"{'x' * 3000}\n"
+        "[truncated]"
+    )
+    result = AgentToolResult(
+        tool_call_id="call_0",
+        name="wiki",
+        status="success",
+        content=[raw_content],
+    )
+
+    compacted = tool.context_policy.compact_answer(result)
+
+    assert isinstance(compacted, AgentToolResult)
+    assert compacted.tool_call_id == "call_0"
+    assert compacted.name == "wiki"
+    assert compacted.status == "success"
+    content = compacted.content[0]
+    assert isinstance(content, str)
+    assert "URL: https://en.wikipedia.org/wiki/Long" in content
+    assert "Title: Long" in content
+    assert "[wiki answer compacted from" in content
+    assert "[truncated]" in content
+    assert len(content) < len(raw_content)
+
+
+def test_wiki_context_policy_leaves_short_success_answer() -> None:
+    tool = wiki_tool()
+    assert tool.context_policy is not None
+    assert tool.context_policy.compact_answer is not None
+    result = AgentToolResult(
+        tool_call_id="call_0",
+        name="wiki",
+        status="success",
+        content=["URL: https://en.wikipedia.org/wiki/Short\nTitle: Short\n\nbrief"],
+    )
+
+    compacted = tool.context_policy.compact_answer(result)
+
+    assert compacted == result
+
+
+def test_wiki_context_policy_leaves_error_answer() -> None:
+    tool = wiki_tool()
+    assert tool.context_policy is not None
+    assert tool.context_policy.compact_answer is not None
+    result = AgentToolResult(
+        tool_call_id="call_0",
+        name="wiki",
+        status="error",
+        content=["wiki failed"],
+    )
+
+    compacted = tool.context_policy.compact_answer(result)
+
+    assert compacted == result
 
 
 def test_execute_wiki_search_parses_results(

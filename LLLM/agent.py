@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import cast
 
-from .agent_context import ExecutionContext, Message
+from .agent_context import ContentItem, ExecutionContext, Message
 from .tool_common import ToolCall
 from .agent_context import AgentToolResult
 from .agent_context import AgentResult
@@ -188,15 +188,14 @@ class Agent:
         # Prepare what to send to the LLM
         request = LlmRequest(
             instructions=self.system_instructions,
-            content=context.items(),
+            content=self._compact_request_content(context.items()),
             tool_schemas=[tool.schema for tool in self.tools],
         )
 
         # Get LLM's decision
         response = self.think(request)
 
-        # TODO pretty print LlmResposne
-        logger.debug("LlmResponse=[{}]", response)
+        logger.debug("response.content = [{}]", response.content)
 
         # Record LLM response as an event
         response_event = Event(
@@ -268,6 +267,75 @@ class Agent:
         if not isinstance(name, str) or not name:
             raise ValueError("tool schema function must include a non-empty name")
         return name
+
+    def _compact_request_content(
+        self, items: Sequence[ContentItem]
+    ) -> list[ContentItem]:
+        """
+        Return context items transformed by tool-specific request policies.
+
+        The execution context remains the source of truth and is never mutated
+        by this helper; compaction only affects the next LLM request. The last
+        item is kept raw so the model sees the newest context without loss.
+        """
+        compacted_items: list[ContentItem] = []
+        last_index = len(items) - 1
+        for index, item in enumerate(items):
+            if index == last_index:
+                compacted_items.append(item)
+            else:
+                compacted_items.append(self._compact_request_item(item))
+        return compacted_items
+
+    def _compact_request_item(self, item: ContentItem) -> ContentItem:
+        """Apply the matching tool context policy to one request item."""
+        if isinstance(item, ToolCall):
+            tool = self._tools_by_name.get(item.name)
+            policy = None if tool is None else tool.context_policy
+            compact_call = None if policy is None else policy.compact_call
+            if compact_call is None:
+                return item
+            try:
+                compacted = compact_call(item)
+            except Exception as error:
+                logger.warning(
+                    "tool call compaction failed; using raw item tool={} error={}",
+                    item.name,
+                    error,
+                )
+                return item
+            logger.debug(
+                "compacted tool call tool={} before_chars={} after_chars={}",
+                item.name,
+                len(str(item)),
+                len(str(compacted)),
+            )
+            return compacted
+
+        if isinstance(item, AgentToolResult):
+            tool = self._tools_by_name.get(item.name)
+            policy = None if tool is None else tool.context_policy
+            compact_answer = None if policy is None else policy.compact_answer
+            if compact_answer is None:
+                return item
+            try:
+                compacted = compact_answer(item)
+            except Exception as error:
+                logger.warning(
+                    "tool answer compaction failed; using raw item tool={} error={}",
+                    item.name,
+                    error,
+                )
+                return item
+            logger.debug(
+                "compacted tool answer tool={} before_chars={} after_chars={}",
+                item.name,
+                len(str(item)),
+                len(str(compacted)),
+            )
+            return compacted
+
+        return item
 
     def _execute_tool_call(self, tool_call: ToolCall) -> AgentToolResult:
         """

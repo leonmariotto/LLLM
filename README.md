@@ -4,21 +4,18 @@ A from scratch implementation of LLM inference using **pytorch**. Currently
 supporting **GPT2**, **Gemma3**, **Llama3**, **Qwen3** models inferences. Implement
 **sliding KV caching** and **quantization** optimizations.
 
-To easily integrate new model there is an evaluation system using dataset like
+To easily integrate new model provide an evaluation system using dataset like
 **BoolQ**, **GSM8K** and **Squad** for instructions-tuned models and **Wikitext-2** for
 base models. Each integrated models is covered by unit-tests and functional tests.
 
-Implement LLM reasoning technics such as specialized **self-refinment** and
-**self-consistency** for specific tasks.
-
 Implement embedding models inference and tooling to produce **embedding vector database**. Provide a tool (`vector_db`) to build, save, load and use theses database.
-Provide options to use this DB with **Retrieval Augmented Generation**.
+Provide options to use this DB with **retrieval augmented generation**.
 
-Provide user application : **coder** code-production oriented generation, **chat** simple
-chat application.
+Provide user application : `coder` code-production oriented generation (use reasoning technics suck as **self-refinment** and **self-consistency**), `chat` simple
+chat application with fancy TUI.
 
-Provide different loader (**hf_loader**, **gguf** and **native**) that translate into an internal
-representation which is then used by models. This keep a clear separation between models
+Internally use different loader (**hf_loader** and **gguf**) that translate into an internal
+representation (**model_ir** or **model_ir**) which is then used by models. This keep a clear separation between models
 format and internal logic.
 
 Full coverage test suite including **unit-tests** and **functional tests**.

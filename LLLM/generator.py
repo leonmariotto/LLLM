@@ -248,6 +248,7 @@ class JsonConstrainedDecoder:
     """
     Stateful token-mask builder for one constrained JSON completion.
     Binded to a type.
+    TODO contrained decoding should still allow the model to think.
     """
 
     def __init__(

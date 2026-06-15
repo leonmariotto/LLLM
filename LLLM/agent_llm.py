@@ -117,6 +117,7 @@ class LlmClient:
         temperature: float = 0.0,
         top_k: int | None = None,
         top_p: float | None = None,
+        enable_thinking: bool = True,
     ) -> None:
         self.generator = generator
         self.stop_at_eos = stop_at_eos
@@ -125,6 +126,7 @@ class LlmClient:
         self.temperature = temperature
         self.top_k = top_k
         self.top_p = top_p
+        self.enable_thinking = enable_thinking
 
     def complete(self, request: LlmRequest) -> LlmResponse:
         """Generate and parse one assistant turn."""
@@ -139,6 +141,7 @@ class LlmClient:
                 temperature=self.temperature,
                 top_k=self.top_k,
                 top_p=self.top_p,
+                enable_thinking=self.enable_thinking,
             )
         except CompletionParseError as error:
             return LlmResponse(

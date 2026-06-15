@@ -3,14 +3,14 @@ from collections.abc import Sequence
 import pytest
 
 from ..LLLM.agent import Agent
-from ..LLLM.agent_context import ExecutionContext, Message, AgentToolResult
+from ..LLLM.agent_context import ExecutionContext, Event, Message, AgentToolResult
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.generator import (
     AssistantOutput,
     ChatCompletion,
     ChatMessage,
 )
-from ..LLLM.tool_common import Tool, ToolCall
+from ..LLLM.tool_common import Tool, ToolCall, ToolContextPolicy
 
 
 class FakeGenerator:
@@ -189,3 +189,208 @@ def test_agent_context_records_tool_events_and_final_result() -> None:
         Message(role="assistant", content="done"),
     ]
     assert context.final_result == "done"
+
+
+def test_agent_keeps_latest_tool_answer_raw_in_llm_request() -> None:
+    raw_answer = "raw answer with lots of detail"
+    generator = FakeGenerator(
+        [
+            AssistantOutput("", (ToolCall(name="lookup", arguments={"q": "x"}),)),
+            AssistantOutput("done"),
+        ]
+    )
+
+    def compact_answer(result: AgentToolResult) -> AgentToolResult:
+        return AgentToolResult(
+            tool_call_id=result.tool_call_id,
+            name=result.name,
+            status=result.status,
+            content=["compact answer"],
+        )
+
+    agent = Agent(
+        LlmClient(generator),
+        [
+            Tool(
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                execute=lambda _: raw_answer,
+                context_policy=ToolContextPolicy(compact_answer=compact_answer),
+            )
+        ],
+    )
+
+    result = agent.run("go")
+
+    assert result.output == "done"
+    assert generator.messages[1][-1] == {
+        "role": "tool",
+        "content": f"Tool result: {raw_answer}",
+    }
+    assert result.context.items()[2] == AgentToolResult(
+        tool_call_id="call_0",
+        name="lookup",
+        status="success",
+        content=[raw_answer],
+    )
+
+
+def test_agent_compacts_previous_tool_answer_only_in_llm_request() -> None:
+    context = ExecutionContext()
+    context.add_user_message("go")
+    context.add_event(
+        Event(
+            execution_id=context.execution_id,
+            author="agent",
+            content=[
+                ToolCall(
+                    tool_call_id="call_0",
+                    name="lookup",
+                    arguments={"q": "x"},
+                )
+            ],
+        )
+    )
+    context.add_event(
+        Event(
+            execution_id=context.execution_id,
+            author="tool",
+            content=[
+                AgentToolResult(
+                    tool_call_id="call_0",
+                    name="lookup",
+                    status="success",
+                    content=["raw answer with lots of detail"],
+                )
+            ],
+        )
+    )
+    context.add_user_message("continue")
+    generator = FakeGenerator([AssistantOutput("done")])
+
+    def compact_answer(result: AgentToolResult) -> AgentToolResult:
+        return AgentToolResult(
+            tool_call_id=result.tool_call_id,
+            name=result.name,
+            status=result.status,
+            content=["compact answer"],
+        )
+
+    agent = Agent(
+        LlmClient(generator),
+        [
+            Tool(
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                execute=lambda _: "unused",
+                context_policy=ToolContextPolicy(compact_answer=compact_answer),
+            )
+        ],
+    )
+
+    agent.step(context)
+
+    assert generator.messages[0][-2] == {
+        "role": "tool",
+        "content": "Tool result: compact answer",
+    }
+    assert generator.messages[0][-1] == {"role": "user", "content": "continue"}
+    assert context.items()[2] == AgentToolResult(
+        tool_call_id="call_0",
+        name="lookup",
+        status="success",
+        content=["raw answer with lots of detail"],
+    )
+
+
+def test_agent_compacts_tool_call_only_in_llm_request() -> None:
+    generator = FakeGenerator(
+        [
+            AssistantOutput("", (ToolCall(name="lookup", arguments={"q": "raw"}),)),
+            AssistantOutput("done"),
+        ]
+    )
+
+    def compact_call(call: ToolCall) -> ToolCall:
+        return ToolCall(
+            tool_call_id=call.tool_call_id,
+            name=call.name,
+            arguments={"q": "compact"},
+        )
+
+    agent = Agent(
+        LlmClient(generator),
+        [
+            Tool(
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                execute=lambda _: "answer",
+                context_policy=ToolContextPolicy(compact_call=compact_call),
+            )
+        ],
+    )
+
+    result = agent.run("go")
+
+    assert result.output == "done"
+    assistant_message = generator.messages[1][1]
+    assert assistant_message["tool_calls"] == [
+        ToolCall(name="lookup", arguments={"q": "compact"})
+    ]
+    assert result.context.items()[1] == ToolCall(
+        tool_call_id="call_0",
+        name="lookup",
+        arguments={"q": "raw"},
+    )
+
+
+def test_agent_uses_raw_item_when_context_policy_fails() -> None:
+    generator = FakeGenerator(
+        [
+            AssistantOutput("", (ToolCall(name="lookup", arguments={"q": "x"}),)),
+            AssistantOutput("done"),
+        ]
+    )
+
+    def compact_answer(_: AgentToolResult) -> AgentToolResult:
+        raise RuntimeError("bad policy")
+
+    agent = Agent(
+        LlmClient(generator),
+        [
+            Tool(
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                execute=lambda _: "raw answer",
+                context_policy=ToolContextPolicy(compact_answer=compact_answer),
+            )
+        ],
+    )
+
+    result = agent.run("go")
+
+    assert result.output == "done"
+    assert generator.messages[1][-1] == {
+        "role": "tool",
+        "content": "Tool result: raw answer",
+    }

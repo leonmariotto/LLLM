@@ -20,6 +20,7 @@ from ..LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
 from ..LLLM.agent import Agent
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.tool_compute import compute_tool
+from ..LLLM.tool_wiki import wiki_tool
 
 
 QWEN3_06B_REPO_ID = "Qwen/Qwen3-0.6B"
@@ -39,7 +40,7 @@ def qwen3_06b_gaia_generator() -> Generator:
 
 
 @pytest.fixture(scope="module")
-def qwen3_06b_gaia_agent_with_compute() -> Agent:
+def qwen3_06b_gaia_agent_with_tools() -> Agent:
     ir = fetch_model_ir(QWEN3_06B_REPO_ID)
     cfg = Qwen3Model.config_from_ir(ir)
     path = Path(str(ir.metadata["path"]))
@@ -53,9 +54,9 @@ def qwen3_06b_gaia_agent_with_compute() -> Agent:
         LlmClient(
             qwen3_generator,
             max_generated_token=4096,
-            temperature=0.0,
+            temperature=0.6, top_p=0.95, top_k=20,
         ),
-        [compute_tool()],
+        [compute_tool(), wiki_tool()],
     )
 
 
@@ -110,8 +111,8 @@ def test_functional_qwen3_06b_no_harness_gaia_validation(
 
 
 @pytest.mark.slow
-def test_functional_qwen3_06b_with_compute_gaia_validation(
-    qwen3_06b_gaia_agent_with_compute: Agent,
+def test_functional_qwen3_06b_with_tools_gaia_validation(
+    qwen3_06b_gaia_agent_with_tools: Agent,
 ) -> None:
     def agent(task: GaiaTask) -> str:
         attachment_note = (
@@ -122,9 +123,11 @@ def test_functional_qwen3_06b_with_compute_gaia_validation(
         #TODO: GAIA output format should be part of gaia contract and derived
         #from a pydantic type.
         # TODO add informations like: is_solvable: bool and unsolvability_reason:str
-        result = qwen3_06b_gaia_agent_with_compute.run(
+        result = qwen3_06b_gaia_agent_with_tools.run(
             "Answer this GAIA benchmark question. Use the compute tool when "
-            "arithmetic or exact calculation is needed. Return only the final "
+            "arithmetic or exact calculation is needed. Use the wiki tool when "
+            "factual or external to your knowledge informations are needed. "
+            "Return only the final "
             "answer using this exact format: FINAL ANSWER: <answer>\n\n"
             f"Question: {task.question}"
             f"{attachment_note}"

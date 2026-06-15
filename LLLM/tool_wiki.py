@@ -22,7 +22,8 @@ import requests
 
 from loguru import logger
 
-from .tool_common import Tool
+from .agent_context import AgentToolResult
+from .tool_common import Tool, ToolContextPolicy
 
 _DEFAULT_WIKI = "https://en.wikipedia.org"
 _REQUEST_TIMEOUT_SECONDS = 10
@@ -46,6 +47,8 @@ _SUPPORTED_HOST_SUFFIXES = (
 _SUPPORTED_EXACT_HOSTS = {"www.wikidata.org"}
 _SEARCH_IN_PAGE_CONTEXT_CHARS = 300
 _TRUNCATED_MARKER = "\n[truncated]"
+_CONTEXT_COMPACT_BODY_CHARS = 1200
+_CONTEXT_COMPACT_MIN_SAVED_CHARS = 300
 
 WIKI_TOOL_SCHEMA: dict[str, object] = {
     "type": "function",
@@ -168,7 +171,11 @@ class _FetchedPage:
 def wiki_tool() -> Tool:
     """Return the ready-to-register ``wiki`` tool."""
     executor = _WikiExecutor()
-    return Tool(schema=copy.deepcopy(WIKI_TOOL_SCHEMA), execute=executor.execute)
+    return Tool(
+        schema=copy.deepcopy(WIKI_TOOL_SCHEMA),
+        execute=executor.execute,
+        context_policy=ToolContextPolicy(compact_answer=_compact_wiki_answer),
+    )
 
 
 def execute_wiki(arguments: dict[str, object]) -> str:
@@ -258,6 +265,95 @@ class _WikiExecutor:
 
 
 _DEFAULT_EXECUTOR = _WikiExecutor()
+
+
+def _compact_wiki_answer(result: AgentToolResult) -> AgentToolResult:
+    """
+    Return a request-only compacted wiki tool result.
+
+    The stored execution context keeps the full result. This function preserves
+    source/navigation metadata and trims long page bodies before the next LLM
+    request is built.
+    """
+    if result.status != "success":
+        logger.debug("skip wiki answer compaction for non-success status")
+        return result
+
+    compacted_content: list[object] = []
+    changed = False
+    for item in result.content:
+        if not isinstance(item, str):
+            compacted_content.append(item)
+            continue
+        compacted = _compact_wiki_text(item)
+        changed = changed or compacted != item
+        compacted_content.append(compacted)
+
+    if not changed:
+        logger.debug("skip wiki answer compaction because content is already short")
+        return result
+
+    logger.debug(
+        "compacted wiki answer tool_call_id={} before_chars={} after_chars={}",
+        result.tool_call_id,
+        sum(len(str(item)) for item in result.content),
+        sum(len(str(item)) for item in compacted_content),
+    )
+    return AgentToolResult(
+        tool_call_id=result.tool_call_id,
+        name=result.name,
+        status=result.status,
+        content=compacted_content,
+    )
+
+
+def _compact_wiki_text(text: str) -> str:
+    """
+    Compact a wiki response while preserving source and continuation hints.
+
+    Search results are usually shorter than this threshold and pass through
+    unchanged. Long open/search_in_page/read_chunk answers keep metadata lines
+    plus the first body segment that fits the context budget.
+    """
+    if len(text) <= _CONTEXT_COMPACT_BODY_CHARS + _CONTEXT_COMPACT_MIN_SAVED_CHARS:
+        return text
+
+    metadata_lines: list[str] = []
+    body_lines: list[str] = []
+    for line in text.splitlines():
+        if _is_wiki_metadata_line(line):
+            metadata_lines.append(line)
+        elif line.strip() == "[truncated]":
+            metadata_lines.append(line)
+        else:
+            body_lines.append(line)
+
+    body = "\n".join(body_lines).strip()
+    visible_body = body[:_CONTEXT_COMPACT_BODY_CHARS].rstrip()
+    sections = [
+        *metadata_lines,
+        (f"[wiki answer compacted from {len(text)} to {len(visible_body)} body chars]"),
+    ]
+    if visible_body:
+        sections.append(visible_body)
+    if text.endswith(_TRUNCATED_MARKER) and "[truncated]" not in metadata_lines:
+        sections.append("[truncated]")
+
+    return "\n".join(section for section in sections if section)
+
+
+def _is_wiki_metadata_line(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith(("URL:", "Title:", "Query:", "Match ")):
+        return True
+    if re.match(r"^\d+\. .+", stripped):
+        return True
+    if stripped == (
+        "Search results only list candidate pages. You must call "
+        "open or search_in_page before answering."
+    ):
+        return True
+    return False
 
 
 def _execute_search(
