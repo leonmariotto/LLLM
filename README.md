@@ -135,6 +135,40 @@ Here's some technics to do that :
         fundamental concepts, definitions, or well- established technical facts."
     - Provide concrete examples.
 
+
+Different tools response/requests must have differents compaction.
+Each tool can declare a ToolContextPolicy class.
+
+History summarization should use layers:
+    - recent_message: exact last N turn
+    - session summary: compressed older conversation
+    - task_state: current goals, decision and constraint
+    - facts_memory: durable facts discovered.
+    - open_thread: unresolved questions.
+
+Distinguish memory:
+    - Instruction memory: stable behavior rules
+    - Task memory, current goal, plan, constraint, decision, TODOs.
+    - Conversation memory: user/assistant turns, summarizable.
+    - Evidence memory: RAG snippet, search result, citation.
+    - Tool memory: calls, output
+Each category have different compaction rules.
+
+Context invalidation is important, when files changes, or something happen. This
+can be done using some context items metadata.
+
+Deduplication.
+
+So there is a general context management part that handle which messages are pinned, 
+which can be summarized, etc
+And there is a per-tool context management that handle tool call tool response in context.
+Some LLM call can be done to extract information of tool result in order to summarize them.
+Don't do callback, I don't like this.
+
+task_state should be made from
+    - deterministic parsing of all events.
+    - LLM produced task_state_patch, validated deterministically.
+
 ### Embedded models inference
 
 A causal LLM answer :

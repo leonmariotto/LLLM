@@ -52,6 +52,7 @@ class LlmResponse:
     raw_completion: str = ""
     usage_metadata: dict[str, object] = field(default_factory=_empty_usage_metadata)
     error_message: str | None = None
+    # TODO add confidence hint: logprobe
 
 
 def build_messages(request: LlmRequest) -> list[ChatMessage]:

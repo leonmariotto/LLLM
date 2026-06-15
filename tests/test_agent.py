@@ -63,7 +63,7 @@ def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     context = ExecutionContext()
     generator = FakeGenerator([AssistantOutput("finished")])
     llm = LlmClient(generator, max_generated_token=11, temperature=0.2)
-    agent = Agent(llm, [], instructions="be brief")
+    agent = Agent(llm, [], instruction="be brief")
 
     result = agent.run("question", context=context)
 

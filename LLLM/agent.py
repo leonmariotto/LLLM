@@ -103,19 +103,14 @@ class Agent:
         tools: Sequence[Tool],
         *,
         instruction: str = "",
-        instructions: str | Sequence[str] | None = None,
         max_step: int = 8,
     ) -> None:
-        if instruction and instructions is not None:
-            raise ValueError("use either instruction or instructions, not both")
         if max_step < 0:
             raise ValueError("max_step must be non-negative")
         self.llm = llm
         self.tools = tuple(tools)
         self._tools_by_name = self._index_tools(self.tools)
-        self.system_instructions = self._normalize_instructions(
-            instructions if instructions is not None else instruction
-        )
+        self.system_instructions = [instruction] if instruction else []
         self.max_step = max_step
 
     def run(
@@ -246,12 +241,6 @@ class Agent:
         )
         context.add_event(tool_event)
         return None
-
-    @staticmethod
-    def _normalize_instructions(instructions: str | Sequence[str]) -> list[str]:
-        if isinstance(instructions, str):
-            return [instructions] if instructions else []
-        return [instruction for instruction in instructions if instruction]
 
     @classmethod
     def _index_tools(cls, tools: Sequence[Tool]) -> dict[str, Tool]:
