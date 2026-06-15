@@ -91,9 +91,9 @@ space before storing them in the KV cache.
 - Add a training app that exports native IR checkpoints and persists optimizer/scheduler state for training resumption.
 - Add Hugging Face and GGUF exporters for distributing fine-tuned native IR checkpoints outside this project.
 
-- add support for optional field in constrained decoder
 - add suport for tool_choice="required"
 - add a strong hard constrined generation for tool calls.
+- add typed output in generator (now that we have typed generation), not only str.
 
 ## Development note.
 

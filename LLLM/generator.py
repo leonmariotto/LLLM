@@ -3,7 +3,9 @@ High-Level Generator class that provide text generation function
 from a raw model.
 Manage KVCache: KVCache is created and destroyed in a single generation.
 (_generate_tokens).
-Tool-less version. May be archived in a future iteration.
+Support structured output: use a token trie to fetch token effectively,
+structured output take a json schema in parameter, however only a very minimal
+subset of type is currently supported.
 """
 
 from collections.abc import Callable, Sequence
@@ -11,7 +13,6 @@ from dataclasses import dataclass
 import json
 import math
 import time
-import weakref
 from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast, List
 
 from .tool_common import ToolCall
@@ -106,8 +107,10 @@ class ConstraintTokenizer(Protocol):
 class JsonValueSpec:
     """Minimal JSON value specification supported by the constrained decoder."""
 
-    kind: JsonKind | Literal["list"]
+    kind: JsonKind | Literal["list", "object"]
     item: "JsonValueSpec | None" = None
+    fields: tuple["JsonFieldSpec", ...] = ()
+    nullable: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,7 @@ class JsonFieldSpec:
 
     name: str
     value: JsonValueSpec
+    required: bool
 
 
 @dataclass(frozen=True)
@@ -182,66 +186,148 @@ class TokenTrie:
             node = node.children.setdefault(char, _TrieNode())
         node.token_ids.append(token_id)
 
-    def valid_token_ids(self, is_valid_prefix: "PrefixChecker") -> list[int]:
-        """Return tokens whose decoded text keeps the JSON prefix valid."""
+    def valid_token_ids(self, is_valid_so_far: "PrefixChecker") -> list[int]:
+        """
+        Return tokens whose decoded text keeps the JSON prefix valid.
+        Use is_valid_so_far function to check if the whole generation is correct.
+        Need to use a callback here because TokenTrie don't have access to the
+        whole prediction, but the callback yes.
+
+        Return the list of syntactically valid token. The list can be huge if the field
+        is permissive.
+        """
         token_ids: list[int] = []
-        self._collect(self.root, "", is_valid_prefix, token_ids)
+        self._collect(self.root, "", is_valid_so_far, token_ids)
         return token_ids
 
     def _collect(
         self,
         node: _TrieNode,
         token_text: str,
-        is_valid_prefix: "PrefixChecker",
+        is_valid_so_far: "PrefixChecker",
         token_ids: list[int],
     ) -> None:
-        if token_text and not is_valid_prefix(token_text):
+        """
+        Recursive function. Use is_valid_so_far callback.
+        Start from the trie root, for every compatible token, check child token,
+        so if "a" is valid, "apple" will be tested.
+
+        Fill token_ids list with valid tokens.
+        """
+        if token_text and not is_valid_so_far(token_text):
             return
         token_ids.extend(node.token_ids)
         for char, child in node.children.items():
-            self._collect(child, token_text + char, is_valid_prefix, token_ids)
+            self._collect(child, token_text + char, is_valid_so_far, token_ids)
 
 
 PrefixChecker = Callable[[str], bool]
 
 
-_TRIE_CACHE: weakref.WeakKeyDictionary[object, TokenTrie] = weakref.WeakKeyDictionary()
-
-
 def schema_from_pydantic(response_format: type[BaseModel]) -> JsonObjectSpec:
-    """Extract the supported schema subset from a Pydantic BaseModel class."""
+    """Extract the supported schema subset from a non-recursive Pydantic model."""
     schema = response_format.model_json_schema()
-    properties = cast(object, schema.get("properties"))
-    required = cast(object, schema.get("required"))
-    if not isinstance(properties, dict) or not isinstance(required, list):
-        raise ValueError("response_format must define an object with required fields")
-    schema_properties = cast(dict[str, object], properties)
-    schema_required = cast(list[object], required)
-
-    required_names = [name for name in schema_required if isinstance(name, str)]
-    if len(required_names) != len(schema_properties) or set(required_names) != set(
-        schema_properties
-    ):
-        raise ValueError("all response_format fields must be required")
-
-    fields: list[JsonFieldSpec] = []
-    for name in response_format.model_fields:
-        raw_property = schema_properties.get(name)
-        if not isinstance(raw_property, dict):
-            raise ValueError(f"missing JSON schema for field {name!r}")
-        fields.append(
-            JsonFieldSpec(
-                name=name,
-                value=_value_spec_from_schema(cast(dict[str, Any], raw_property), name),
-            )
-        )
+    defs = _schema_defs(schema)
+    fields = _object_fields_from_schema(
+        schema,
+        response_format.__name__,
+        defs,
+        field_order=tuple(response_format.model_fields),
+    )
 
     logger.info(
         "Accepted constrained response_format={} fields={}",
         response_format.__name__,
         [field.name for field in fields],
     )
-    return JsonObjectSpec(model=response_format, fields=tuple(fields))
+    return JsonObjectSpec(model=response_format, fields=fields)
+
+
+def _schema_defs(schema: dict[str, Any]) -> dict[str, object]:
+    """Return top-level Pydantic ``$defs`` used for local model references."""
+    raw_defs = schema.get("$defs", {})
+    if not isinstance(raw_defs, dict):
+        raise ValueError("response_format $defs must be an object")
+    return cast(dict[str, object], raw_defs)
+
+
+def _resolve_local_ref(
+    schema: dict[str, Any],
+    path: str,
+    defs: dict[str, object],
+    active_refs: tuple[str, ...],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Resolve a local ``#/$defs/Name`` reference and reject direct recursion."""
+    ref = schema.get("$ref")
+    if ref is None:
+        return schema, active_refs
+    if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+        raise ValueError(f"unsupported response_format $ref at {path!r}")
+    ref_name = ref[len("#/$defs/") :]
+    if not ref_name or "/" in ref_name:
+        raise ValueError(f"unsupported response_format $ref at {path!r}")
+    if ref_name in active_refs:
+        raise ValueError(
+            f"recursive response_format models are not supported at {path!r}"
+        )
+    resolved = defs.get(ref_name)
+    if not isinstance(resolved, dict):
+        raise ValueError(f"unsupported response_format $ref at {path!r}")
+    return cast(dict[str, Any], resolved), active_refs + (ref_name,)
+
+
+def _object_fields_from_schema(
+    schema: dict[str, Any],
+    path: str,
+    defs: dict[str, object],
+    *,
+    field_order: tuple[str, ...] | None = None,
+    active_refs: tuple[str, ...] = (),
+) -> tuple[JsonFieldSpec, ...]:
+    """Convert a supported object schema to ordered field specifications."""
+    # Some sanity check
+    schema, active_refs = _resolve_local_ref(schema, path, defs, active_refs)
+    if schema.get("type") != "object":
+        raise ValueError(f"response_format field {path!r} must define an object schema")
+
+    # Other sanity check
+    properties = cast(object, schema.get("properties"))
+    required = cast(object, schema.get("required", []))
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise ValueError(f"response_format field {path!r} must define an object schema")
+    schema_properties = cast(dict[str, object], properties)
+    schema_required = cast(list[object], required)
+
+    # Another sanity check
+    required_names = [name for name in schema_required if isinstance(name, str)]
+    if len(required_names) != len(schema_required) or not set(required_names).issubset(
+        schema_properties
+    ):
+        raise ValueError("response_format required fields must be schema properties")
+    required_name_set = set(required_names)
+
+    names = tuple(schema_properties) if field_order is None else field_order
+    # Create the list of field
+    fields: list[JsonFieldSpec] = []
+    for name in names:
+        raw_property = schema_properties.get(name)
+        if not isinstance(raw_property, dict):
+            raise ValueError(f"missing JSON schema for field {name!r}")
+        fields.append(
+            JsonFieldSpec(
+                name=name,
+                # parse the field here, note that _value_spec_from_schema can call
+                # _object_spec_from_schema if the field type is an object.
+                value=_value_spec_from_schema(
+                    cast(dict[str, Any], raw_property),
+                    f"{path}.{name}",
+                    defs,
+                    active_refs,
+                ),
+                required=name in required_name_set,
+            )
+        )
+    return tuple(fields)
 
 
 class JsonConstrainedDecoder:
@@ -287,13 +373,17 @@ class JsonConstrainedDecoder:
         self, logits: torch.Tensor, eos: int | None
     ) -> torch.Tensor:
         """Return a boolean mask where true entries are valid next tokens."""
+        # Check if we already have a cache for this generated_text entry.
+        # That's very unlikely.
+        # Anyway measure cache_hit and cache_miss.
         cache_key = self.generated_text
         cached = self._mask_cache.get(cache_key)
         if cached is not None:
             self.stats.mask_cache_hits += 1
             return cached.to(device=logits.device)
-
         self.stats.mask_cache_misses += 1
+
+        # If the schema is complete, mask all tokens except eos.
         if self.is_complete():
             mask = torch.zeros(logits.shape[-1], dtype=torch.bool)
             if eos is not None and eos < logits.shape[-1]:
@@ -301,19 +391,26 @@ class JsonConstrainedDecoder:
             self._mask_cache[cache_key] = mask
             return mask.to(device=logits.device)
 
-        def is_valid_token_suffix(token_text: str) -> bool:
-            # Tokens may span several JSON grammar transitions, so validate the
-            # whole appended prefix instead of checking one character at a time.
+        def is_valid_token_so_far(token_text: str) -> bool:
+            """
+            Callback used to validate the whole generation, used against
+            token in the trie to produce the token_ids list.
+            """
             return _parse_valid_constrained_prefix(
                 self.generated_text + token_text,
                 self.spec,
             )
 
-        token_ids = self.trie.valid_token_ids(is_valid_token_suffix)
+        # Produce the list of valid tokens.
+        token_ids = self.trie.valid_token_ids(is_valid_token_so_far)
+        # Create mask
         mask = torch.zeros(logits.shape[-1], dtype=torch.bool)
+        # Filters out token IDs that are outside the logits vector size.
+        # Then, apply it to the mask.
         valid_ids = [token_id for token_id in token_ids if token_id < logits.shape[-1]]
-        if valid_ids:
+        if valid_ids != []:
             mask[torch.tensor(valid_ids, dtype=torch.long)] = True
+        # We're in the "not complete" path, mask eos.
         if eos is not None and eos < logits.shape[-1]:
             mask[eos] = False
         self._mask_cache[cache_key] = mask
@@ -355,7 +452,11 @@ def apply_json_constraint_mask(
     decoder: JsonConstrainedDecoder,
     eos: int | None,
 ) -> torch.Tensor:
-    """Mask logits to tokens accepted by the constrained JSON decoder."""
+    """
+    Mask logits to tokens accepted by the constrained JSON decoder.
+    Generate the mask and apply it.
+    Get input logit in parameters, return masked logits.
+    """
     mask = decoder.mask_for_next_token(logits, eos)
     if not bool(mask.any().item()):
         logger.error(
@@ -365,30 +466,6 @@ def apply_json_constraint_mask(
         )
         raise RuntimeError("no valid token remains for constrained JSON output")
     return logits.masked_fill(~mask.unsqueeze(0), float("-inf"))
-
-
-def _trie_for_tokenizer(tokenizer: ConstraintTokenizer) -> TokenTrie:
-    """
-    Try to return an existing trie for this tokenizer.
-    If none exists, build a new TokenTrie. Try to cache it.
-    Return it either way.
-
-    _TRIE_CACHE is a weakref.WeakKeyDictionary, that mean it's garbage collected
-    with tokenizer.
-    """
-    try:
-        cached = _TRIE_CACHE.get(cast(object, tokenizer))
-    except TypeError:
-        cached = None
-    if cached is not None:
-        return cached
-
-    trie = TokenTrie(tokenizer)
-    try:
-        _TRIE_CACHE[cast(object, tokenizer)] = trie
-    except TypeError:
-        logger.debug("Tokenizer does not support weakref trie caching")
-    return trie
 
 
 def _tokenizer_vocabulary_size(tokenizer: ConstraintTokenizer) -> int:
@@ -411,7 +488,23 @@ def _tokenizer_vocabulary_size(tokenizer: ConstraintTokenizer) -> int:
     )
 
 
-def _value_spec_from_schema(schema: dict[str, Any], path: str) -> JsonValueSpec:
+def _value_spec_from_schema(
+    schema: dict[str, Any],
+    path: str,
+    defs: dict[str, object],
+    active_refs: tuple[str, ...],
+) -> JsonValueSpec:
+    nullable_schema = _nullable_schema(schema, path)
+    if nullable_schema is not None:
+        value_spec = _value_spec_from_schema(nullable_schema, path, defs, active_refs)
+        return JsonValueSpec(
+            kind=value_spec.kind,
+            item=value_spec.item,
+            fields=value_spec.fields,
+            nullable=True,
+        )
+
+    schema, active_refs = _resolve_local_ref(schema, path, defs, active_refs)
     schema_type = schema.get("type")
     if schema_type == "string":
         return JsonValueSpec("str")
@@ -425,14 +518,49 @@ def _value_spec_from_schema(schema: dict[str, Any], path: str) -> JsonValueSpec:
         items = schema.get("items")
         if not isinstance(items, dict):
             raise ValueError(f"list field {path!r} must define item schema")
-        item = _value_spec_from_schema(cast(dict[str, Any], items), f"{path}[]")
+        item = _value_spec_from_schema(
+            cast(dict[str, Any], items),
+            f"{path}[]",
+            defs,
+            active_refs,
+        )
         if item.kind == "list":
             raise ValueError(f"nested lists are not supported at {path!r}")
         return JsonValueSpec("list", item=item)
+    if schema_type == "object":
+        fields = _object_fields_from_schema(
+            schema,
+            path,
+            defs,
+            active_refs=active_refs,
+        )
+        return JsonValueSpec("object", fields=fields)
     logger.error(
         "Rejected unsupported response_format field={} schema={}", path, schema
     )
     raise ValueError(f"unsupported response_format field {path!r}")
+
+
+def _nullable_schema(schema: dict[str, Any], path: str) -> dict[str, Any] | None:
+    """Return the non-null branch for a supported nullable JSON schema."""
+    for union_key in ("anyOf", "oneOf"):
+        raw_options_obj = schema.get(union_key)
+        if raw_options_obj is None:
+            continue
+        if not isinstance(raw_options_obj, list):
+            raise ValueError(f"unsupported response_format field {path!r}")
+        raw_options = cast(list[object], raw_options_obj)
+        options: list[dict[str, Any]] = [
+            cast(dict[str, Any], option)
+            for option in raw_options
+            if isinstance(option, dict)
+        ]
+        null_options = [option for option in options if option.get("type") == "null"]
+        value_options = [option for option in options if option.get("type") != "null"]
+        if len(options) == 2 and len(null_options) == 1 and len(value_options) == 1:
+            return value_options[0]
+        raise ValueError(f"unsupported response_format field {path!r}")
+    return None
 
 
 def _parse_valid_prefix(text: str, spec: JsonObjectSpec) -> bool:
@@ -488,16 +616,76 @@ def _json_payload_after_optional_think(text: str) -> str | None:
 
 def _parse_object(text: str, position: int, spec: JsonObjectSpec) -> int:
     position = _literal(text, position, "{")
-    for index, field_spec in enumerate(spec.fields):
-        if index > 0:
-            position = _literal(text, position, ",")
-        position = _literal(text, position, json.dumps(field_spec.name))
-        position = _literal(text, position, ":")
-        position = _parse_value(text, position, field_spec.value)
-    return _literal(text, position, "}")
+    return _parse_object_fields(text, position, spec.fields, next_index=0, first=True)
+
+
+def _parse_object_fields(
+    text: str,
+    position: int,
+    fields: tuple[JsonFieldSpec, ...],
+    *,
+    next_index: int,
+    first: bool,
+) -> int:
+    """Parse ordered object fields while allowing optional fields to be omitted."""
+    if position >= len(text):
+        raise _Incomplete
+    if text[position] == "}":
+        if any(field.required for field in fields[next_index:]):
+            raise _Invalid
+        return position + 1
+
+    field_position = position
+    if not first:
+        field_position = _literal(text, field_position, ",")
+
+    saw_incomplete = False
+    for candidate_index in range(next_index, len(fields)):
+        skipped_fields = fields[next_index:candidate_index]
+        if any(field.required for field in skipped_fields):
+            break
+        try:
+            parsed_position = _parse_object_field(
+                text,
+                field_position,
+                fields[candidate_index],
+            )
+            return _parse_object_fields(
+                text,
+                parsed_position,
+                fields,
+                next_index=candidate_index + 1,
+                first=False,
+            )
+        except _Incomplete:
+            saw_incomplete = True
+        except _Invalid:
+            pass
+
+    if saw_incomplete:
+        raise _Incomplete
+    raise _Invalid
+
+
+def _parse_object_field(
+    text: str,
+    position: int,
+    field_spec: JsonFieldSpec,
+) -> int:
+    """Parse one compact object key/value pair."""
+    position = _literal(text, position, json.dumps(field_spec.name))
+    position = _literal(text, position, ":")
+    return _parse_value(text, position, field_spec.value)
 
 
 def _parse_value(text: str, position: int, spec: JsonValueSpec) -> int:
+    if spec.nullable:
+        try:
+            return _literal(text, position, "null")
+        except _Incomplete:
+            raise
+        except _Invalid:
+            pass
     if spec.kind == "str":
         return _parse_string(text, position)
     if spec.kind == "int":
@@ -510,6 +698,15 @@ def _parse_value(text: str, position: int, spec: JsonValueSpec) -> int:
         if spec.item is None:
             raise AssertionError("list spec must include item spec")
         return _parse_list(text, position, spec.item)
+    if spec.kind == "object":
+        position = _literal(text, position, "{")
+        return _parse_object_fields(
+            text,
+            position,
+            spec.fields,
+            next_index=0,
+            first=True,
+        )
     raise AssertionError(f"unsupported JSON value kind {spec.kind!r}")
 
 
@@ -637,6 +834,7 @@ class Generator:
         self.generation_seconds: List[float] = []
         self.generated_sequence_logprob: List[float] = []
         self.mean_token_per_second = 0.0
+        self._json_trie: TokenTrie | None = None
 
     def generate(
         self,
@@ -760,8 +958,7 @@ class Generator:
 
         The method mirrors the useful part of standard completion APIs while
         staying local and typed. It does not execute requested tools; callers
-        should inspect ``result.message.tool_calls`` or use ``GeneratorWithTool``
-        for a full tool-execution loop.
+        should inspect result.message.tool_call.
         """
         tokenizer = cast(ChatTokenizer, self.tokenizer)
         prompt_tokens = self._encode_completion_messages(
@@ -922,6 +1119,7 @@ class Generator:
                     "Generating.. generated_token_count={}", generated_token_count
                 )
 
+        # Do a final validation of contrained output.
         if constrained_decoder is not None:
             constrained_decoder.validate_final()
 
@@ -939,8 +1137,13 @@ class Generator:
             logger.debug("Constrained JSON decoding disabled")
             return None
         spec = schema_from_pydantic(response_format)
-        trie = _trie_for_tokenizer(self.tokenizer)
-        return JsonConstrainedDecoder(spec=spec, tokenizer=self.tokenizer, trie=trie)
+        if self._json_trie is None:
+            self._json_trie = TokenTrie(self.tokenizer)
+        return JsonConstrainedDecoder(
+            spec=spec,
+            tokenizer=self.tokenizer,
+            trie=self._json_trie,
+        )
 
     def _prefill(
         self,

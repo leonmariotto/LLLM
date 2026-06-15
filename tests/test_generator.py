@@ -10,7 +10,9 @@ from torch import nn
 
 from ..LLLM.generator import (
     AssistantOutput,
+    ChatMessage,
     Generator,
+    JsonConstrainedDecoder,
     TokenTrie,
     schema_from_pydantic,
 )
@@ -63,6 +65,9 @@ class JsonTokenizer:
             "i",
             "l",
             "s",
+            "p",
+            "y",
+            "z",
             "1",
             "2",
             "3",
@@ -125,6 +130,34 @@ class JsonProbe(BaseModel):
     name: str
     ok: bool
     scores: list[int]
+
+
+class OptionalJsonProbe(BaseModel):
+    name: str | None = None
+    ok: bool
+
+
+class AddressProbe(BaseModel):
+    city: str
+
+
+class NestedJsonProbe(BaseModel):
+    name: str
+    address: AddressProbe
+
+
+class AddressWithOptionalZipProbe(BaseModel):
+    city: str
+    zip: int | None = None
+
+
+class NestedOptionalFieldProbe(BaseModel):
+    address: AddressWithOptionalZipProbe
+
+
+class NullableNestedJsonProbe(BaseModel):
+    name: str
+    address: AddressProbe | None = None
 
 
 class DigitChatTokenizer(DigitTokenizer):
@@ -223,8 +256,10 @@ def test_generator_completion_uses_chat_template_and_parses_output() -> None:
         tokenizer=tokenizer,
         cache_length=8,
     )
-    messages = [{"role": "user", "content": "question"}]
-    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    messages: list[ChatMessage] = [{"role": "user", "content": "question"}]
+    tools: list[dict[str, object]] = [
+        {"type": "function", "function": {"name": "lookup"}}
+    ]
 
     completion = generator.generate_completion(
         messages,
@@ -293,8 +328,10 @@ def test_generator_exposes_and_logs_throughput_metrics() -> None:
 
     assert generated == "456789"
     assert generator.generated_token_count == [3]
-    assert generator.generated_sequence_logprob[0] == pytest.approx(
-        3.0 * (1.0 - math.log(math.e + 9.0))
+    assert math.isclose(
+        generator.generated_sequence_logprob[0],
+        3.0 * (1.0 - math.log(math.e + 9.0)),
+        abs_tol=1e-6,
     )
     assert generator.generation_seconds[0] > 0.0
     assert generator.mean_token_per_second > 0.0
@@ -311,8 +348,10 @@ def test_generator_logprob_excludes_prompt_tokens() -> None:
 
     assert generated == "1234567"
     assert generator.generated_token_count == [1]
-    assert generator.generated_sequence_logprob[0] == pytest.approx(
-        1.0 - math.log(math.e + 9.0)
+    assert math.isclose(
+        generator.generated_sequence_logprob[0],
+        1.0 - math.log(math.e + 9.0),
+        abs_tol=1e-6,
     )
 
 
@@ -455,6 +494,204 @@ def test_response_format_constraint_is_applied_before_top_k_sampling() -> None:
     assert generated == target
 
 
+def test_response_format_allows_optional_field_to_be_omitted() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"ok":true}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=OptionalJsonProbe,
+    )
+
+    assert generated == target
+    assert OptionalJsonProbe.model_validate_json(generated) == OptionalJsonProbe(
+        ok=True
+    )
+
+
+def test_response_format_allows_optional_field_value() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max","ok":true}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=OptionalJsonProbe,
+    )
+
+    assert generated == target
+    assert OptionalJsonProbe.model_validate_json(generated) == OptionalJsonProbe(
+        name="max",
+        ok=True,
+    )
+
+
+def test_response_format_allows_optional_field_null() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":null,"ok":false}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=OptionalJsonProbe,
+    )
+
+    assert generated == target
+    assert OptionalJsonProbe.model_validate_json(generated) == OptionalJsonProbe(
+        name=None,
+        ok=False,
+    )
+
+
+def test_response_format_allows_required_nested_model_field() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max","address":{"city":"paris"}}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=NestedJsonProbe,
+    )
+
+    assert generated == target
+    assert NestedJsonProbe.model_validate_json(generated) == NestedJsonProbe(
+        name="max",
+        address=AddressProbe(city="paris"),
+    )
+
+
+def test_response_format_allows_nested_optional_field_to_be_omitted() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"address":{"city":"paris"}}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=NestedOptionalFieldProbe,
+    )
+
+    assert generated == target
+    assert NestedOptionalFieldProbe.model_validate_json(
+        generated
+    ) == NestedOptionalFieldProbe(
+        address=AddressWithOptionalZipProbe(city="paris"),
+    )
+
+
+def test_response_format_allows_nullable_nested_model_to_be_omitted() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max"}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=NullableNestedJsonProbe,
+    )
+
+    assert generated == target
+    assert NullableNestedJsonProbe.model_validate_json(
+        generated
+    ) == NullableNestedJsonProbe(name="max")
+
+
+def test_response_format_allows_nullable_nested_model_null() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max","address":null}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=NullableNestedJsonProbe,
+    )
+
+    assert generated == target
+    assert NullableNestedJsonProbe.model_validate_json(
+        generated
+    ) == NullableNestedJsonProbe(name="max", address=None)
+
+
+def test_response_format_allows_nullable_nested_model_object() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max","address":{"city":"paris"}}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=NullableNestedJsonProbe,
+    )
+
+    assert generated == target
+    assert NullableNestedJsonProbe.model_validate_json(
+        generated
+    ) == NullableNestedJsonProbe(
+        name="max",
+        address=AddressProbe(city="paris"),
+    )
+
+
+def test_response_format_rejects_complete_json_with_required_field_omitted() -> None:
+    tokenizer = JsonTokenizer()
+    spec = schema_from_pydantic(OptionalJsonProbe)
+    decoder = JsonConstrainedDecoder(
+        spec=spec,
+        tokenizer=tokenizer,
+        trie=TokenTrie(tokenizer),
+    )
+
+    decoder.generated_text = "{}"
+
+    assert not decoder.is_complete()
+
+
 def test_response_format_is_compatible_with_generate_completion() -> None:
     class JsonChatTokenizer(JsonTokenizer):
         def apply_chat_template(
@@ -492,12 +729,67 @@ def test_response_format_is_compatible_with_generate_completion() -> None:
     assert completion.message == AssistantOutput(target)
 
 
-def test_response_format_rejects_unsupported_schema() -> None:
+def test_response_format_allows_simple_nested_schema() -> None:
     class Nested(BaseModel):
         value: str
 
-    class Unsupported(BaseModel):
+    class Supported(BaseModel):
         nested: Nested
+
+    spec = schema_from_pydantic(Supported)
+
+    assert spec.fields[0].name == "nested"
+    assert spec.fields[0].value.kind == "object"
+    assert spec.fields[0].value.fields[0].name == "value"
+
+
+def test_response_format_rejects_external_ref_schema() -> None:
+    class Unsupported(BaseModel):
+        value: str
+
+        @classmethod
+        def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "properties": {"value": {"$ref": "https://example.test/schema.json"}},
+                "required": ["value"],
+                "type": "object",
+            }
+
+    with pytest.raises(ValueError, match=r"unsupported response_format \$ref"):
+        schema_from_pydantic(Unsupported)
+
+
+def test_response_format_rejects_malformed_ref_schema() -> None:
+    class Unsupported(BaseModel):
+        value: str
+
+        @classmethod
+        def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "properties": {"value": {"$ref": "#/$defs/Nested/extra"}},
+                "required": ["value"],
+                "type": "object",
+                "$defs": {"Nested": {"type": "string"}},
+            }
+
+    with pytest.raises(ValueError, match=r"unsupported response_format \$ref"):
+        schema_from_pydantic(Unsupported)
+
+
+def test_response_format_rejects_recursive_model_schema() -> None:
+    class RecursiveNode(BaseModel):
+        value: str
+        child: "RecursiveNode | None" = None
+
+    RecursiveNode.model_rebuild()
+
+    with pytest.raises(ValueError, match="recursive response_format models"):
+        schema_from_pydantic(RecursiveNode)
+
+
+def test_response_format_rejects_unsupported_union_schema() -> None:
+    class Unsupported(BaseModel):
+        value: str | int
 
     with pytest.raises(ValueError, match="unsupported"):
         schema_from_pydantic(Unsupported)
