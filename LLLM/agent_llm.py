@@ -177,6 +177,15 @@ class LlmClient:
             },
         )
 
+    def count_tokens(self, request: LlmRequest) -> int:
+        """Count prompt tokens for one request using the generator chat template."""
+        chat_messages = build_messages(request)
+        return self.generator.count_completion_tokens(
+            chat_messages,
+            tools=request.tool_schemas or None,
+            enable_thinking=self.enable_thinking,
+        )
+
 
 def _format_tool_result(result: AgentToolResult) -> str:
     prefix_by_status: dict[Literal["success", "error"], str] = {

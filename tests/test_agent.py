@@ -2,7 +2,12 @@ from collections.abc import Sequence
 
 import pytest
 
-from ..LLLM.agent import Agent, SUMMARY_PROMPT, SUM_KEEP_RECENTS
+from ..LLLM.agent import (
+    Agent,
+    SUMMARY_PROMPT,
+    SUM_KEEP_RECENTS,
+    SUMMARIZE_TOKEN_THRESHOLD,
+)
 from ..LLLM.agent_context import ExecutionContext, Event, Message, AgentToolResult
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.generator import (
@@ -13,11 +18,40 @@ from ..LLLM.generator import (
 from ..LLLM.tool_common import Tool, ToolCall, ToolContextPolicy
 
 
+class FakeTokenizer:
+    def __init__(self, token_count: int = 0) -> None:
+        self.token_count = token_count
+        self.messages: list[list[ChatMessage]] = []
+        self.tools: list[list[dict[str, object]]] = []
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> dict[str, list[int]]:
+        self.messages.append([dict(message) for message in messages])
+        self.tools.append(list(tools or []))
+        return {"input_ids": list(range(self.token_count))}
+
+    def parse_assistant_output(self, output: str) -> AssistantOutput:
+        return AssistantOutput(output)
+
+
 class FakeGenerator:
-    def __init__(self, outputs: Sequence[AssistantOutput | Exception]) -> None:
+    def __init__(
+        self,
+        outputs: Sequence[AssistantOutput | Exception],
+        *,
+        token_count: int = 0,
+    ) -> None:
         self.outputs = list(outputs)
         self.messages: list[list[ChatMessage]] = []
         self.tool_schemas: list[list[dict[str, object]]] = []
+        self.tokenizer = FakeTokenizer(token_count)
 
     def generate_completion(
         self,
@@ -44,6 +78,22 @@ class FakeGenerator:
             generated_tokens=4,
             finish_reason="stop",
         )
+
+    def count_completion_tokens(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        enable_thinking: bool = True,
+    ) -> int:
+        encoded = self.tokenizer.apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+        return len(encoded["input_ids"])
 
 
 def tool(name: str, result: str | Exception) -> Tool:
@@ -276,6 +326,29 @@ def test_agent_does_not_summarize_short_history() -> None:
     ]
 
 
+def test_agent_does_not_summarize_long_history_below_token_threshold() -> None:
+    context = long_message_context()
+    generator = FakeGenerator(
+        [AssistantOutput("done")],
+        token_count=SUMMARIZE_TOKEN_THRESHOLD,
+    )
+    agent = Agent(LlmClient(generator), [])
+
+    agent.step(context)
+
+    assert len(generator.messages) == 1
+    assert generator.messages[0] == [
+        {"role": "user", "content": "item 0"},
+        {"role": "assistant", "content": "item 1"},
+        {"role": "user", "content": "item 2"},
+        {"role": "assistant", "content": "item 3"},
+        {"role": "user", "content": "item 4"},
+        {"role": "assistant", "content": "item 5"},
+        {"role": "user", "content": "item 6"},
+        {"role": "assistant", "content": "item 7"},
+    ]
+
+
 def test_agent_summarizes_middle_history_only_in_llm_request() -> None:
     context = long_message_context()
     raw_items = context.items()
@@ -283,7 +356,8 @@ def test_agent_summarizes_middle_history_only_in_llm_request() -> None:
         [
             AssistantOutput("summary text"),
             AssistantOutput("done"),
-        ]
+        ],
+        token_count=SUMMARIZE_TOKEN_THRESHOLD + 1,
     )
     agent = Agent(LlmClient(generator), [])
 
@@ -317,7 +391,8 @@ def test_agent_falls_back_to_unsummarized_history_on_summary_error() -> None:
         [
             ValueError("summary failed"),
             AssistantOutput("done"),
-        ]
+        ],
+        token_count=SUMMARIZE_TOKEN_THRESHOLD + 1,
     )
     agent = Agent(LlmClient(generator), [])
 
@@ -343,7 +418,8 @@ def test_agent_falls_back_to_unsummarized_history_without_assistant_summary() ->
         [
             AssistantOutput("", (ToolCall(name="noop", arguments={}),)),
             AssistantOutput("done"),
-        ]
+        ],
+        token_count=SUMMARIZE_TOKEN_THRESHOLD + 1,
     )
     agent = Agent(LlmClient(generator), [])
 

@@ -93,6 +93,9 @@ Examples:
 # Number of items that stay untouched by summarization.
 SUM_KEEP_RECENTS = 5
 
+# Request token count above which history summarization is attempted.
+SUMMARIZE_TOKEN_THRESHOLD = 8000
+
 # Prompt used to summarize items in context.
 SUMMARY_PROMPT = """Summarize the prior conversation and tool history into concise state for the next assistant turn.
 
@@ -202,15 +205,33 @@ class Agent:
         """
         # Tool-specific compaction pass
         compacted_content = self._compact_request_content(context.items())
+        tool_schemas = [tool.schema for tool in self.tools]
 
-        # Request-only history summarization pass.
-        request_content = self._summarize_request_content(compacted_content)
+        pre_summary_request = LlmRequest(
+            instructions=self.system_instructions,
+            content=compacted_content,
+            tool_schemas=tool_schemas,
+        )
+        token_count = self.llm.count_tokens(pre_summary_request)
+        logger.debug(
+            "request token count before summarization token_count={} threshold={}",
+            token_count,
+            SUMMARIZE_TOKEN_THRESHOLD,
+        )
+
+        if token_count > SUMMARIZE_TOKEN_THRESHOLD:
+            request_content = self._summarize_request_content(compacted_content)
+        else:
+            logger.debug(
+                "skip history summarization because request is below token threshold"
+            )
+            request_content = compacted_content
 
         # Prepare what to send to the LLM
         request = LlmRequest(
             instructions=self.system_instructions,
             content=request_content,
-            tool_schemas=[tool.schema for tool in self.tools],
+            tool_schemas=tool_schemas,
         )
 
         # Get LLM's decision
@@ -247,7 +268,6 @@ class Agent:
         """
         Summarize older request history without mutating execution context.
         Keep last SUM_KEEP_RECENTS items untouched.
-        TODO: we should check the context size in terms of tokens.
         """
         if len(content) <= SUM_KEEP_RECENTS + 1:
             logger.debug(

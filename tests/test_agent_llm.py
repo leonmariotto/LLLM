@@ -11,12 +11,37 @@ from ..LLLM.generator import (
 from ..LLLM.tool_common import ToolCall
 
 
+class FakeTokenizer:
+    def __init__(self) -> None:
+        self.messages: list[list[ChatMessage]] = []
+        self.tools: list[list[dict[str, object]]] = []
+        self.enable_thinking: list[bool] = []
+
+    def apply_chat_template(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        enable_thinking: bool = True,
+    ) -> dict[str, list[int]]:
+        self.messages.append([dict(message) for message in messages])
+        self.tools.append(list(tools or []))
+        self.enable_thinking.append(enable_thinking)
+        return {"input_ids": [10, 11, 12, 13, 14]}
+
+    def parse_assistant_output(self, output: str) -> AssistantOutput:
+        return AssistantOutput(output)
+
+
 class FakeGenerator:
     def __init__(self, outputs: Sequence[AssistantOutput | ValueError]) -> None:
         self.outputs = list(outputs)
         self.messages: list[list[ChatMessage]] = []
         self.tool_schemas: list[list[dict[str, object]]] = []
         self.calls: list[dict[str, object]] = []
+        self.tokenizer = FakeTokenizer()
 
     def generate_completion(
         self,
@@ -54,6 +79,22 @@ class FakeGenerator:
             generated_tokens=4,
             finish_reason="stop",
         )
+
+    def count_completion_tokens(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        enable_thinking: bool = True,
+    ) -> int:
+        encoded = self.tokenizer.apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+        return len(encoded["input_ids"])
 
 
 def test_build_messages_converts_context_items() -> None:
@@ -124,3 +165,27 @@ def test_llm_client_preserves_parse_error_raw_completion() -> None:
     assert response.error_message == "invalid"
     assert response.raw_completion == "bad raw"
     assert response.content == [Message(role="assistant", content="bad raw")]
+
+
+def test_llm_client_counts_tokens_with_chat_template() -> None:
+    schema: dict[str, object] = {"type": "function"}
+    generator = FakeGenerator([])
+    client = LlmClient(generator, enable_thinking=False)
+
+    count = client.count_tokens(
+        LlmRequest(
+            instructions=["be useful"],
+            content=[Message(role="user", content="question")],
+            tool_schemas=[schema],
+        )
+    )
+
+    assert count == 5
+    assert generator.tokenizer.messages == [
+        [
+            {"role": "system", "content": "be useful"},
+            {"role": "user", "content": "question"},
+        ]
+    ]
+    assert generator.tokenizer.tools == [[schema]]
+    assert generator.tokenizer.enable_thinking == [False]

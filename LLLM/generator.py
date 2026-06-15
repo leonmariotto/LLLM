@@ -795,6 +795,24 @@ class Generator:
             finish_reason=finish_reason,
         )
 
+    def count_completion_tokens(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None = None,
+        enable_thinking: bool = True,
+    ) -> int:
+        """Count prompt tokens for a chat completion request."""
+        tokenizer = cast(ChatTokenizer, self.tokenizer)
+        return len(
+            self._encode_completion_messages(
+                tokenizer,
+                messages,
+                tools=tools,
+                enable_thinking=enable_thinking,
+            )
+        )
+
     @staticmethod
     def _encode_completion_messages(
         tokenizer: ChatTokenizer,
