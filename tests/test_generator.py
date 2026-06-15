@@ -434,6 +434,27 @@ def test_response_format_allows_think_block_before_json() -> None:
     )
 
 
+def test_response_format_constraint_is_applied_before_top_k_sampling() -> None:
+    tokenizer = JsonTokenizer()
+    target = '{"name":"max","ok":true,"scores":[1,2,3]}'
+    generator = Generator(
+        model=ScriptedJsonModel(tokenizer, target),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    generated = generator.generate(
+        "",
+        max_generated_token=128,
+        include_prompt=False,
+        response_format=JsonProbe,
+        temperature=0.6,
+        top_k=1,
+    )
+
+    assert generated == target
+
+
 def test_response_format_is_compatible_with_generate_completion() -> None:
     class JsonChatTokenizer(JsonTokenizer):
         def apply_chat_template(

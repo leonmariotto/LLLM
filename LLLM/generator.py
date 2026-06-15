@@ -871,9 +871,9 @@ class Generator:
 
         for step in range(max_generated_token):
             logits = logits[:, -1, :]
-            logits = self._filter_logits(logits, top_k, top_p)
             if constrained_decoder is not None:
                 logits = apply_json_constraint_mask(logits, constrained_decoder, eos)
+            logits = self._filter_logits(logits, top_k, top_p)
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 logger.info(
