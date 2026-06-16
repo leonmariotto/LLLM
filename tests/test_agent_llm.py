@@ -1,5 +1,7 @@
 from collections.abc import Sequence
 
+from pydantic import BaseModel
+
 from ..LLLM.agent_context import Message, AgentToolResult
 from ..LLLM.agent_llm import LlmClient, LlmRequest, build_messages
 from ..LLLM.generator import (
@@ -55,6 +57,7 @@ class FakeGenerator:
         top_k: int | None = None,
         top_p: float | None = None,
         enable_thinking: bool = True,
+        response_format: type[BaseModel] | None = None,
     ) -> ChatCompletion:
         self.messages.append([dict(message) for message in messages])
         self.tool_schemas.append(list(tools or []))
@@ -67,6 +70,7 @@ class FakeGenerator:
                 "top_k": top_k,
                 "top_p": top_p,
                 "enable_thinking": enable_thinking,
+                "response_format": response_format,
             }
         )
         output = self.outputs[len(self.messages) - 1]
@@ -189,3 +193,29 @@ def test_llm_client_counts_tokens_with_chat_template() -> None:
     ]
     assert generator.tokenizer.tools == [[schema]]
     assert generator.tokenizer.enable_thinking == [False]
+
+
+class StructuredProbe(BaseModel):
+    answer: str
+    count: int
+
+
+def test_llm_client_complete_forwards_and_parses_response_format() -> None:
+    generator = FakeGenerator([AssistantOutput('{"answer":"ok","count":2}')])
+
+    response = LlmClient(generator).complete(LlmRequest(response_format=StructuredProbe))
+
+    assert response.error_message is None
+    assert response.parsed == StructuredProbe(answer="ok", count=2)
+    assert generator.calls[0]["response_format"] is StructuredProbe
+
+
+def test_llm_client_complete_parses_response_format_after_think_block() -> None:
+    generator = FakeGenerator(
+        [AssistantOutput('<think>hidden</think>\n{"answer":"ok","count":2}')]
+    )
+
+    response = LlmClient(generator).complete(LlmRequest(response_format=StructuredProbe))
+
+    assert response.error_message is None
+    assert response.parsed == StructuredProbe(answer="ok", count=2)

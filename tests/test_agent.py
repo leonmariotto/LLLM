@@ -1,14 +1,24 @@
 from collections.abc import Sequence
+import json
 
 import pytest
+from pydantic import BaseModel
 
 from ..LLLM.agent import (
     Agent,
+    SYSTEM_PROMPT_V2,
     SUMMARY_PROMPT,
     SUM_KEEP_RECENTS,
     SUMMARIZE_TOKEN_THRESHOLD,
 )
-from ..LLLM.agent_context import ExecutionContext, Event, Message, AgentToolResult
+from ..LLLM.agent_context import (
+    AgentStructuredResponse,
+    ExecutionContext,
+    Event,
+    Message,
+    AgentToolResult,
+    TaskState,
+)
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.generator import (
     AssistantOutput,
@@ -65,12 +75,24 @@ class FakeGenerator:
         top_k: int | None = None,
         top_p: float | None = None,
         enable_thinking: bool = True,
+        response_format: type[BaseModel] | None = None,
     ) -> ChatCompletion:
         self.messages.append([dict(message) for message in messages])
         self.tool_schemas.append(list(tools or []))
         output = self.outputs[len(self.messages) - 1]
         if isinstance(output, Exception):
             raise output
+        if response_format is AgentStructuredResponse and not output.content.startswith(
+            ("{", "<think>")
+        ):
+            output = AssistantOutput(
+                json.dumps(
+                    {
+                        "answer": output.content,
+                    }
+                ),
+                output.tool_calls,
+            )
         return ChatCompletion(
             message=output,
             raw_completion="raw",
@@ -133,6 +155,11 @@ def long_message_context() -> ExecutionContext:
     return context
 
 
+def assert_task_state_message(message: ChatMessage, original_request: str) -> None:
+    assert message["role"] == "system"
+    assert f"original_request: {original_request}" in str(message["content"])
+
+
 def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     context = ExecutionContext()
     generator = FakeGenerator([AssistantOutput("finished")])
@@ -144,16 +171,13 @@ def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     assert result.output == "finished"
     assert result.context is context
     assert context.final_result == "finished"
+    assert context.task_state == TaskState(original_request="question")
     assert context.messages() == [
-        Message(role="user", content="question"),
         Message(role="assistant", content="finished"),
     ]
-    assert generator.messages == [
-        [
-            {"role": "system", "content": "be brief"},
-            {"role": "user", "content": "question"},
-        ],
-    ]
+    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[0][1] == {"role": "system", "content": "be brief"}
+    assert_task_state_message(generator.messages[0][2], "question")
 
 
 def test_agent_run_executes_successful_tool_round_then_final_answer() -> None:
@@ -172,8 +196,9 @@ def test_agent_run_executes_successful_tool_round_then_final_answer() -> None:
 
     assert result.output == "answer"
 
-    assert generator.messages[1] == [
-        {"role": "user", "content": "question"},
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert_task_state_message(generator.messages[1][1], "question")
+    assert generator.messages[1][2:] == [
         {
             "role": "assistant",
             "content": "checking",
@@ -321,7 +346,6 @@ def test_agent_context_records_tool_events_and_final_result() -> None:
     assert result.context is context
 
     assert context.items() == [
-        Message(role="user", content="go"),
         ToolCall(tool_call_id="call_0", name="lookup", arguments={"q": "x"}),
         AgentToolResult(
             tool_call_id="call_0",
@@ -332,6 +356,59 @@ def test_agent_context_records_tool_events_and_final_result() -> None:
         Message(role="assistant", content="done"),
     ]
     assert context.final_result == "done"
+
+
+def test_agent_reuses_task_state_and_records_later_user_messages() -> None:
+    context = ExecutionContext()
+    generator = FakeGenerator(
+        [
+            AssistantOutput(
+                json.dumps(
+                    {
+                        "answer": "started",
+                        "task_state_update": {
+                            "push_todos": ["inspect repo"],
+                            "pop_todos": [],
+                            "push_facts": ["repo uses uv"],
+                            "pop_facts": [],
+                        },
+                    }
+                )
+            ),
+            AssistantOutput(
+                json.dumps(
+                    {
+                        "answer": "continued",
+                        "task_state_update": {
+                            "push_todos": [],
+                            "pop_todos": [0],
+                            "push_facts": ["tests are targeted"],
+                            "pop_facts": [],
+                        },
+                    }
+                )
+            ),
+        ]
+    )
+    agent = Agent(LlmClient(generator), [])
+
+    first = agent.run("initial task", context=context)
+    second = agent.run("continue", context=context)
+
+    assert first.output == "started"
+    assert second.output == "continued"
+    assert context.task_state == TaskState(
+        original_request="initial task",
+        todos=[],
+        facts=["repo uses uv", "tests are targeted"],
+    )
+    assert context.messages() == [
+        Message(role="assistant", content="started"),
+        Message(role="user", content="continue"),
+        Message(role="assistant", content="continued"),
+    ]
+    assert_task_state_message(generator.messages[1][1], "initial task")
+    assert "repo uses uv" in str(generator.messages[1][1]["content"])
 
 
 def test_agent_keeps_latest_tool_answer_raw_in_llm_request() -> None:
@@ -375,7 +452,7 @@ def test_agent_keeps_latest_tool_answer_raw_in_llm_request() -> None:
         "role": "tool",
         "content": f"Tool result: {raw_answer}",
     }
-    assert result.context.items()[2] == AgentToolResult(
+    assert result.context.items()[1] == AgentToolResult(
         tool_call_id="call_0",
         name="lookup",
         status="success",
@@ -393,7 +470,8 @@ def test_agent_does_not_summarize_short_history() -> None:
     agent.step(context)
 
     assert len(generator.messages) == 1
-    assert generator.messages[0] == [
+    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[0][1:] == [
         {"role": "user", "content": f"item {index}"}
         for index in range(SUM_KEEP_RECENTS + 1)
     ]
@@ -410,7 +488,8 @@ def test_agent_does_not_summarize_long_history_below_token_threshold() -> None:
     agent.step(context)
 
     assert len(generator.messages) == 1
-    assert generator.messages[0] == [
+    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[0][1:] == [
         {"role": "user", "content": "item 0"},
         {"role": "assistant", "content": "item 1"},
         {"role": "user", "content": "item 2"},
@@ -443,7 +522,8 @@ def test_agent_summarizes_middle_history_only_in_llm_request() -> None:
         {"role": "assistant", "content": "item 1"},
         {"role": "user", "content": "item 2"},
     ]
-    assert generator.messages[1] == [
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][1:] == [
         {"role": "user", "content": "item 0"},
         {
             "role": "system",
@@ -456,6 +536,41 @@ def test_agent_summarizes_middle_history_only_in_llm_request() -> None:
         {"role": "assistant", "content": "item 7"},
     ]
     assert context.items() == [*raw_items, Message(role="assistant", content="done")]
+
+
+def test_agent_summarization_preserves_task_state_and_summarizes_history_after_it() -> None:
+    context = long_message_context()
+    context.task_state = TaskState(original_request="root task")
+    generator = FakeGenerator(
+        [
+            AssistantOutput("summary text"),
+            AssistantOutput("done"),
+        ],
+        token_count=SUMMARIZE_TOKEN_THRESHOLD + 1,
+    )
+    agent = Agent(LlmClient(generator), [])
+
+    agent.step(context)
+
+    assert generator.messages[0] == [
+        {"role": "system", "content": SUMMARY_PROMPT},
+        {"role": "user", "content": "item 0"},
+        {"role": "assistant", "content": "item 1"},
+        {"role": "user", "content": "item 2"},
+    ]
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert_task_state_message(generator.messages[1][1], "root task")
+    assert generator.messages[1][2:] == [
+        {
+            "role": "system",
+            "content": "Conversation summary so far:\nsummary text",
+        },
+        {"role": "assistant", "content": "item 3"},
+        {"role": "user", "content": "item 4"},
+        {"role": "assistant", "content": "item 5"},
+        {"role": "user", "content": "item 6"},
+        {"role": "assistant", "content": "item 7"},
+    ]
 
 
 def test_agent_falls_back_to_unsummarized_history_on_summary_error() -> None:
@@ -472,7 +587,8 @@ def test_agent_falls_back_to_unsummarized_history_on_summary_error() -> None:
     agent.step(context)
 
     assert len(generator.messages) == 2
-    assert generator.messages[1] == [
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][1:] == [
         {"role": "user", "content": "item 0"},
         {"role": "assistant", "content": "item 1"},
         {"role": "user", "content": "item 2"},
@@ -499,7 +615,8 @@ def test_agent_falls_back_to_unsummarized_history_without_assistant_summary() ->
     agent.step(context)
 
     assert len(generator.messages) == 2
-    assert generator.messages[1] == [
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][1:] == [
         {"role": "user", "content": "item 0"},
         {"role": "assistant", "content": "item 1"},
         {"role": "user", "content": "item 2"},
@@ -620,11 +737,11 @@ def test_agent_compacts_tool_call_only_in_llm_request() -> None:
     result = agent.run("go")
 
     assert result.output == "done"
-    assistant_message = generator.messages[1][1]
+    assistant_message = generator.messages[1][2]
     assert assistant_message["tool_calls"] == [
         ToolCall(name="lookup", arguments={"q": "compact"})
     ]
-    assert result.context.items()[1] == ToolCall(
+    assert result.context.items()[0] == ToolCall(
         tool_call_id="call_0",
         name="lookup",
         arguments={"q": "raw"},

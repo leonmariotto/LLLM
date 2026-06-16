@@ -8,6 +8,8 @@ from typing import Literal, cast
 
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel, ValidationError
+
 from .agent_context import ContentItem, Message
 from .tool_common import ToolCall
 from .agent_context import AgentToolResult
@@ -42,6 +44,7 @@ class LlmRequest:
     instructions: list[str] = field(default_factory=_empty_instructions)
     content: list[ContentItem] = field(default_factory=_empty_content)
     tool_schemas: list[dict[str, object]] = field(default_factory=_empty_tool_schemas)
+    response_format: type[BaseModel] | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,7 @@ class LlmResponse:
     raw_completion: str = ""
     usage_metadata: dict[str, object] = field(default_factory=_empty_usage_metadata)
     error_message: str | None = None
+    parsed: BaseModel | None = None
     # TODO add confidence hint: logprobe
 
 
@@ -142,6 +146,7 @@ class LlmClient:
                 top_k=self.top_k,
                 top_p=self.top_p,
                 enable_thinking=self.enable_thinking,
+                response_format=request.response_format,
             )
         except CompletionParseError as error:
             return LlmResponse(
@@ -152,11 +157,32 @@ class LlmClient:
         except ValueError as error:
             return LlmResponse(error_message=str(error))
 
-        assistant_messages: list[Message] = []
+        assistant_messages: list[ContentItem] = []
         if completion.message.content:
             assistant_messages.append(
                 Message(role="assistant", content=completion.message.content)
             )
+        parsed: BaseModel | None = None
+        # parse the returned string, if typed sctructured answer parsed successfuly
+        # it's returned in the parsed field of LlmResponse.
+        if request.response_format is not None:
+            payload = _structured_json_payload(
+                completion.message.content,
+                completion.raw_completion,
+            )
+            try:
+                parsed = request.response_format.model_validate_json(payload)
+            except ValidationError as error:
+                return LlmResponse(
+                    content=assistant_messages,
+                    raw_completion=completion.raw_completion,
+                    usage_metadata={
+                        "prompt_tokens": completion.prompt_tokens,
+                        "generated_tokens": completion.generated_tokens,
+                        "finish_reason": completion.finish_reason,
+                    },
+                    error_message=str(error),
+                )
         return LlmResponse(
             content=[
                 *assistant_messages,
@@ -175,6 +201,7 @@ class LlmClient:
                 "generated_tokens": completion.generated_tokens,
                 "finish_reason": completion.finish_reason,
             },
+            parsed=parsed,
         )
 
     def count_tokens(self, request: LlmRequest) -> int:
@@ -196,3 +223,20 @@ def _format_tool_result(result: AgentToolResult) -> str:
     if content:
         return f"{prefix_by_status[result.status]}: {content}"
     return f"{prefix_by_status[result.status]}:"
+
+
+def _structured_json_payload(content: str, raw_completion: str) -> str:
+    """Return JSON content from plain or optional-think structured output."""
+    for candidate in (content, raw_completion):
+        payload = _strip_optional_think(candidate).strip()
+        if payload:
+            return payload
+    return ""
+
+
+def _strip_optional_think(text: str) -> str:
+    close_tag = "</think>"
+    close_index = text.find(close_tag)
+    if text.lstrip().startswith("<think>") and close_index != -1:
+        return text[close_index + len(close_tag) :]
+    return text

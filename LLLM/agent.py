@@ -26,7 +26,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import cast
 
-from .agent_context import ContentItem, ExecutionContext, Message
+from .agent_context import (
+    AgentStructuredResponse,
+    ContentItem,
+    ExecutionContext,
+    Message,
+    TaskState,
+)
 from .tool_common import ToolCall
 from .tool_common import execute_tool
 from .agent_context import AgentToolResult
@@ -96,6 +102,44 @@ Examples:
   use file/code tools if repository or local files must be inspected.
 """
 
+SYSTEM_PROMPT_V2 = """You are LLLM, a tool-capable assistant.
+
+You receive durable task_state as a system message near the start of context:
+- original_request is the user's initial request. Treat it as the root task.
+- todos is the current checklist of unresolved work.
+- facts is durable information gathered or established while working.
+
+Always respond using the required structured output schema:
+- answer: the user-visible assistant answer for this turn.
+- task_state_update: optional updates to apply to task_state after this turn.
+  Omit this field when no task-state update is needed.
+
+Use task_state_update to maintain context:
+- Decompose original_request into concrete TODOs and push them to todos.
+- Pop TODOs by zero-based index once they are complete or no longer relevant.
+- Push durable gathered facts, decisions, constraints, and assumptions to facts.
+- Pop facts by zero-based index only when they are wrong or obsolete.
+- Keep updates concise and exact. Do not duplicate existing todos or facts.
+
+Example of answer:
+{
+    "answer": "Tool call or final answer",
+    "task_state_update": {
+        "push_todos": ["inspect repo", "run targeted tests"],
+        "pop_todos": [0],
+        "push_facts": ["project uses uv"],
+        "pop_facts": []
+    }
+}
+
+Use tools proactively, without asking permission, when a tool is needed to
+answer accurately or complete the task. Do not claim that you used a tool unless
+a tool call was actually made. Keep using available tools until you have the
+answer or the tools clearly fail.
+
+Be direct, concise, and useful in answer. Distinguish facts from assumptions.
+"""
+
 # Number of items that stay untouched by summarization.
 SUM_KEEP_RECENTS = 5
 
@@ -134,7 +178,9 @@ class Agent:
         self.llm = llm
         self.tools = tuple(tools)
         self._tools_by_name = self._index_tools(self.tools)
-        self.system_instructions = [instruction] if instruction else []
+        self.system_instructions = [SYSTEM_PROMPT_V2]
+        if instruction:
+            self.system_instructions.append(instruction)
         self.max_step = max_step
 
     def run(
@@ -157,9 +203,13 @@ class Agent:
 
         # Create execution context.
         execution_context = context if context is not None else ExecutionContext()
+        execution_context.current_step = 0
+        execution_context.final_result = None
 
-        # Add user input as the first event.
-        execution_context.add_user_message(prompt)
+        if execution_context.task_state is None:
+            execution_context.task_state = TaskState(original_request=prompt)
+        else:
+            execution_context.add_user_message(prompt)
 
         while (
             execution_context.final_result is None
@@ -244,6 +294,7 @@ class Agent:
             instructions=self.system_instructions,
             content=request_content,
             tool_schemas=tool_schemas,
+            response_format=AgentStructuredResponse,
         )
 
         # Get LLM's decision
@@ -251,15 +302,17 @@ class Agent:
 
         logger.debug("response.content = [{}]", response.content)
 
+        response_content = self._response_event_content(context, response)
+
         # Record LLM response as an event
         response_event = Event(
             execution_id=context.execution_id,
             author="agent",
-            content=response.content,
+            content=response_content,
         )
         context.add_event(response_event)
 
-        tool_calls = [item for item in response.content if isinstance(item, ToolCall)]
+        tool_calls = [item for item in response_content if isinstance(item, ToolCall)]
         if tool_calls:
             _ = self.act(context, tool_calls, container_env=container_env)
         context.increment_step()
@@ -273,6 +326,46 @@ class Agent:
         @return parsed LLM response.
         """
         return self.llm.complete(request)
+
+    def _task_state_message(self, task_state: TaskState) -> Message:
+        """Format task state as a deterministic system message."""
+        return Message(
+            role="system",
+            content=(
+                "Task state:\n"
+                f"original_request: {task_state.original_request}\n"
+                "todos:\n"
+                f"{self._format_state_list(task_state.todos)}\n"
+                "facts:\n"
+                f"{self._format_state_list(task_state.facts)}"
+            ),
+        )
+
+    @staticmethod
+    def _format_state_list(items: Sequence[str]) -> str:
+        if not items:
+            return "- <empty>"
+        return "\n".join(f"- {item}" for item in items)
+
+    def _response_event_content(
+        self, context: ExecutionContext, response: LlmResponse
+    ) -> list[ContentItem]:
+        """Convert a structured LLM response into ordinary event content."""
+        tool_calls = [item for item in response.content if isinstance(item, ToolCall)]
+        if isinstance(response.parsed, AgentStructuredResponse):
+            if (
+                context.task_state is not None
+                and response.parsed.task_state_update is not None
+            ):
+                context.task_state.apply_update(response.parsed.task_state_update)
+            content: list[ContentItem] = []
+            if response.parsed.answer:
+                content.append(
+                    Message(role="assistant", content=response.parsed.answer)
+                )
+            content.extend(tool_calls)
+            return content
+        return list(response.content)
 
     def _summarize_request_content(
         self, content: Sequence[ContentItem]
