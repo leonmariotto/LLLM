@@ -2,17 +2,19 @@
 Raw Python interpreter tool for model tool-use loops.
 
 This tool intentionally exposes normal Python syntax rather than a restricted
-calculator expression language.  It runs code in a subprocess through ``uv`` so
-exceptions, prints, imports, and statements behave like a regular Python script.
+calculator expression language.  It runs code in a caller-provided container
+environment so exceptions, prints, imports, and statements behave like a
+regular Python script while filesystem/network effects stay isolated by the
+container setup.
 """
 
 from __future__ import annotations
 
 import copy
-import subprocess
 
 from loguru import logger
 
+from .container_env import ContainerEnv
 from .tool_common import Tool
 
 _DEFAULT_TIMEOUT_SECONDS = 10
@@ -51,13 +53,18 @@ def python_tool() -> Tool:
     return Tool(schema=copy.deepcopy(PYTHON_TOOL_SCHEMA), execute=execute_python)
 
 
-def execute_python(arguments: dict[str, object]) -> str:
+def execute_python(
+    arguments: dict[str, object],
+    container_env: ContainerEnv | None = None,
+) -> str:
     """Execute raw Python code with a ``{"code": "..."}`` argument."""
     code = arguments.get("code")
     if not isinstance(code, str):
         raise ValueError("code must be a string")
     if not code.strip():
         raise ValueError("code must not be empty")
+    if container_env is None:
+        raise ValueError("python tool requires container_env")
     timeout_seconds = _optional_timeout(arguments)
     logger.info(
         "Python tool execution started with {} code chars and timeout={}s",
@@ -66,20 +73,17 @@ def execute_python(arguments: dict[str, object]) -> str:
     )
 
     try:
-        completed = subprocess.run(
-            ["uv", "run", "python", "-c", code],
-            check=False,
-            capture_output=True,
-            text=True,
+        completed = container_env.exec(
+            ["python", "-c", code],
             timeout=timeout_seconds,
         )
-    except subprocess.TimeoutExpired as error:
+    except TimeoutError as error:
         logger.info("Python tool execution timed out after {}s", timeout_seconds)
         raise ValueError(
             f"python execution timed out after {timeout_seconds}s"
         ) from error
-    except OSError as error:
-        logger.info("Python tool execution failed to start: {}", error)
+    except RuntimeError as error:
+        logger.info("Python tool execution failed: {}", error)
         raise ValueError(f"python execution failed: {error}") from error
 
     logger.info(

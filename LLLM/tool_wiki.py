@@ -15,7 +15,7 @@ import copy
 import html
 import re
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import quote, unquote, urlparse
 
 import requests
@@ -24,6 +24,9 @@ from loguru import logger
 
 from .agent_context import AgentToolResult
 from .tool_common import Tool, ToolContextPolicy
+
+if TYPE_CHECKING:
+    from .container_env import ContainerEnv
 
 _DEFAULT_WIKI = "https://en.wikipedia.org"
 _REQUEST_TIMEOUT_SECONDS = 10
@@ -178,16 +181,24 @@ def wiki_tool() -> Tool:
     )
 
 
-def execute_wiki(arguments: dict[str, object]) -> str:
+def execute_wiki(
+    arguments: dict[str, object],
+    container_env: "ContainerEnv | None" = None,
+) -> str:
     """Execute the wiki tool."""
-    return _DEFAULT_EXECUTOR.execute(arguments)
+    return _DEFAULT_EXECUTOR.execute(arguments, container_env)
 
 
 class _WikiExecutor:
     def __init__(self) -> None:
         self._continuation_chunks: deque[str] = deque()
 
-    def execute(self, arguments: dict[str, object]) -> str:
+    def execute(
+        self,
+        arguments: dict[str, object],
+        container_env: "ContainerEnv | None" = None,
+    ) -> str:
+        del container_env
         action = arguments.get("action")
         logger.info("running wiki tool action={}", action)
         if not isinstance(action, str):

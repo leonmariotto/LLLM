@@ -8,9 +8,13 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from .agent_context import ContentItem
     from .agent_context import AgentToolResult
+    from .container_env import ContainerEnv
 
 
-ToolExecutor = Callable[[dict[str, object]], str]
+ToolExecutor = Callable[
+    [dict[str, object], "ContainerEnv | None"],
+    str,
+]
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,15 @@ class Tool:
     schema: dict[str, object]
     execute: ToolExecutor
     context_policy: ToolContextPolicy | None = None
+
+
+def execute_tool(
+    tool: Tool,
+    arguments: dict[str, object],
+    container_env: "ContainerEnv | None" = None,
+) -> str:
+    """Execute a tool with the current optional container environment."""
+    return tool.execute(arguments, container_env)
 
 
 class ToolCall(BaseModel):

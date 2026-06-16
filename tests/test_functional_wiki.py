@@ -53,7 +53,11 @@ def test_functional_qwen3_with_thinking_calls_wiki_tool(
     calls: list[dict[str, object]] = []
     base_tool = wiki_tool()
 
-    def record_wiki(arguments: dict[str, object]) -> str:
+    def record_wiki(
+        arguments: dict[str, object],
+        container_env: object | None = None,
+    ) -> str:
+        del container_env
         calls.append(arguments)
         return (
             "1. Frobnicate\n"
@@ -90,7 +94,11 @@ def test_functional_qwen3_with_thinking_calls_wiki_open_tool(
     calls: list[dict[str, object]] = []
     base_tool = wiki_tool()
 
-    def record_wiki(arguments: dict[str, object]) -> str:
+    def record_wiki(
+        arguments: dict[str, object],
+        container_env: object | None = None,
+    ) -> str:
+        del container_env
         calls.append(arguments)
         return (
             "URL: https://en.wikipedia.org/wiki/CAC_40\n"

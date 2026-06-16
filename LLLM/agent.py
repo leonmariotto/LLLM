@@ -28,6 +28,7 @@ from typing import cast
 
 from .agent_context import ContentItem, ExecutionContext, Message
 from .tool_common import ToolCall
+from .tool_common import execute_tool
 from .agent_context import AgentToolResult
 from .agent_context import AgentResult
 from .agent_context import Event
@@ -39,6 +40,11 @@ from .agent_llm import (
 from .tool_common import Tool
 
 from loguru import logger
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .container_env import ContainerEnv
 
 SYSTEM_PROMPT_V1 = """You are LLLM, a tool-capable assistant.
 
@@ -136,6 +142,7 @@ class Agent:
         prompt: str,
         *,
         context: ExecutionContext | None = None,
+        container_env: "ContainerEnv | None" = None,
     ) -> AgentResult:
         """
         Run the agent until the model returns an assistant answer.
@@ -143,6 +150,8 @@ class Agent:
         @param prompt: user input
         @param context: optional caller initialized execution context. If None it's
             init here.
+        @param container_env: the containerized environment where tools run.
+                              agent don't start the container, must be start by caller.
         @return agent final answer.
         """
 
@@ -152,14 +161,11 @@ class Agent:
         # Add user input as the first event.
         execution_context.add_user_message(prompt)
 
-        # Set up code execution environment if needed
-        # TODO
-
         while (
             execution_context.final_result is None
             and execution_context.current_step < self.max_step
         ):
-            _ = self.step(execution_context)
+            _ = self.step(execution_context, container_env=container_env)
 
             # Check if the last event is a final response
             if execution_context.events:
@@ -196,11 +202,17 @@ class Agent:
                 return item.content
         return "Woops!!"
 
-    def step(self, context: ExecutionContext) -> None:
+    def step(
+        self,
+        context: ExecutionContext,
+        *,
+        container_env: "ContainerEnv | None" = None,
+    ) -> None:
         """
         Perform one ReAct think-act cycle.
 
         @param context: execution context to update.
+        @param container_env: the containerized environment where tools run.
         @return None.
         """
         # Tool-specific compaction pass
@@ -249,7 +261,7 @@ class Agent:
 
         tool_calls = [item for item in response.content if isinstance(item, ToolCall)]
         if tool_calls:
-            _ = self.act(context, tool_calls)
+            _ = self.act(context, tool_calls, container_env=container_env)
         context.increment_step()
         return None
 
@@ -337,15 +349,21 @@ class Agent:
         self,
         context: ExecutionContext,
         tool_calls: Sequence[ToolCall],
+        *,
+        container_env: "ContainerEnv | None" = None,
     ) -> None:
         """
         Execute tool calls and append their results to the context.
 
         @param context: execution context to update.
         @param tool_calls: tool calls emitted by the last think phase.
+        @param container_env: the containerized environment where tools run.
         @return stored tool results.
         """
-        tool_results = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+        tool_results = [
+            self._execute_tool_call(tool_call, container_env=container_env)
+            for tool_call in tool_calls
+        ]
         tool_event = Event(
             execution_id=context.execution_id,
             author="tool",
@@ -450,9 +468,16 @@ class Agent:
 
         return item
 
-    def _execute_tool_call(self, tool_call: ToolCall) -> AgentToolResult:
+    def _execute_tool_call(
+        self,
+        tool_call: ToolCall,
+        *,
+        container_env: "ContainerEnv | None" = None,
+    ) -> AgentToolResult:
         """
         Lookup in tool dictionary and execute tool.
+        @param tool_calls: tool calls emitted by the last think phase.
+        @param container_env: the containerized environment where tools run.
         Return AgentToolResult.
         """
         tool = self._tools_by_name.get(tool_call.name)
@@ -465,7 +490,7 @@ class Agent:
             )
 
         try:
-            result = tool.execute(tool_call.arguments)
+            result = execute_tool(tool, tool_call.arguments, container_env)
         except Exception as error:
             return AgentToolResult(
                 tool_call_id=tool_call.tool_call_id,

@@ -97,7 +97,11 @@ class FakeGenerator:
 
 
 def tool(name: str, result: str | Exception) -> Tool:
-    def execute(arguments: dict[str, object]) -> str:
+    def execute(
+        arguments: dict[str, object],
+        container_env: object | None = None,
+    ) -> str:
+        del container_env
         if isinstance(result, Exception):
             raise result
         return f"{result}:{arguments.get('q', '')}"
@@ -177,6 +181,75 @@ def test_agent_run_executes_successful_tool_round_then_final_answer() -> None:
         },
         {"role": "tool", "content": "Tool result: found:x"},
     ]
+
+
+def test_agent_run_forwards_container_env_to_tools() -> None:
+    class FakeContainerEnv:
+        pass
+
+    env = FakeContainerEnv()
+    seen_envs: list[object] = []
+
+    def execute(
+        arguments: dict[str, object],
+        container_env: object | None = None,
+    ) -> str:
+        seen_envs.append(container_env)
+        return f"ok:{arguments['q']}"
+
+    generator = FakeGenerator(
+        [
+            AssistantOutput("", (ToolCall(name="lookup", arguments={"q": "x"}),)),
+            AssistantOutput("done"),
+        ]
+    )
+    agent = Agent(
+        LlmClient(generator),
+        [
+            Tool(
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                execute=execute,
+            )
+        ],
+    )
+
+    result = agent.run("go", container_env=env)  # type: ignore[arg-type]
+
+    assert result.output == "done"
+    assert seen_envs == [env]
+    assert generator.messages[1][-1] == {
+        "role": "tool",
+        "content": "Tool result: ok:x",
+    }
+
+
+def test_agent_does_not_manage_container_env_lifecycle() -> None:
+    class FakeContainerEnv:
+        def __init__(self) -> None:
+            self.started = False
+            self.closed = False
+
+        def start(self, *_args: object, **_kwargs: object) -> None:
+            self.started = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    env = FakeContainerEnv()
+    generator = FakeGenerator([AssistantOutput("done")])
+    agent = Agent(LlmClient(generator), [])
+
+    result = agent.run("go", container_env=env)  # type: ignore[arg-type]
+
+    assert result.output == "done"
+    assert env.started is False
+    assert env.closed is False
 
 
 @pytest.mark.parametrize(
@@ -289,7 +362,7 @@ def test_agent_keeps_latest_tool_answer_raw_in_llm_request() -> None:
                         "parameters": {"type": "object"},
                     },
                 },
-                execute=lambda _: raw_answer,
+                execute=lambda _, container_env=None: raw_answer,
                 context_policy=ToolContextPolicy(compact_answer=compact_answer),
             )
         ],
@@ -491,7 +564,7 @@ def test_agent_compacts_previous_tool_answer_only_in_llm_request() -> None:
                         "parameters": {"type": "object"},
                     },
                 },
-                execute=lambda _: "unused",
+                execute=lambda _, container_env=None: "unused",
                 context_policy=ToolContextPolicy(compact_answer=compact_answer),
             )
         ],
@@ -538,7 +611,7 @@ def test_agent_compacts_tool_call_only_in_llm_request() -> None:
                         "parameters": {"type": "object"},
                     },
                 },
-                execute=lambda _: "answer",
+                execute=lambda _, container_env=None: "answer",
                 context_policy=ToolContextPolicy(compact_call=compact_call),
             )
         ],
@@ -580,7 +653,7 @@ def test_agent_uses_raw_item_when_context_policy_fails() -> None:
                         "parameters": {"type": "object"},
                     },
                 },
-                execute=lambda _: "raw answer",
+                execute=lambda _, container_env=None: "raw answer",
                 context_policy=ToolContextPolicy(compact_answer=compact_answer),
             )
         ],

@@ -49,7 +49,11 @@ def test_functional_qwen3_with_thinking_calls_compute_tool(
     results: list[str] = []
     base_tool = compute_tool()
 
-    def record_compute(arguments: dict[str, object]) -> str:
+    def record_compute(
+        arguments: dict[str, object],
+        container_env: object | None = None,
+    ) -> str:
+        del container_env
         calls.append(arguments)
         result = execute_compute(arguments)
         results.append(result)

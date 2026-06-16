@@ -12,10 +12,14 @@ from __future__ import annotations
 import copy
 import re
 import subprocess
+from typing import TYPE_CHECKING
 
 from .tool_common import Tool
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from .container_env import ContainerEnv
 
 _BC_TIMEOUT_SECONDS = 5
 _PI_PATTERN = re.compile(r"\bpi\b")
@@ -51,8 +55,12 @@ def compute_tool() -> Tool:
     return Tool(schema=copy.deepcopy(COMPUTE_TOOL_SCHEMA), execute=execute_compute)
 
 
-def execute_compute(arguments: dict[str, object]) -> str:
+def execute_compute(
+    arguments: dict[str, object],
+    container_env: "ContainerEnv | None" = None,
+) -> str:
     """Execute the compute tool with a ``{"expression": "..."}`` argument."""
+    del container_env
     expression = arguments.get("expression")
     logger.info("compute call ! expression=[{}]", expression)
     if not isinstance(expression, str):
