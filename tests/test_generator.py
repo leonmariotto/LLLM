@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -124,6 +125,16 @@ class ScriptedJsonModel(nn.Module):
             logits[:, -1, self.tokenizer.eos] = 1.0
         self.step += 1
         return logits
+
+
+class CountingTokenTrie(TokenTrie):
+    def __init__(self, tokenizer: JsonTokenizer) -> None:
+        super().__init__(tokenizer)
+        self.valid_token_call_count = 0
+
+    def valid_token_ids(self, is_valid_so_far: Callable[[str], bool]) -> list[int]:
+        self.valid_token_call_count += 1
+        return super().valid_token_ids(is_valid_so_far)
 
 
 class JsonProbe(BaseModel):
@@ -804,6 +815,83 @@ def test_token_trie_returns_only_valid_tokens_for_current_prefix() -> None:
 
     assert "{" in token_texts
     assert "bad" not in token_texts
+
+
+def test_response_format_uses_fast_mask_inside_think_text() -> None:
+    tokenizer = JsonTokenizer()
+    trie = CountingTokenTrie(tokenizer)
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=trie,
+    )
+    decoder.generated_text = "<think>hidden"
+    logits = torch.zeros(1, tokenizer.vocabulary_size)
+
+    mask = decoder.mask_for_next_token(logits, tokenizer.eos)
+
+    assert trie.valid_token_call_count == 0
+    assert decoder.stats.fast_think_mask_hits == 1
+    assert bool(mask[tokenizer.token_to_id["bad"]])
+    assert not bool(mask[tokenizer.eos])
+
+
+def test_response_format_uses_fast_mask_inside_string_value() -> None:
+    tokenizer = JsonTokenizer()
+    trie = CountingTokenTrie(tokenizer)
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=trie,
+    )
+    decoder.generated_text = '{"name":"ma'
+    logits = torch.zeros(1, tokenizer.vocabulary_size)
+
+    mask = decoder.mask_for_next_token(logits, tokenizer.eos)
+
+    assert trie.valid_token_call_count == 0
+    assert decoder.stats.fast_text_mask_hits == 1
+    assert bool(mask[tokenizer.token_to_id["x"]])
+    assert bool(mask[tokenizer.token_to_id['"']])
+    assert not bool(mask[tokenizer.token_to_id["\n"]])
+    assert not bool(mask[tokenizer.eos])
+
+
+def test_response_format_keeps_strict_mask_for_object_keys() -> None:
+    tokenizer = JsonTokenizer()
+    trie = CountingTokenTrie(tokenizer)
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=trie,
+    )
+    decoder.generated_text = '{"'
+    logits = torch.zeros(1, tokenizer.vocabulary_size)
+
+    _ = decoder.mask_for_next_token(logits, tokenizer.eos)
+
+    assert trie.valid_token_call_count == 1
+    assert decoder.stats.trie_mask_misses == 1
+    assert decoder.stats.fast_text_mask_hits == 0
+
+
+def test_response_format_returns_to_strict_mask_after_string_value_closes() -> None:
+    tokenizer = JsonTokenizer()
+    trie = CountingTokenTrie(tokenizer)
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=trie,
+    )
+    decoder.generated_text = '{"name":"max"'
+    logits = torch.zeros(1, tokenizer.vocabulary_size)
+
+    mask = decoder.mask_for_next_token(logits, tokenizer.eos)
+
+    assert trie.valid_token_call_count == 1
+    assert decoder.stats.trie_mask_misses == 1
+    assert bool(mask[tokenizer.token_to_id[","]])
+    assert not bool(mask[tokenizer.token_to_id["x"]])
 
 
 def test_response_format_performance_overhead_is_logged_and_bounded() -> None:

@@ -6,6 +6,8 @@ Manage KVCache: KVCache is created and destroyed in a single generation.
 Support structured output: use a token trie to fetch token effectively,
 structured output take a json schema in parameter, however only a very minimal
 subset of type is currently supported.
+Free-form text zone are detected in parsing and a cheap mask is created for them
+instead of re-constructing a huge mask at each token.
 """
 
 from collections.abc import Callable, Sequence
@@ -143,6 +145,9 @@ class JsonConstraintStats:
     vocabulary_size: int = 0
     mask_cache_hits: int = 0
     mask_cache_misses: int = 0
+    fast_text_mask_hits: int = 0
+    fast_think_mask_hits: int = 0
+    trie_mask_misses: int = 0
 
 
 class _TrieNode:
@@ -164,6 +169,7 @@ class TokenTrie:
         start = time.perf_counter()
         self.root = _TrieNode()
         self.vocabulary_size = _tokenizer_vocabulary_size(tokenizer)
+        self.token_text_by_id: dict[int, str] = {}
         for token_id in range(self.vocabulary_size):
             try:
                 token_text = tokenizer.decode([token_id])
@@ -172,6 +178,7 @@ class TokenTrie:
                 continue
             if token_text == "":
                 continue
+            self.token_text_by_id[token_id] = token_text
             self._insert(token_text, token_id)
         self.build_seconds = time.perf_counter() - start
         logger.info(
@@ -352,6 +359,7 @@ class JsonConstrainedDecoder:
         self.trie = trie
         self.generated_text = ""
         self._mask_cache: dict[str, torch.Tensor] = {}
+        self._fast_mask_cache: dict[str, torch.Tensor] = {}
         self.stats = JsonConstraintStats(
             trie_build_seconds=trie.build_seconds,
             vocabulary_size=trie.vocabulary_size,
@@ -391,6 +399,11 @@ class JsonConstrainedDecoder:
             self._mask_cache[cache_key] = mask
             return mask.to(device=logits.device)
 
+        fast_mask = self._fast_text_mask(logits, eos)
+        if fast_mask is not None:
+            self._mask_cache[cache_key] = fast_mask
+            return fast_mask.to(device=logits.device)
+
         def is_valid_token_so_far(token_text: str) -> bool:
             """
             Callback used to validate the whole generation, used against
@@ -402,6 +415,7 @@ class JsonConstrainedDecoder:
             )
 
         # Produce the list of valid tokens.
+        self.stats.trie_mask_misses += 1
         token_ids = self.trie.valid_token_ids(is_valid_token_so_far)
         # Create mask
         mask = torch.zeros(logits.shape[-1], dtype=torch.bool)
@@ -439,12 +453,83 @@ class JsonConstrainedDecoder:
             ) from error
         logger.info(
             "Constrained JSON final validation succeeded schema={} chars={} "
-            "mask_cache_hits={} mask_cache_misses={}",
+            "mask_cache_hits={} mask_cache_misses={} "
+            "fast_text_mask_hits={} fast_think_mask_hits={} trie_mask_misses={}",
             self.spec.name,
             len(payload),
             self.stats.mask_cache_hits,
             self.stats.mask_cache_misses,
+            self.stats.fast_text_mask_hits,
+            self.stats.fast_think_mask_hits,
+            self.stats.trie_mask_misses,
         )
+
+    def _fast_text_mask(
+        self,
+        logits: torch.Tensor,
+        eos: int | None,
+    ) -> torch.Tensor | None:
+        """Return a cheap mask for unconstrained text regions."""
+        # Check if we're in <think></think> zone, if so return a cheap mask.
+        if _is_inside_think_text(self.generated_text):
+            self.stats.fast_think_mask_hits += 1
+            return self._mask_from_token_filter(
+                "think",
+                logits,
+                eos,
+                lambda token_text: bool(token_text),
+            )
+
+        payload = _json_payload_after_optional_think(self.generated_text)
+        if payload is None or payload == "":
+            return None
+        # Try to parse the object, and catch IncompleteStringValue error.
+        string_state = _incomplete_string_value_state(payload, self.spec)
+        if string_state is None:
+            return None
+
+        # If incomplete string detected, use a cheap mask
+        self.stats.fast_text_mask_hits += 1
+        return self._mask_from_token_filter(
+            # string_state.escaped here say if the last char so far is a backlash
+            # if so _mask_from_token_filter will return another mask.
+            f"json_string_escaped_{string_state.escaped}",
+            logits,
+            eos,
+            lambda token_text: _is_safe_json_string_token(
+                token_text,
+                escaped=string_state.escaped,
+            ),
+        )
+
+    def _mask_from_token_filter(
+        self,
+        cache_key: str,
+        logits: torch.Tensor,
+        eos: int | None,
+        is_valid: Callable[[str], bool],
+    ) -> torch.Tensor:
+        """
+        Build a token mask without walking the token trie.
+        Try to get @param cache_key mask in cache, if not exist build it.
+        @param logit is used to get the logits shape for build the mask.
+        @param is_valid is a callable that return true if its input is valid.
+        @return Builded mask, after saving it in self._fast_mask_cache dict.
+        """
+        cached = self._fast_mask_cache.get(cache_key)
+        if cached is not None and cached.shape[0] == logits.shape[-1]:
+            return cached
+
+        mask = torch.zeros(logits.shape[-1], dtype=torch.bool)
+        valid_ids = [
+            token_id
+            for token_id, token_text in self.trie.token_text_by_id.items()
+            if token_id < logits.shape[-1] and token_id != eos and is_valid(token_text)
+        ]
+        if valid_ids:
+            mask[torch.tensor(valid_ids, dtype=torch.long)] = True
+        self._fast_mask_cache[cache_key] = mask
+        return mask
 
 
 def apply_json_constraint_mask(
@@ -581,6 +666,13 @@ def _parse_complete_object(text: str, spec: JsonObjectSpec) -> bool:
     return position == len(text)
 
 
+@dataclass(frozen=True)
+class JsonStringPrefixState:
+    """State of an incomplete JSON string value prefix."""
+
+    escaped: bool
+
+
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 
@@ -612,6 +704,52 @@ def _json_payload_after_optional_think(text: str) -> str | None:
             return None
         return text[close_index + len(_THINK_CLOSE) :].lstrip()
     return text.lstrip()
+
+
+def _is_inside_think_text(text: str) -> bool:
+    """Return whether generation is inside an opened think block."""
+    return text.startswith(_THINK_OPEN) and _THINK_CLOSE not in text
+
+
+def _incomplete_string_value_state(
+    text: str,
+    spec: JsonObjectSpec,
+) -> JsonStringPrefixState | None:
+    """Return string-value state when the prefix is inside a schema string value."""
+    try:
+        _ = _parse_object(text, 0, spec)
+    except _IncompleteStringValue as state:
+        return JsonStringPrefixState(escaped=state.escaped)
+    except (_Incomplete, _Invalid):
+        return None
+    return None
+
+
+def _is_safe_json_string_token(token_text: str, *, escaped: bool) -> bool:
+    """
+    Return whether a decoded token can continue or close a JSON string value.
+    Used to build the cheap masks for free-form string.
+    @param escaped say if last char is a backlash.
+    """
+    if token_text == "":
+        return False
+
+    is_escaped = escaped
+    for index, char in enumerate(token_text):
+        if is_escaped:
+            if char not in {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}:
+                return False
+            is_escaped = False
+            continue
+
+        if char == "\\":
+            is_escaped = True
+            continue
+        if char == '"':
+            return index == len(token_text) - 1
+        if ord(char) < 0x20:
+            return False
+    return True
 
 
 def _parse_object(text: str, position: int, spec: JsonObjectSpec) -> int:
@@ -657,6 +795,8 @@ def _parse_object_fields(
                 next_index=candidate_index + 1,
                 first=False,
             )
+        except _IncompleteStringValue:
+            raise
         except _Incomplete:
             saw_incomplete = True
         except _Invalid:
@@ -758,7 +898,7 @@ def _parse_string(text: str, position: int) -> int:
         elif ord(char) < 0x20:
             raise _Invalid
         index += 1
-    raise _Incomplete
+    raise _IncompleteStringValue(escaped=escaped)
 
 
 def _parse_number(text: str, position: int, *, allow_float: bool) -> int:
@@ -812,6 +952,12 @@ def _parse_list(text: str, position: int, item: JsonValueSpec) -> int:
 
 class _Incomplete(Exception):
     pass
+
+
+class _IncompleteStringValue(_Incomplete):
+    def __init__(self, *, escaped: bool) -> None:
+        super().__init__()
+        self.escaped = escaped
 
 
 class _Invalid(Exception):
