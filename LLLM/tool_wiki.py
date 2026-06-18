@@ -1,29 +1,29 @@
 """
-Wikimedia wiki search and page retrieval tool for model tool-use loops.
+Focused Wikimedia tools for model tool-use loops.
 
-The tool exposes one ``wiki`` function with four actions:
-``search`` queries a Wikimedia wiki through the MediaWiki API, ``open``
-retrieves a plain-text extract for a wiki page URL or page title,
-``search_in_page`` searches inside a known wiki page, and ``read_chunk``
-continues a previous truncated response without another network request.
+The module exposes three separate tools instead of one action-routed tool:
+``find_wiki_page`` finds candidate pages, ``search_in_wiki_page`` searches
+inside one page with vector search, and ``read_wiki_page`` reads one page with a
+high guard limit.  The schemas are deliberately explicit because small local
+models need step-by-step tool guidance.
 """
 
 from __future__ import annotations
 
-from collections import deque
 import copy
 import html
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from urllib.parse import quote, unquote, urlparse
 
-import requests
-
 from loguru import logger
+import requests
 
 from .agent_context import AgentToolResult
 from .tool_common import Tool, ToolContextPolicy
+from .vector_search import SearchResult, TextEmbedder, vector_build_and_search
 
 if TYPE_CHECKING:
     from .container_env import ContainerEnv
@@ -32,7 +32,7 @@ _DEFAULT_WIKI = "https://en.wikipedia.org"
 _REQUEST_TIMEOUT_SECONDS = 10
 _HEADERS = {
     "User-Agent": (
-        "LLLM wiki tool/0.1 "
+        "LLLM wiki tool/0.2 "
         "(https://github.com/leonmariotto/LLLM; contact: leon2mariotto@gmail.com)"
     )
 }
@@ -48,104 +48,135 @@ _SUPPORTED_HOST_SUFFIXES = (
     ".wikimedia.org",
 )
 _SUPPORTED_EXACT_HOSTS = {"www.wikidata.org"}
-_SEARCH_IN_PAGE_CONTEXT_CHARS = 300
-_TRUNCATED_MARKER = "\n[truncated]"
 _CONTEXT_COMPACT_BODY_CHARS = 1200
 _CONTEXT_COMPACT_MIN_SAVED_CHARS = 300
+_READ_WIKI_PAGE_MAX_CHARS = 13000
+_READ_GUARD_MARKER = (
+    "\n[read_wiki_page guard: page was too long and was cut. "
+    "Use search_in_wiki_page with a specific query to find details in this page.]"
+)
+_VECTOR_CHUNK_SIZE = 1000
+_VECTOR_CHUNK_OVERLAP = 100
 
-WIKI_TOOL_SCHEMA: dict[str, object] = {
+FIND_WIKI_PAGE_SCHEMA: dict[str, object] = {
     "type": "function",
     "function": {
-        "name": "wiki",
+        "name": "find_wiki_page",
         "description": (
-            "Wikipedia/Wikimedia tool. Choose one action. "
-            "1. action='search': find page titles for a topic. Use query as the "
-            "topic, like 'Paris' or 'CAC 40'. "
-            "2. action='open': read a known page. Use title or url. "
-            "3. action='search_in_page': find an exact word or short phrase inside "
-            "a known page. Use title or url for the page. Use query only for the "
-            "short text to find, not the whole user question. Good queries: "
-            "'market capitalization', 'population', 'Montmartre', 'CEO'. Bad "
-            "queries: 'what is the market cap of CAC 40', 'tell me about Paris'. "
-            "4. action='read_chunk': read the next saved chunk after an open or "
-            "search_in_page response ended with [truncated]. This consumes cached "
-            "text from the previous tool result and does not make a network request. "
-            "If read_chunk also ends with [truncated], call read_chunk again. "
-            "search only returns page titles, call open or search_in_page next "
-            "before answering. "
-            "Information about <subject> is often (if not always) located in the "
-            "<subject> dedicated pages. Example : turtle food habits is an "
-            "information present in the 'turtle' page. "
-            "When looking for information about <subject>, you should try to open "
-            "directly wikipedia page with title '<subject>', do a search only if it "
-            "report page not found. "
-            "search_in_page search for exact match (case insensitive) so do only "
-            "small search: 2-3 words maximum. "
-            "Examples: "
-            '{"action":"open","title":"turtle"}; '
-            '{"action":"search","query":"olympic games list"}; '
-            '{"action":"search_in_page","title":"paris","query":"montmartre"}; '
-            '{"action":"read_chunk"}.'
+            "Step 1 wiki tool. Use this when you do not know the exact Wikipedia "
+            "or Wikimedia page title. Give a short topic or entity name. This "
+            "tool only returns candidate pages and URLs. Do not answer from this "
+            "tool alone. Next call read_wiki_page for broad reading, or "
+            "search_in_wiki_page for a specific fact inside one returned page."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["search", "open", "search_in_page", "read_chunk"],
-                    "description": (
-                        "Choose exactly one: 'search' finds pages; 'open' reads a "
-                        "known page; 'search_in_page' finds an exact match inside "
-                        "a known page; 'read_chunk' continues the previous "
-                        "truncated result."
-                    ),
-                },
                 "query": {
                     "type": "string",
                     "description": (
-                        "Required for search and search_in_page. For search, use "
-                        "the topic or page name. For search_in_page, use only an "
-                        "exact word or short phrase expected in the page, not the "
-                        "full user question."
-                    ),
-                },
-                "url": {
-                    "type": "string",
-                    "description": (
-                        "Wikimedia page URL to retrieve or search inside. Required "
-                        "for open and search_in_page unless title is provided."
-                    ),
-                },
-                "title": {
-                    "type": "string",
-                    "description": (
-                        "Wiki page title to retrieve or search inside. Required "
-                        "for open and search_in_page unless url is provided."
+                        "Required. Short topic or page name to find, like "
+                        "'Paris', 'CAC 40', or '2024 Summer Olympics'."
                     ),
                 },
                 "wiki": {
                     "type": "string",
                     "description": (
-                        "Optional Wikimedia wiki base URL, such as "
+                        "Optional Wikimedia base URL, such as "
                         "https://fr.wikipedia.org. Defaults to English Wikipedia."
                     ),
                 },
                 "max_results": {
                     "type": "integer",
+                    "description": "Optional result count from 1 to 10. Default is 5.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+SEARCH_IN_WIKI_PAGE_SCHEMA: dict[str, object] = {
+    "type": "function",
+    "function": {
+        "name": "search_in_wiki_page",
+        "description": (
+            "Step 2 wiki tool for a specific question about one known page. "
+            "Use this after you know the page title or URL. Put either the "
+            "plain page title or the full Wikimedia page URL in the title "
+            "parameter. It reads the page, "
+            "splits it into chunks, and returns the most relevant passages using "
+            "vector search. Use a short semantic query, not the whole chat. Good "
+            "queries: 'market capitalization', 'host city', 'population'. If the "
+            "answer is not in the passages, try another short query or read the "
+            "page."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Required. Short phrase for the fact to find.",
+                },
+                "title": {
+                    "type": "string",
                     "description": (
-                        "For action='search' only. Maximum page results to return, "
-                        "from 1 to 10."
+                        "Required. Wiki page title or full Wikimedia page URL. "
+                        "Examples: '2024 Summer Olympics' or "
+                        "'https://en.wikipedia.org/wiki/2024_Summer_Olympics'."
                     ),
                 },
-                "max_chars": {
+                "wiki": {
+                    "type": "string",
+                    "description": (
+                        "Optional Wikimedia base URL used with title. Defaults to "
+                        "English Wikipedia."
+                    ),
+                },
+                "top_k": {
                     "type": "integer",
                     "description": (
-                        "For action='open', action='search_in_page', and "
-                        "action='read_chunk'. Maximum characters to return."
+                        "Optional number of relevant passages to return, from 1 "
+                        "to 10. Default is 5."
                     ),
                 },
             },
-            "required": ["action"],
+            "required": ["query", "title"],
+        },
+    },
+}
+
+READ_WIKI_PAGE_SCHEMA: dict[str, object] = {
+    "type": "function",
+    "function": {
+        "name": "read_wiki_page",
+        "description": (
+            "Step 2 wiki tool for broad reading of one known page. Use this after "
+            "you know the page title or URL. Put either the plain page title or "
+            "the full Wikimedia page URL in the title parameter. It returns the page text up to a high "
+            "guard limit. For long pages or specific facts, prefer "
+            "search_in_wiki_page because it returns focused passages."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Required. Wiki page title or full Wikimedia page URL. "
+                        "Examples: 'CAC 40' or "
+                        "'https://en.wikipedia.org/wiki/CAC_40'."
+                    ),
+                },
+                "wiki": {
+                    "type": "string",
+                    "description": (
+                        "Optional Wikimedia base URL used with title. Defaults to "
+                        "English Wikipedia."
+                    ),
+                },
+            },
+            "required": ["title"],
         },
     },
 }
@@ -171,111 +202,118 @@ class _FetchedPage:
     extract: str
 
 
-def wiki_tool() -> Tool:
-    """Return the ready-to-register ``wiki`` tool."""
-    executor = _WikiExecutor()
-    return Tool(
-        schema=copy.deepcopy(WIKI_TOOL_SCHEMA),
-        execute=executor.execute,
-        context_policy=ToolContextPolicy(compact_answer=_compact_wiki_answer),
+def wiki_tools(embedder: TextEmbedder) -> tuple[Tool, Tool, Tool]:
+    """
+    Return ready-to-register Wikimedia tools.
+
+    ``search_in_wiki_page`` needs the supplied embedder for vector search.
+    ``find_wiki_page`` and ``read_wiki_page`` do not embed text, but they are
+    returned together so callers register a coherent wiki workflow.
+    """
+    executor = _WikiExecutor(embedder)
+    policy = ToolContextPolicy(compact_answer=_compact_wiki_answer)
+    logger.info("creating split wiki tools with vector embedder={}", type(embedder))
+    return (
+        Tool(
+            schema=copy.deepcopy(FIND_WIKI_PAGE_SCHEMA),
+            execute=executor.find_wiki_page,
+            context_policy=policy,
+        ),
+        Tool(
+            schema=copy.deepcopy(SEARCH_IN_WIKI_PAGE_SCHEMA),
+            execute=executor.search_in_wiki_page,
+            context_policy=policy,
+        ),
+        Tool(
+            schema=copy.deepcopy(READ_WIKI_PAGE_SCHEMA),
+            execute=executor.read_wiki_page,
+            context_policy=policy,
+        ),
     )
 
 
-def execute_wiki(
-    arguments: dict[str, object],
-    container_env: "ContainerEnv | None" = None,
-) -> str:
-    """Execute the wiki tool."""
-    return _DEFAULT_EXECUTOR.execute(arguments, container_env)
-
-
 class _WikiExecutor:
-    def __init__(self) -> None:
-        self._continuation_chunks: deque[str] = deque()
+    """Executor shared by the split wiki tools."""
 
-    def execute(
+    def __init__(self, embedder: TextEmbedder) -> None:
+        self.embedder = embedder
+
+    def find_wiki_page(
         self,
         arguments: dict[str, object],
         container_env: "ContainerEnv | None" = None,
     ) -> str:
+        """Find candidate wiki pages for a short topic query."""
         del container_env
-        action = arguments.get("action")
-        logger.info("running wiki tool action={}", action)
-        if not isinstance(action, str):
-            raise ValueError("action must be a string")
-        if action == "search":
-            query = _require_non_empty_string(arguments, "query")
-            wiki = _optional_wiki(arguments)
-            max_results = _optional_int(arguments, "max_results", default=5)
-            if max_results < 1 or max_results > 10:
-                raise ValueError("max_results must be between 1 and 10")
-            logger.info("search: query={}", query)
-            return _execute_search(query, wiki, max_results)
-        if action == "open":
-            target = _open_target(arguments)
-            max_chars = _validated_max_chars(arguments)
-            logger.info("open: target={}", target)
-            return self._execute_open(target, max_chars)
-        if action == "search_in_page":
-            target = _open_target(arguments)
-            query = _require_non_empty_string(arguments, "query")
-            max_chars = _validated_max_chars(arguments)
-            logger.info("search_in_page: target={} query={}", target, query)
-            return self._execute_search_in_page(target, query, max_chars)
-        if action == "read_chunk":
-            logger.info("read_chunk")
-            max_chars = _validated_max_chars(arguments)
-            return self._read_chunk(max_chars)
-        raise ValueError(
-            "action must be 'search', 'open', 'search_in_page', or 'read_chunk'"
+        query = _require_non_empty_string(arguments, "query")
+        wiki = _optional_wiki(arguments)
+        max_results = _validated_top_k(arguments, "max_results", default=5)
+        logger.info(
+            "find_wiki_page query={!r} wiki={} max_results={}",
+            query,
+            wiki,
+            max_results,
         )
+        return _execute_search(query, wiki, max_results)
 
-    def _execute_open(self, target: _OpenTarget, max_chars: int) -> str:
+    def search_in_wiki_page(
+        self,
+        arguments: dict[str, object],
+        container_env: "ContainerEnv | None" = None,
+    ) -> str:
+        """Search one wiki page with vector search over page chunks."""
+        del container_env
+        target = _open_target(arguments)
+        query = _require_non_empty_string(arguments, "query")
+        top_k = _validated_top_k(arguments, "top_k", default=5)
+        page = _fetch_page(target)
+        logger.info(
+            "search_in_wiki_page target_title={!r} url={} query={!r} page_chars={} "
+            "top_k={} chunk_size={} chunk_overlap={}",
+            page.title,
+            page.url,
+            query,
+            len(page.extract),
+            top_k,
+            _VECTOR_CHUNK_SIZE,
+            _VECTOR_CHUNK_OVERLAP,
+        )
+        results = vector_build_and_search(
+            query,
+            page.extract,
+            self.embedder,
+            top_k=top_k,
+            chunk_size=_VECTOR_CHUNK_SIZE,
+            chunk_overlap=_VECTOR_CHUNK_OVERLAP,
+        )
+        logger.info(
+            "search_in_wiki_page returned {} vector results title={!r}",
+            len(results),
+            page.title,
+        )
+        return _format_vector_search_results(page, query, results)
+
+    def read_wiki_page(
+        self,
+        arguments: dict[str, object],
+        container_env: "ContainerEnv | None" = None,
+    ) -> str:
+        """Read one wiki page up to the fixed high guard limit."""
+        del container_env
+        target = _open_target(arguments)
         page = _fetch_page(target)
         output = f"URL: {page.url}\nTitle: {page.title}\n\n{page.extract}"
-        return self._truncate_and_queue(output, max_chars)
-
-    def _execute_search_in_page(
-        self, target: _OpenTarget, query: str, max_chars: int
-    ) -> str:
-        page = _fetch_page(target)
-        header = f"URL: {page.url}\nTitle: {page.title}\nQuery: {query}"
-        matches = _page_match_blocks(page.extract, query)
-        if not matches:
-            output = (
-                f"No matches found in page: {page.title}\n"
-                f"Query: {query}\n"
-                f"URL: {page.url}"
-            )
-            return self._truncate_and_queue(output, max_chars)
-        output = _join_match_blocks(header, matches)
-        return self._truncate_and_queue(output, max_chars)
-
-    def _read_chunk(self, max_chars: int) -> str:
-        if not self._continuation_chunks:
-            return "No wiki continuation chunks available."
-        return self._truncate_and_queue(
-            self._continuation_chunks.popleft(),
-            max_chars,
-            append_left=True,
+        guarded = _apply_read_guard(output)
+        logger.info(
+            "read_wiki_page title={!r} url={} page_chars={} returned_chars={} "
+            "truncated={}",
+            page.title,
+            page.url,
+            len(output),
+            len(guarded),
+            len(guarded) < len(output),
         )
-
-    def _truncate_and_queue(
-        self, text: str, max_chars: int, *, append_left: bool = False
-    ) -> str:
-        if len(text) <= max_chars:
-            return text
-        split_at = max_chars - len(_TRUNCATED_MARKER)
-        visible = text[:split_at].rstrip()
-        remainder = text[split_at:]
-        if append_left:
-            self._continuation_chunks.appendleft(remainder)
-        else:
-            self._continuation_chunks.append(remainder)
-        return visible + _TRUNCATED_MARKER
-
-
-_DEFAULT_EXECUTOR = _WikiExecutor()
+        return guarded
 
 
 def _compact_wiki_answer(result: AgentToolResult) -> AgentToolResult:
@@ -320,11 +358,11 @@ def _compact_wiki_answer(result: AgentToolResult) -> AgentToolResult:
 
 def _compact_wiki_text(text: str) -> str:
     """
-    Compact a wiki response while preserving source and continuation hints.
+    Compact a wiki response while preserving source and search metadata.
 
     Search results are usually shorter than this threshold and pass through
-    unchanged. Long open/search_in_page/read_chunk answers keep metadata lines
-    plus the first body segment that fits the context budget.
+    unchanged. Long read/search answers keep metadata lines plus the first body
+    segment that fits the request-context budget.
     """
     if len(text) <= _CONTEXT_COMPACT_BODY_CHARS + _CONTEXT_COMPACT_MIN_SAVED_CHARS:
         return text
@@ -334,7 +372,7 @@ def _compact_wiki_text(text: str) -> str:
     for line in text.splitlines():
         if _is_wiki_metadata_line(line):
             metadata_lines.append(line)
-        elif line.strip() == "[truncated]":
+        elif line.startswith("[read_wiki_page guard:"):
             metadata_lines.append(line)
         else:
             body_lines.append(line)
@@ -347,21 +385,18 @@ def _compact_wiki_text(text: str) -> str:
     ]
     if visible_body:
         sections.append(visible_body)
-    if text.endswith(_TRUNCATED_MARKER) and "[truncated]" not in metadata_lines:
-        sections.append("[truncated]")
-
     return "\n".join(section for section in sections if section)
 
 
 def _is_wiki_metadata_line(line: str) -> bool:
     stripped = line.strip()
-    if stripped.startswith(("URL:", "Title:", "Query:", "Match ")):
+    if stripped.startswith(("URL:", "Title:", "Query:", "Result ")):
         return True
     if re.match(r"^\d+\. .+", stripped):
         return True
     if stripped == (
-        "Search results only list candidate pages. You must call "
-        "open or search_in_page before answering."
+        "These are only candidate pages. Next call read_wiki_page for broad "
+        "reading, or search_in_wiki_page for a specific fact."
     ):
         return True
     return False
@@ -383,6 +418,7 @@ def _execute_search(
     )
     raw_results_object = _query_dict(payload).get("search", [])
     if not isinstance(raw_results_object, list) or not raw_results_object:
+        logger.info("find_wiki_page returned 0 results query={!r}", query)
         return f"No wiki results found for: {query}"
     raw_results = cast(list[object], raw_results_object)
 
@@ -403,26 +439,52 @@ def _execute_search(
             )
         )
     if not results:
+        logger.info("find_wiki_page returned 0 valid results query={!r}", query)
         return f"No wiki results found for: {query}"
 
     lines: list[str] = []
     for index, result in enumerate(results, start=1):
         lines.append(f"{index}. {result.title}\nURL: {result.url}")
-        if result.snippet and include_snippet is True:
+        if result.snippet and include_snippet:
             lines.append(f"Snippet: {result.snippet}")
-    if lines != []:
-        lines.append(
-            "Search results only list candidate pages. You must call "
-            "open or search_in_page before answering."
-        )
+    lines.append(
+        "These are only candidate pages. Next call read_wiki_page for broad "
+        "reading, or search_in_wiki_page for a specific fact."
+    )
+    logger.info("find_wiki_page returned {} results query={!r}", len(results), query)
     return "\n".join(lines)
 
 
-def _validated_max_chars(arguments: dict[str, object]) -> int:
-    max_chars = _optional_int(arguments, "max_chars", default=6000)
-    if max_chars < 500 or max_chars > 20000:
-        raise ValueError("max_chars must be between 500 and 20000")
-    return max_chars
+def _format_vector_search_results(
+    page: _FetchedPage, query: str, results: Sequence[SearchResult]
+) -> str:
+    header = f"URL: {page.url}\nTitle: {page.title}\nQuery: {query}"
+    if not results:
+        return (
+            f"{header}\n\n"
+            "No relevant passages found in this page. Try read_wiki_page or a "
+            "different short search query."
+        )
+
+    blocks = []
+    for index, result in enumerate(results, start=1):
+        text = re.sub(r"\s+", " ", result.sequence).strip()
+        blocks.append(f"Result {index} (score={result.score:.4f}):\n{text}")
+    return f"{header}\n\n" + "\n\n".join(blocks)
+
+
+def _apply_read_guard(text: str) -> str:
+    if len(text) <= _READ_WIKI_PAGE_MAX_CHARS:
+        return text
+    split_at = _READ_WIKI_PAGE_MAX_CHARS - len(_READ_GUARD_MARKER)
+    return text[:split_at].rstrip() + _READ_GUARD_MARKER
+
+
+def _validated_top_k(arguments: dict[str, object], name: str, *, default: int) -> int:
+    value = _optional_int(arguments, name, default=default)
+    if value < 1 or value > 10:
+        raise ValueError(f"{name} must be between 1 and 10")
+    return value
 
 
 def _fetch_page(target: _OpenTarget) -> _FetchedPage:
@@ -512,13 +574,16 @@ def _first_page(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _open_target(arguments: dict[str, object]) -> _OpenTarget:
-    url = arguments.get("url")
-    if isinstance(url, str) and url.strip():
-        return _target_from_url(url.strip())
-
     title = _require_non_empty_string(arguments, "title")
+    if _looks_like_url(title):
+        return _target_from_url(title)
     wiki = _optional_wiki(arguments)
     return _OpenTarget(base_url=wiki, title=title)
+
+
+def _looks_like_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return bool(parsed.scheme or parsed.netloc)
 
 
 def _target_from_url(url: str) -> _OpenTarget:
@@ -571,43 +636,6 @@ def _clean_snippet(snippet: str) -> str:
     without_tags = re.sub(r"<[^>]+>", "", html.unescape(snippet))
     collapsed = re.sub(r"\s+", " ", without_tags).strip()
     return re.sub(r"\s+([,.;:!?])", r"\1", collapsed)
-
-
-def _page_match_blocks(extract: str, query: str) -> list[str]:
-    blocks: list[str] = []
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-    for index, match in enumerate(pattern.finditer(extract), start=1):
-        start, end = _snippet_bounds(extract, match.start(), match.end())
-        before = extract[start : match.start()]
-        matched = extract[match.start() : match.end()]
-        after = extract[match.end() : end]
-        prefix = "..." if start > 0 else ""
-        suffix = "..." if end < len(extract) else ""
-        snippet = _normalize_snippet_text(f"{prefix}{before}[{matched}]{after}{suffix}")
-        blocks.append(f"Match {index}:\n{snippet}")
-    return blocks
-
-
-def _snippet_bounds(text: str, match_start: int, match_end: int) -> tuple[int, int]:
-    start = max(0, match_start - _SEARCH_IN_PAGE_CONTEXT_CHARS)
-    end = min(len(text), match_end + _SEARCH_IN_PAGE_CONTEXT_CHARS)
-    if start > 0:
-        next_space = text.find(" ", start, match_start)
-        if next_space != -1:
-            start = next_space + 1
-    if end < len(text):
-        previous_space = text.rfind(" ", match_end, end)
-        if previous_space != -1:
-            end = previous_space
-    return start, end
-
-
-def _normalize_snippet_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _join_match_blocks(header: str, match_blocks: list[str]) -> str:
-    return f"{header}\n\n" + "\n\n".join(match_blocks)
 
 
 def _require_non_empty_string(arguments: dict[str, object], name: str) -> str:

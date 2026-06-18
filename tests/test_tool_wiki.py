@@ -1,12 +1,28 @@
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
 import requests
+import torch
 
 from ..LLLM.agent_context import AgentToolResult
 from ..LLLM.tool_common import Tool
-from ..LLLM.tool_wiki import execute_wiki, wiki_tool
+from ..LLLM.tool_wiki import wiki_tools
+
+
+class FakeEmbedder:
+    def embed(self, text: str) -> torch.Tensor:
+        lowered = text.lower()
+        return torch.tensor(
+            [
+                1.0 if any(word in lowered for word in ("market", "capital")) else 0.0,
+                1.0 if any(word in lowered for word in ("coffee", "café")) else 0.0,
+                1.0 if any(word in lowered for word in ("python", "language")) else 0.0,
+            ]
+        )
+
+    def embed_batch(self, texts: Sequence[str]) -> torch.Tensor:
+        return torch.stack([self.embed(text) for text in texts])
 
 
 class FakeResponse:
@@ -31,38 +47,60 @@ class FakeResponse:
         pass
 
 
-def test_wiki_tool_returns_registered_tool() -> None:
-    tool = wiki_tool()
+def _tools_by_name() -> dict[str, Tool]:
+    return {
+        cast_name(tool): tool
+        for tool in wiki_tools(FakeEmbedder())
+    }
 
-    assert isinstance(tool, Tool)
-    assert tool.schema["type"] == "function"
+
+def cast_name(tool: Tool) -> str:
     function = tool.schema["function"]
     assert isinstance(function, dict)
-    assert function["name"] == "wiki"
-    parameters = function["parameters"]
-    assert isinstance(parameters, dict)
-    properties = parameters["properties"]
-    assert isinstance(properties, dict)
-    action = properties["action"]
-    assert isinstance(action, dict)
-    assert action["enum"] == ["search", "open", "search_in_page", "read_chunk"]
-    assert tool.context_policy is not None
-    assert tool.context_policy.compact_answer is not None
+    name = function["name"]
+    assert isinstance(name, str)
+    return name
+
+
+def _page_payload(title: str, extract: str) -> dict[str, object]:
+    return {"query": {"pages": {"1": {"title": title, "extract": extract}}}}
+
+
+def test_wiki_tools_return_three_registered_tools() -> None:
+    tools = wiki_tools(FakeEmbedder())
+
+    assert [cast_name(tool) for tool in tools] == [
+        "find_wiki_page",
+        "search_in_wiki_page",
+        "read_wiki_page",
+    ]
+    for tool in tools:
+        assert isinstance(tool, Tool)
+        assert tool.schema["type"] == "function"
+        assert tool.context_policy is not None
+        assert tool.context_policy.compact_answer is not None
+        function = tool.schema["function"]
+        assert isinstance(function, dict)
+        parameters = function["parameters"]
+        assert isinstance(parameters, dict)
+        properties = parameters["properties"]
+        assert isinstance(properties, dict)
+        assert "url" not in properties
 
 
 def test_wiki_context_policy_compacts_long_success_answer() -> None:
-    tool = wiki_tool()
+    tool = _tools_by_name()["read_wiki_page"]
     assert tool.context_policy is not None
     assert tool.context_policy.compact_answer is not None
     raw_content = (
         "URL: https://en.wikipedia.org/wiki/Long\n"
         "Title: Long\n\n"
         f"{'x' * 3000}\n"
-        "[truncated]"
+        "[read_wiki_page guard: page was too long]"
     )
     result = AgentToolResult(
         tool_call_id="call_0",
-        name="wiki",
+        name="read_wiki_page",
         status="success",
         content=[raw_content],
     )
@@ -71,52 +109,39 @@ def test_wiki_context_policy_compacts_long_success_answer() -> None:
 
     assert isinstance(compacted, AgentToolResult)
     assert compacted.tool_call_id == "call_0"
-    assert compacted.name == "wiki"
+    assert compacted.name == "read_wiki_page"
     assert compacted.status == "success"
     content = compacted.content[0]
     assert isinstance(content, str)
     assert "URL: https://en.wikipedia.org/wiki/Long" in content
     assert "Title: Long" in content
     assert "[wiki answer compacted from" in content
-    assert "[truncated]" in content
+    assert "[read_wiki_page guard:" in content
     assert len(content) < len(raw_content)
 
 
-def test_wiki_context_policy_leaves_short_success_answer() -> None:
-    tool = wiki_tool()
+def test_wiki_context_policy_leaves_short_and_error_answers() -> None:
+    tool = _tools_by_name()["read_wiki_page"]
     assert tool.context_policy is not None
     assert tool.context_policy.compact_answer is not None
-    result = AgentToolResult(
+    short = AgentToolResult(
         tool_call_id="call_0",
-        name="wiki",
+        name="read_wiki_page",
         status="success",
         content=["URL: https://en.wikipedia.org/wiki/Short\nTitle: Short\n\nbrief"],
     )
-
-    compacted = tool.context_policy.compact_answer(result)
-
-    assert compacted == result
-
-
-def test_wiki_context_policy_leaves_error_answer() -> None:
-    tool = wiki_tool()
-    assert tool.context_policy is not None
-    assert tool.context_policy.compact_answer is not None
-    result = AgentToolResult(
-        tool_call_id="call_0",
-        name="wiki",
+    error = AgentToolResult(
+        tool_call_id="call_1",
+        name="read_wiki_page",
         status="error",
         content=["wiki failed"],
     )
 
-    compacted = tool.context_policy.compact_answer(result)
+    assert tool.context_policy.compact_answer(short) == short
+    assert tool.context_policy.compact_answer(error) == error
 
-    assert compacted == result
 
-
-def test_execute_wiki_search_parses_results(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_find_wiki_page_parses_results(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {
         "query": {
             "search": [
@@ -124,10 +149,7 @@ def test_execute_wiki_search_parses_results(
                     "title": "CAC 40",
                     "snippet": "French &lt;span class='searchmatch'&gt;index&lt;/span&gt;.",
                 },
-                {
-                    "title": "CAC Next 20",
-                    "snippet": "Another result.",
-                },
+                {"title": "CAC Next 20", "snippet": "Another result."},
             ]
         }
     }
@@ -139,7 +161,7 @@ def test_execute_wiki_search_parses_results(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wiki({"action": "search", "query": "CAC 40"})
+    output = _tools_by_name()["find_wiki_page"].execute({"query": "CAC 40"})
 
     assert calls[0]["args"] == ("https://en.wikipedia.org/w/api.php",)
     kwargs = calls[0]["kwargs"]
@@ -149,11 +171,11 @@ def test_execute_wiki_search_parses_results(
     assert kwargs["params"]["srlimit"] == "5"
     assert "1. CAC 40" in output
     assert "URL: https://en.wikipedia.org/wiki/CAC_40" in output
-    # assert "Snippet: French index." in output
     assert "2. CAC Next 20" in output
+    assert "Next call read_wiki_page" in output
 
 
-def test_execute_wiki_search_uses_requested_wiki_and_max_results(
+def test_find_wiki_page_uses_requested_wiki_and_max_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = {
@@ -172,9 +194,8 @@ def test_execute_wiki_search_uses_requested_wiki_and_max_results(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wiki(
+    output = _tools_by_name()["find_wiki_page"].execute(
         {
-            "action": "search",
             "query": "Paris",
             "wiki": "https://fr.wikipedia.org",
             "max_results": 1,
@@ -186,34 +207,23 @@ def test_execute_wiki_search_uses_requested_wiki_and_max_results(
     assert "2. Paris Saint-Germain FC" not in output
 
 
-def test_execute_wiki_search_reports_no_results(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_find_wiki_page_reports_no_results(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         requests,
         "get",
         lambda *_, **__: FakeResponse({"query": {"search": []}}),
     )
 
-    output = execute_wiki({"action": "search", "query": "nothing"})
+    output = _tools_by_name()["find_wiki_page"].execute({"query": "nothing"})
 
     assert output == "No wiki results found for: nothing"
 
 
-def test_execute_wiki_open_reads_title(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "168274": {
-                    "pageid": 168274,
-                    "title": "CAC 40",
-                    "extract": "The CAC 40 is a benchmark French stock market index.",
-                }
-            }
-        }
-    }
+def test_read_wiki_page_reads_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _page_payload(
+        "CAC 40",
+        "The CAC 40 is a benchmark French stock market index.",
+    )
 
     def fake_get(*_: Any, **kwargs: Any) -> FakeResponse:
         assert kwargs["params"]["prop"] == "extracts"
@@ -222,26 +232,15 @@ def test_execute_wiki_open_reads_title(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wiki({"action": "open", "title": "CAC 40"})
+    output = _tools_by_name()["read_wiki_page"].execute({"title": "CAC 40"})
 
     assert "URL: https://en.wikipedia.org/wiki/CAC_40" in output
     assert "Title: CAC 40" in output
     assert "benchmark French stock market index" in output
 
 
-def test_execute_wiki_open_reads_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Café",
-                    "extract": "A café is a type of restaurant.",
-                }
-            }
-        }
-    }
+def test_read_wiki_page_reads_url_from_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _page_payload("Café", "A café is a type of restaurant.")
     captured_titles: list[str] = []
 
     def fake_get(*_: Any, **kwargs: Any) -> FakeResponse:
@@ -250,8 +249,8 @@ def test_execute_wiki_open_reads_url(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wiki(
-        {"action": "open", "url": "https://fr.wikipedia.org/wiki/Caf%C3%A9"}
+    output = _tools_by_name()["read_wiki_page"].execute(
+        {"title": "https://fr.wikipedia.org/wiki/Caf%C3%A9"}
     )
 
     assert captured_titles == ["Café"]
@@ -259,140 +258,24 @@ def test_execute_wiki_open_reads_url(
     assert "A café is a type of restaurant." in output
 
 
-def test_execute_wiki_open_truncates_output(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Long",
-                    "extract": "x" * 1000,
-                }
-            }
-        }
-    }
+def test_read_wiki_page_applies_high_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _page_payload("Long", "x" * 14000)
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
 
-    output = execute_wiki(
-        {"action": "open", "title": "Long", "max_chars": 500}
+    output = _tools_by_name()["read_wiki_page"].execute({"title": "Long"})
+
+    assert len(output) <= 13000
+    assert "[read_wiki_page guard:" in output
+    assert "Use search_in_wiki_page" in output
+
+
+def test_search_in_wiki_page_uses_vector_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    extract = (
+        "The cafe serves coffee and pastries. " * 20
+        + "The CAC 40 market capitalization appears in financial summaries. "
+        + "Python is a programming language. " * 20
     )
-
-    assert len(output) <= 500
-    assert output.endswith("[truncated]")
-
-
-def test_wiki_tool_read_chunk_consumes_open_remainder_without_network(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Long",
-                    "extract": "a" * 600 + "TAIL",
-                }
-            }
-        }
-    }
-    calls: list[object] = []
-
-    def fake_get(*args: Any, **__: Any) -> FakeResponse:
-        calls.append(args)
-        return FakeResponse(payload)
-
-    monkeypatch.setattr(requests, "get", fake_get)
-    tool = wiki_tool()
-
-    first = tool.execute({"action": "open", "title": "Long", "max_chars": 500})
-    second = tool.execute({"action": "read_chunk", "max_chars": 500})
-
-    assert len(first) <= 500
-    assert first.endswith("[truncated]")
-    assert "TAIL" in second
-    assert not second.endswith("[truncated]")
-    assert len(calls) == 1
-
-
-def test_wiki_tool_read_chunk_consumes_multiple_chunks_in_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    extract = "a" * 600 + "b" * 600 + "END"
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Long",
-                    "extract": extract,
-                }
-            }
-        }
-    }
-    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-    tool = wiki_tool()
-
-    first = tool.execute({"action": "open", "title": "Long", "max_chars": 500})
-    second = tool.execute({"action": "read_chunk", "max_chars": 500})
-    third = tool.execute({"action": "read_chunk", "max_chars": 500})
-    fourth = tool.execute({"action": "read_chunk", "max_chars": 500})
-
-    combined = (
-        first.replace("\n[truncated]", "")
-        + second.replace("\n[truncated]", "")
-        + third.replace("\n[truncated]", "")
-    )
-    assert first.endswith("[truncated]")
-    assert second.endswith("[truncated]")
-    assert not third.endswith("[truncated]")
-    assert "a" * 100 in combined
-    assert "b" * 100 in combined
-    assert "END" in combined
-    assert fourth == "No wiki continuation chunks available."
-
-
-def test_wiki_tool_read_chunk_isolated_by_tool_instance(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Long",
-                    "extract": "x" * 1000,
-                }
-            }
-        }
-    }
-    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-    first_tool = wiki_tool()
-    second_tool = wiki_tool()
-
-    first = first_tool.execute({"action": "open", "title": "Long", "max_chars": 500})
-    isolated = second_tool.execute({"action": "read_chunk"})
-    continuation = first_tool.execute({"action": "read_chunk"})
-
-    assert first.endswith("[truncated]")
-    assert isolated == "No wiki continuation chunks available."
-    assert continuation
-    assert continuation != isolated
-
-
-def test_execute_wiki_search_in_page_reads_title(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Python",
-                    "extract": (
-                        "Python is a programming language. "
-                        "The python community maintains many libraries."
-                    ),
-                }
-            }
-        }
-    }
+    payload = _page_payload("CAC 40", extract)
     captured_params: list[dict[str, str]] = []
 
     def fake_get(*_: Any, **kwargs: Any) -> FakeResponse:
@@ -401,34 +284,23 @@ def test_execute_wiki_search_in_page_reads_title(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wiki(
-        {"action": "search_in_page", "title": "Python", "query": "PYTHON"}
+    output = _tools_by_name()["search_in_wiki_page"].execute(
+        {"title": "CAC 40", "query": "market capital", "top_k": 1}
     )
 
     assert captured_params[0]["prop"] == "extracts"
-    assert captured_params[0]["titles"] == "Python"
-    assert "URL: https://en.wikipedia.org/wiki/Python" in output
-    assert "Title: Python" in output
-    assert "Query: PYTHON" in output
-    assert "Match 1:" in output
-    assert "[Python]" in output
-    assert "Match 2:" in output
-    assert "[python]" in output
+    assert captured_params[0]["titles"] == "CAC 40"
+    assert "URL: https://en.wikipedia.org/wiki/CAC_40" in output
+    assert "Title: CAC 40" in output
+    assert "Query: market capital" in output
+    assert "Result 1 (score=" in output
+    assert "market capitalization" in output
 
 
-def test_execute_wiki_search_in_page_reads_url(
+def test_search_in_wiki_page_reads_url_from_title(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Café",
-                    "extract": "A café may serve coffee. The café is small.",
-                }
-            }
-        }
-    }
+    payload = _page_payload("Café", "A café may serve coffee. The café is small.")
     captured_titles: list[str] = []
 
     def fake_get(*_: Any, **kwargs: Any) -> FakeResponse:
@@ -437,199 +309,69 @@ def test_execute_wiki_search_in_page_reads_url(
 
     monkeypatch.setattr(requests, "get", fake_get)
 
-    output = execute_wiki(
+    output = _tools_by_name()["search_in_wiki_page"].execute(
         {
-            "action": "search_in_page",
-            "url": "https://fr.wikipedia.org/wiki/Caf%C3%A9",
-            "query": "café",
+            "title": "https://fr.wikipedia.org/wiki/Caf%C3%A9",
+            "query": "coffee",
+            "top_k": 1,
         }
     )
 
     assert captured_titles == ["Café"]
     assert "URL: https://fr.wikipedia.org/wiki/Caf%C3%A9" in output
-    assert "[café]" in output
-
-
-def test_execute_wiki_search_in_page_reports_no_matches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Python",
-                    "extract": "Python is a programming language.",
-                }
-            }
-        }
-    }
-    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-
-    output = execute_wiki(
-        {"action": "search_in_page", "title": "Python", "query": "missing"}
-    )
-
-    assert output == (
-        "No matches found in page: Python\n"
-        "Query: missing\n"
-        "URL: https://en.wikipedia.org/wiki/Python"
-    )
-
-
-def test_execute_wiki_search_in_page_returns_all_matches_that_fit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Short",
-                    "extract": "needle one. needle two. needle three.",
-                }
-            }
-        }
-    }
-    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-
-    output = execute_wiki(
-        {"action": "search_in_page", "title": "Short", "query": "needle"}
-    )
-
-    assert output.count("Match ") == 3
-    assert "[truncated]" not in output
-
-
-def test_execute_wiki_search_in_page_truncates_when_matches_do_not_fit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    extract = " ".join(f"needle {'x' * 120}" for _ in range(20))
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Long",
-                    "extract": extract,
-                }
-            }
-        }
-    }
-    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-
-    output = execute_wiki(
-        {
-            "action": "search_in_page",
-            "title": "Long",
-            "query": "needle",
-            "max_chars": 500,
-        }
-    )
-
-    assert len(output) <= 500
-    assert output.endswith("[truncated]")
-    assert "Match 1:" in output
-
-
-def test_wiki_tool_read_chunk_consumes_search_in_page_remainder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    extract = " ".join(f"needle {'x' * 120}" for _ in range(20))
-    payload = {
-        "query": {
-            "pages": {
-                "1": {
-                    "title": "Long",
-                    "extract": extract,
-                }
-            }
-        }
-    }
-    monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
-    tool = wiki_tool()
-
-    first = tool.execute(
-        {
-            "action": "search_in_page",
-            "title": "Long",
-            "query": "needle",
-            "max_chars": 500,
-        }
-    )
-    second = tool.execute({"action": "read_chunk", "max_chars": 500})
-
-    assert first.endswith("[truncated]")
-    assert second
-    assert "Match " in second
+    assert "coffee" in output
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("tool_name", "arguments"),
     [
-        {},
-        {"action": 1},
-        {"action": "search"},
-        {"action": "search", "query": ""},
-        {"action": "search", "query": "x", "wiki": "https://example.com"},
-        {"action": "search", "query": "x", "max_results": 0},
-        {"action": "search", "query": "x", "max_results": 11},
-        {"action": "search", "query": "x", "max_results": True},
-        {"action": "open"},
-        {"action": "open", "title": ""},
-        {"action": "open", "url": ""},
-        {"action": "open", "url": "file:///tmp/a"},
-        {"action": "open", "url": "https://example.com/wiki/CAC_40"},
-        {"action": "open", "url": "https://en.wikipedia.org/notwiki/CAC_40"},
-        {"action": "open", "title": "CAC 40", "max_chars": 499},
-        {"action": "open", "title": "CAC 40", "max_chars": 20001},
-        {"action": "open", "title": "CAC 40", "max_chars": False},
-        {"action": "search_in_page"},
-        {"action": "search_in_page", "title": "CAC 40"},
-        {"action": "search_in_page", "title": "CAC 40", "query": ""},
-        {
-            "action": "search_in_page",
-            "title": "CAC 40",
-            "query": "market",
-            "max_chars": 499,
-        },
-        {
-            "action": "search_in_page",
-            "title": "CAC 40",
-            "query": "market",
-            "max_chars": 20001,
-        },
-        {
-            "action": "search_in_page",
-            "title": "CAC 40",
-            "query": "market",
-            "max_chars": False,
-        },
-        {"action": "read_chunk", "max_chars": 499},
-        {"action": "read_chunk", "max_chars": 20001},
-        {"action": "read_chunk", "max_chars": False},
-        {"action": "bad"},
+        ("find_wiki_page", {}),
+        ("find_wiki_page", {"query": ""}),
+        ("find_wiki_page", {"query": "x", "wiki": "https://example.com"}),
+        ("find_wiki_page", {"query": "x", "max_results": 0}),
+        ("find_wiki_page", {"query": "x", "max_results": 11}),
+        ("find_wiki_page", {"query": "x", "max_results": True}),
+        ("read_wiki_page", {}),
+        ("read_wiki_page", {"title": ""}),
+        ("read_wiki_page", {"title": "file:///tmp/a"}),
+        ("read_wiki_page", {"title": "https://example.com/wiki/CAC_40"}),
+        ("read_wiki_page", {"title": "https://en.wikipedia.org/notwiki/CAC_40"}),
+        ("search_in_wiki_page", {}),
+        ("search_in_wiki_page", {"query": "market"}),
+        ("search_in_wiki_page", {"title": "CAC 40", "query": ""}),
+        (
+            "search_in_wiki_page",
+            {"title": "CAC 40", "query": "market", "top_k": 0},
+        ),
+        (
+            "search_in_wiki_page",
+            {"title": "CAC 40", "query": "market", "top_k": 11},
+        ),
+        (
+            "search_in_wiki_page",
+            {"title": "CAC 40", "query": "market", "top_k": False},
+        ),
     ],
 )
-def test_execute_wiki_validates_arguments(
+def test_wiki_tools_validate_arguments(
+    tool_name: str,
     arguments: dict[str, object],
 ) -> None:
     with pytest.raises(ValueError):
-        execute_wiki(arguments)
+        _tools_by_name()[tool_name].execute(arguments)
 
 
-def test_execute_wiki_reports_request_exceptions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_wiki_tools_report_request_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get(*_: Any, **__: Any) -> FakeResponse:
         raise requests.RequestException("timeout")
 
     monkeypatch.setattr(requests, "get", fake_get)
 
     with pytest.raises(ValueError, match="wiki request failed"):
-        execute_wiki({"action": "search", "query": "llm"})
+        _tools_by_name()["find_wiki_page"].execute({"query": "llm"})
 
 
-def test_execute_wiki_reports_http_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_wiki_tools_report_http_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         requests,
         "get",
@@ -637,12 +379,10 @@ def test_execute_wiki_reports_http_failures(
     )
 
     with pytest.raises(ValueError, match="HTTP 404"):
-        execute_wiki({"action": "open", "title": "Missing"})
+        _tools_by_name()["read_wiki_page"].execute({"title": "Missing"})
 
 
-def test_execute_wiki_reports_api_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_wiki_tools_report_api_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         requests,
         "get",
@@ -650,14 +390,12 @@ def test_execute_wiki_reports_api_errors(
     )
 
     with pytest.raises(ValueError, match="bad title"):
-        execute_wiki({"action": "open", "title": "Bad"})
+        _tools_by_name()["read_wiki_page"].execute({"title": "Bad"})
 
 
-def test_execute_wiki_reports_missing_pages(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_wiki_tools_report_missing_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = {"query": {"pages": {"-1": {"title": "Missing", "missing": ""}}}}
     monkeypatch.setattr(requests, "get", lambda *_, **__: FakeResponse(payload))
 
     with pytest.raises(ValueError, match="wiki page not found"):
-        execute_wiki({"action": "open", "title": "Missing"})
+        _tools_by_name()["read_wiki_page"].execute({"title": "Missing"})

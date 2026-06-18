@@ -178,6 +178,8 @@ class Agent:
     ) -> None:
         if max_step < 0:
             raise ValueError("max_step must be non-negative")
+        if agent_mode not in ("dummy", "structured"):
+            raise ValueError(f"unsupported agent_mode: {agent_mode!r}")
         self.llm = llm
         self.tools = tuple(tools)
         self._tools_by_name = self._index_tools(self.tools)

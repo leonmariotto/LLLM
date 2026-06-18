@@ -1228,6 +1228,7 @@ class Generator:
         generated_token_count = 0
         generated_sequence_logprob = 0.0
         logits = self._prefill(idx, kv_cache, cache_length)
+        logger.debug("KVCache prefilled, proceed\n")
         eos = self.tokenizer.get_eos()
 
         for step in range(max_generated_token):
