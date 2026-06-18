@@ -21,10 +21,6 @@ from .generator import (
 )
 
 
-def _empty_instructions() -> list[str]:
-    return []
-
-
 def _empty_content() -> list[ContentItem]:
     return []
 
@@ -41,7 +37,6 @@ def _empty_usage_metadata() -> dict[str, object]:
 class LlmRequest:
     """One assistant-turn request."""
 
-    instructions: list[str] = field(default_factory=_empty_instructions)
     content: list[ContentItem] = field(default_factory=_empty_content)
     tool_schemas: list[dict[str, object]] = field(default_factory=_empty_tool_schemas)
     response_format: type[BaseModel] | None = None
@@ -61,10 +56,7 @@ class LlmResponse:
 
 def build_messages(request: LlmRequest) -> list[ChatMessage]:
     """Convert agent history into chat messages accepted by local generators."""
-    messages: list[ChatMessage] = [
-        cast(ChatMessage, {"role": "system", "content": instruction})
-        for instruction in request.instructions
-    ]
+    messages: list[ChatMessage] = []
 
     for item in request.content:
         if isinstance(item, Message):

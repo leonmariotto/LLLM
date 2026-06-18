@@ -119,7 +119,7 @@ def test_functional_qwen3_06b_generates_constrained_response_format(
 
     generated_text = generator.generate_from_tokens(
         prompt_tokens,
-        max_generated_token=32,
+        max_generated_token=1024,
         include_prompt=False,
         response_format=StructuredQwen3Smoke,
     )

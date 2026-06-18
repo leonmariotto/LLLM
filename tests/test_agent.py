@@ -519,12 +519,12 @@ def test_agent_summarizes_middle_history_only_in_llm_request() -> None:
     assert generator.tool_schemas == [[], []]
     assert generator.messages[0] == [
         {"role": "system", "content": SUMMARY_PROMPT},
+        {"role": "user", "content": "item 0"},
         {"role": "assistant", "content": "item 1"},
         {"role": "user", "content": "item 2"},
     ]
     assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
     assert generator.messages[1][1:] == [
-        {"role": "user", "content": "item 0"},
         {
             "role": "system",
             "content": "Conversation summary so far:\nsummary text",

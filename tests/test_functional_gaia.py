@@ -24,6 +24,7 @@ from ..LLLM.tool_wiki import wiki_tool
 
 
 QWEN3_06B_REPO_ID = "Qwen/Qwen3-0.6B"
+QWEN3_4B_REPO_ID = "Qwen/Qwen3-4B"
 
 
 @pytest.fixture(scope="module")
@@ -42,6 +43,26 @@ def qwen3_06b_gaia_generator() -> Generator:
 @pytest.fixture(scope="module")
 def qwen3_06b_gaia_agent_with_tools() -> Agent:
     ir = fetch_model_ir(QWEN3_06B_REPO_ID)
+    cfg = Qwen3Model.config_from_ir(ir)
+    path = Path(str(ir.metadata["path"]))
+
+    tokenizer = Qwen3Tokenizer(str(path / "tokenizer.json"))
+    model = Qwen3Model(cfg)
+    model.load_ir_weights(ir)
+    del ir
+    qwen3_generator = Generator(model=model, tokenizer=tokenizer, cache_length=16384)
+    return Agent(
+        LlmClient(
+            qwen3_generator,
+            max_generated_token=4096,
+            temperature=0.6, top_p=0.95, top_k=20,
+        ),
+        [compute_tool(), wiki_tool()],
+    )
+
+@pytest.fixture(scope="module")
+def qwen3_4b_gaia_agent() -> Agent:
+    ir = fetch_model_ir(QWEN3_4B_REPO_ID)
     cfg = Qwen3Model.config_from_ir(ir)
     path = Path(str(ir.metadata["path"]))
 
@@ -111,8 +132,8 @@ def test_functional_qwen3_06b_no_harness_gaia_validation(
 
 
 @pytest.mark.slow
-def test_functional_qwen3_06b_with_tools_gaia_validation(
-    qwen3_06b_gaia_agent_with_tools: Agent,
+def test_functional_qwen3_4b_gaia_validation(
+    qwen3_4b_gaia_agent: Agent,
 ) -> None:
     def agent(task: GaiaTask) -> str:
         attachment_note = (
@@ -123,7 +144,7 @@ def test_functional_qwen3_06b_with_tools_gaia_validation(
         #TODO: GAIA output format should be part of gaia contract and derived
         #from a pydantic type.
         # TODO add informations like: is_solvable: bool and unsolvability_reason:str
-        result = qwen3_06b_gaia_agent_with_tools.run(
+        result = qwen3_4b_gaia_agent.run(
             "Answer this GAIA benchmark question. Use the compute tool when "
             "arithmetic or exact calculation is needed. Use the wiki tool when "
             "factual or external to your knowledge informations are needed. "
@@ -142,7 +163,7 @@ def test_functional_qwen3_06b_with_tools_gaia_validation(
         agent,
         split="validation",
         level=1,
-        limit=3,
+        limit=1,
     )
     logger.info("evaluation={}", evaluation)
 

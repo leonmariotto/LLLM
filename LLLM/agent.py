@@ -265,37 +265,7 @@ class Agent:
         @param container_env: the containerized environment where tools run.
         @return None.
         """
-        # Tool-specific compaction pass
-        compacted_content = self._compact_request_content(context.items())
-        tool_schemas = [tool.schema for tool in self.tools]
-
-        pre_summary_request = LlmRequest(
-            instructions=self.system_instructions,
-            content=compacted_content,
-            tool_schemas=tool_schemas,
-        )
-        token_count = self.llm.count_tokens(pre_summary_request)
-        logger.debug(
-            "request token count before summarization token_count={} threshold={}",
-            token_count,
-            SUMMARIZE_TOKEN_THRESHOLD,
-        )
-
-        if token_count > SUMMARIZE_TOKEN_THRESHOLD:
-            request_content = self._summarize_request_content(compacted_content)
-        else:
-            logger.debug(
-                "skip history summarization because request is below token threshold"
-            )
-            request_content = compacted_content
-
-        # Prepare what to send to the LLM
-        request = LlmRequest(
-            instructions=self.system_instructions,
-            content=request_content,
-            tool_schemas=tool_schemas,
-            response_format=AgentStructuredResponse,
-        )
+        request = self._prepare_llm_request(context)
 
         # Get LLM's decision
         response = self.think(request)
@@ -341,6 +311,56 @@ class Agent:
             ),
         )
 
+    def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
+        """
+        Build the complete LLM request for one agent turn.
+
+        The caller is responsible for putting system instructions in content.
+        Request content order is:
+        1. configured system instructions
+        2. task_state system message when present
+        3. compacted execution history
+        """
+        prefix: list[ContentItem] = [
+            Message(role="system", content=instruction)
+            for instruction in self.system_instructions
+        ]
+        if context.task_state is not None:
+            task_state_msg = self._task_state_message(context.task_state)
+            logger.debug(task_state_msg)
+            prefix.append(task_state_msg)
+
+        compacted_history = self._compact_request_content(context.items())
+        request_content = [*prefix, *compacted_history]
+        tool_schemas = [tool.schema for tool in self.tools]
+
+        pre_summary_request = LlmRequest(
+            content=request_content,
+            tool_schemas=tool_schemas,
+        )
+        token_count = self.llm.count_tokens(pre_summary_request)
+        logger.debug(
+            "request token count before summarization token_count={} threshold={}",
+            token_count,
+            SUMMARIZE_TOKEN_THRESHOLD,
+        )
+
+        if token_count > SUMMARIZE_TOKEN_THRESHOLD:
+            request_content = self._summarize_request_content(
+                prefix=prefix,
+                history=compacted_history,
+            )
+        else:
+            logger.debug(
+                "skip history summarization because request is below token threshold"
+            )
+
+        return LlmRequest(
+            content=request_content,
+            tool_schemas=tool_schemas,
+            response_format=AgentStructuredResponse,
+        )
+
     @staticmethod
     def _format_state_list(items: Sequence[str]) -> str:
         if not items:
@@ -368,34 +388,36 @@ class Agent:
         return list(response.content)
 
     def _summarize_request_content(
-        self, content: Sequence[ContentItem]
+        self,
+        *,
+        prefix: Sequence[ContentItem],
+        history: Sequence[ContentItem],
     ) -> list[ContentItem]:
         """
         Summarize older request history without mutating execution context.
-        Keep last SUM_KEEP_RECENTS items untouched.
+        Keep request prefix and last SUM_KEEP_RECENTS history items untouched.
         """
-        if len(content) <= SUM_KEEP_RECENTS + 1:
+        if len(history) <= SUM_KEEP_RECENTS:
             logger.debug(
                 "skip history summarization because history is short item_count={}",
-                len(content),
+                len(history),
             )
-            return list(content)
+            return [*prefix, *history]
 
-        first_item = content[0]
-        middle_items = content[1:-SUM_KEEP_RECENTS]
-        recent_items = content[-SUM_KEEP_RECENTS:]
-        summary = self._generate_history_summary(middle_items)
+        summary_items = history[:-SUM_KEEP_RECENTS]
+        recent_items = history[-SUM_KEEP_RECENTS:]
+        summary = self._generate_history_summary(summary_items)
         if summary is None:  # In case of error use un-summarized content.
-            return list(content)
+            return [*prefix, *history]
 
         logger.info(
             "history summarization completed summarized_count={} preserved_recent_count={} summary_chars={}",
-            len(middle_items),
+            len(summary_items),
             len(recent_items),
             len(summary),
         )
         return [
-            first_item,
+            *prefix,
             Message(
                 role="system",
                 content=f"Conversation summary so far:\n{summary}",
@@ -411,8 +433,7 @@ class Agent:
         try:
             response = self.llm.complete(
                 LlmRequest(
-                    instructions=[SUMMARY_PROMPT],
-                    content=list(items),
+                    content=[Message(role="system", content=SUMMARY_PROMPT), *items],
                     tool_schemas=[],
                 )
             )

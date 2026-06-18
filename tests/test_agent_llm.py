@@ -103,8 +103,8 @@ class FakeGenerator:
 
 def test_build_messages_converts_context_items() -> None:
     request = LlmRequest(
-        instructions=["be useful"],
         content=[
+            Message(role="system", content="be useful"),
             Message(role="user", content="question"),
             Message(role="assistant", content="checking"),
             ToolCall(tool_call_id="call_2_0", name="lookup", arguments={"q": "x"}),
@@ -178,8 +178,10 @@ def test_llm_client_counts_tokens_with_chat_template() -> None:
 
     count = client.count_tokens(
         LlmRequest(
-            instructions=["be useful"],
-            content=[Message(role="user", content="question")],
+            content=[
+                Message(role="system", content="be useful"),
+                Message(role="user", content="question"),
+            ],
             tool_schemas=[schema],
         )
     )
