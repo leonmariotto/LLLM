@@ -12,11 +12,12 @@ Gaia level-1 with Qwen3-06B got ~ 1/10 without any tool.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import importlib
 import json
 from pathlib import Path
+import random
 import re
 import time
 from typing import Any, Literal, cast
@@ -33,6 +34,35 @@ snapshot_download = cast(
 GAIA_DATASET_ID = "gaia-benchmark/GAIA"
 GaiaSplit = Literal["validation", "test"]
 GaiaLevel = Literal[1, 2, 3]
+GaiaToolName = Literal[
+    "access to academic journal websites",
+    "access to excel files",
+    "audio capability",
+    "audio processing software",
+    "calculator",
+    "calculator (or ability to count)",
+    "color recognition",
+    "file interface",
+    "image recognition",
+    "image recognition/ocr",
+    "markdown",
+    "pdf viewer",
+    "powerpoint viewer",
+    "python",
+    "rubik's cube model",
+    "search engine",
+    "speech-to-text audio processing tool",
+    "speech-to-text tool",
+    "spreadsheet",
+    "text editor",
+    "video parsing",
+    "video processing software",
+    "video recognition tools",
+    "web browser",
+    "wikipedia",
+    "word document access",
+    "word reversal tool / script",
+]
 DatasetRow = Mapping[str, Any]
 
 
@@ -86,6 +116,7 @@ def load_gaia_tasks(
     level: GaiaLevel | None = None,
     limit: int | None = None,
     data_dir: str | Path | None = None,
+    allowed_tools: Sequence[GaiaToolName] | None = None,
     shuffle: bool = False,
     shuffle_seed: int = 0,
 ) -> list[GaiaTask]:
@@ -99,8 +130,11 @@ def load_gaia_tasks(
         limit: Optional maximum number of rows to return.
         data_dir: Optional local GAIA snapshot path.  When omitted, the dataset
             is resolved with ``huggingface_hub.snapshot_download``.
-        shuffle: Whether to shuffle the dataset before applying ``limit``.
-        shuffle_seed: Seed passed to Hugging Face datasets when ``shuffle`` is true.
+        allowed_tools: Optional normalized tool names.  When provided, only
+            rows whose required tools are a subset of this list are loaded.
+            Rows with no required tools are always included.
+        shuffle: Whether to shuffle eligible rows before applying ``limit``.
+        shuffle_seed: Seed used for row shuffling when ``shuffle`` is true.
 
     Returns:
         A list of normalized :class:`GaiaTask` objects.  Attachment paths are
@@ -118,12 +152,15 @@ def load_gaia_tasks(
         root,
     )
     dataset = load_dataset(str(root), config_name, split=split)
+    rows = [cast(DatasetRow, row) for row in dataset]
+    if allowed_tools is not None:
+        rows = _filter_rows_by_allowed_tools(rows, allowed_tools)
     if shuffle:
-        dataset = dataset.shuffle(seed=shuffle_seed)
+        random.Random(shuffle_seed).shuffle(rows)
     if limit is not None:
-        dataset = dataset.select(range(min(limit, len(dataset))))
+        rows = rows[:limit]
 
-    tasks = [_row_to_task(cast(DatasetRow, row), root) for row in dataset]
+    tasks = [_row_to_task(row, root) for row in rows]
     logger.info("Loaded {} GAIA tasks", len(tasks))
     return tasks
 
@@ -136,6 +173,7 @@ def evaluate_gaia_agent(
     limit: int | None = None,
     data_dir: str | Path | None = None,
     output_path: str | Path | None = None,
+    allowed_tools: Sequence[GaiaToolName] | None = None,
     shuffle: bool = False,
     shuffle_seed: int = 0,
 ) -> GaiaEvaluationResult:
@@ -152,6 +190,7 @@ def evaluate_gaia_agent(
         level=level,
         limit=limit,
         data_dir=data_dir,
+        allowed_tools=allowed_tools,
         shuffle=shuffle,
         shuffle_seed=shuffle_seed,
     )
@@ -308,6 +347,55 @@ def _resolve_gaia_data_dir(data_dir: str | Path | None) -> Path:
         return Path(data_dir).expanduser().resolve()
     downloaded = snapshot_download(repo_id=GAIA_DATASET_ID, repo_type="dataset")
     return Path(downloaded).expanduser().resolve()
+
+
+def _filter_rows_by_allowed_tools(
+    rows: Sequence[DatasetRow],
+    allowed_tools: Sequence[GaiaToolName],
+) -> list[DatasetRow]:
+    allowed = set(allowed_tools)
+    return [row for row in rows if _row_required_tools(row).issubset(allowed)]
+
+
+def _row_required_tools(row: DatasetRow) -> set[GaiaToolName]:
+    metadata = row.get("Annotator Metadata")
+    if not isinstance(metadata, Mapping):
+        return set()
+    tools_value = metadata.get("Tools")
+    if not isinstance(tools_value, str):
+        return set()
+
+    tools: set[GaiaToolName] = set()
+    for line in tools_value.splitlines():
+        normalized = _normalize_gaia_tool_name(line)
+        if normalized is not None:
+            tools.add(normalized)
+    return tools
+
+
+def _normalize_gaia_tool_name(raw_tool: str) -> GaiaToolName | None:
+    tool = raw_tool.strip()
+    tool = re.sub(r"^\s*\d+\s*[.)-]\s*", "", tool)
+    tool = re.sub(r"\s+", " ", tool).strip(" .;:")
+    tool = re.sub(r"^(an?|the)\s+", "", tool, flags=re.IGNORECASE)
+    if not tool or tool.lower() in {"none", "no tools required"}:
+        return None
+
+    normalized = tool.lower()
+    aliases: dict[str, GaiaToolName] = {
+        "browser": "web browser",
+        "web browsing": "web browser",
+        "google search": "search engine",
+        "search": "search engine",
+        "pdf access": "pdf viewer",
+        "pdf reader": "pdf viewer",
+        "excel": "spreadsheet",
+        "spreadsheet software": "spreadsheet",
+        "image recognition tool": "image recognition",
+        "image recognition tools": "image recognition",
+    }
+    normalized = aliases.get(normalized, cast(GaiaToolName, normalized))
+    return cast(GaiaToolName, normalized)
 
 
 def _row_to_task(row: DatasetRow, root: Path) -> GaiaTask:

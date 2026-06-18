@@ -49,6 +49,7 @@ def _row(
     final_answer: object = "Paris",
     file_name: object = "",
     file_path: object = "",
+    tools: str = "",
 ) -> dict[str, object]:
     return {
         "task_id": task_id,
@@ -57,8 +58,11 @@ def _row(
         "Final answer": final_answer,
         "file_name": file_name,
         "file_path": file_path,
-        "Annotator Metadata": {"source": "unit-test", "Tools": "",
-                               "How long did this take?": ""},
+        "Annotator Metadata": {
+            "source": "unit-test",
+            "Tools": tools,
+            "How long did this take?": "",
+        },
     }
 
 
@@ -104,8 +108,11 @@ def test_load_gaia_tasks_selects_all_config_and_resolves_file_path(
             level=2,
             file_path=(tmp_path / "2023/validation/document.pdf").resolve(),
             file_name="document.pdf",
-            metadata={"source": "unit-test", "Tools": "",
-                               "How long did this take?": ""},
+            metadata={
+                "source": "unit-test",
+                "Tools": "",
+                "How long did this take?": "",
+            },
             expected_answer="Paris",
         )
     ]
@@ -161,13 +168,97 @@ def test_load_gaia_tasks_can_shuffle_before_limit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    rows = [_row("task-1"), _row("task-2")]
+    rows = [_row("task-1"), _row("task-2"), _row("task-3"), _row("task-4")]
     calls = _patch_dataset(monkeypatch, rows)
 
     tasks = load_gaia_tasks(data_dir=tmp_path, shuffle=True, limit=1)
 
-    assert [task.task_id for task in tasks] == ["task-2"]
-    assert calls[0]["dataset"].shuffle_seeds == [0]
+    assert [task.task_id for task in tasks] == ["task-3"]
+    assert calls[0]["dataset"].shuffle_seeds == []
+
+
+def test_load_gaia_tasks_filters_by_allowed_tool_subset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_dataset(
+        monkeypatch,
+        [
+            _row("task-1", tools="1. Web browser\n2. Search engine"),
+            _row("task-2", tools="1. Web browser\n2. Calculator"),
+            _row("task-3", tools="1. PDF viewer"),
+        ],
+    )
+
+    tasks = load_gaia_tasks(
+        data_dir=tmp_path,
+        allowed_tools=["web browser", "search engine"],
+    )
+
+    assert [task.task_id for task in tasks] == ["task-1"]
+
+
+def test_load_gaia_tasks_includes_no_tool_rows_when_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_dataset(
+        monkeypatch,
+        [
+            _row("task-1", tools="None"),
+            _row("task-2", tools="1. No tools required"),
+            _row("task-3", tools="1. Calculator"),
+        ],
+    )
+
+    tasks = load_gaia_tasks(data_dir=tmp_path, allowed_tools=[])
+
+    assert [task.task_id for task in tasks] == ["task-1", "task-2"]
+
+
+def test_load_gaia_tasks_filters_with_normalized_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_dataset(
+        monkeypatch,
+        [
+            _row("task-1", tools="1. google search\n2. PDF access"),
+            _row("task-2", tools="1. Excel"),
+            _row("task-3", tools="1. Image recognition tools"),
+        ],
+    )
+
+    tasks = load_gaia_tasks(
+        data_dir=tmp_path,
+        allowed_tools=["search engine", "pdf viewer", "image recognition"],
+    )
+
+    assert [task.task_id for task in tasks] == ["task-1", "task-3"]
+
+
+def test_load_gaia_tasks_filters_before_shuffle_and_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_dataset(
+        monkeypatch,
+        [
+            _row("task-1", tools="1. Calculator"),
+            _row("task-2", tools="1. Search engine"),
+            _row("task-3", tools="1. Search engine"),
+        ],
+    )
+
+    tasks = load_gaia_tasks(
+        data_dir=tmp_path,
+        allowed_tools=["search engine"],
+        shuffle=True,
+        shuffle_seed=0,
+        limit=2,
+    )
+
+    assert sorted(task.task_id for task in tasks) == ["task-2", "task-3"]
 
 
 def test_evaluate_gaia_agent_scores_validation_rows(
@@ -199,7 +290,10 @@ def test_evaluate_gaia_agent_passes_shuffle_options(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    calls = _patch_dataset(monkeypatch, [_row("task-1"), _row("task-2")])
+    calls = _patch_dataset(
+        monkeypatch,
+        [_row("task-1"), _row("task-2"), _row("task-3"), _row("task-4")],
+    )
 
     evaluation = evaluate_gaia_agent(
         lambda task: task.expected_answer or "",
@@ -209,8 +303,29 @@ def test_evaluate_gaia_agent_passes_shuffle_options(
         limit=1,
     )
 
+    assert [result.task_id for result in evaluation.results] == ["task-4"]
+    assert calls[0]["dataset"].shuffle_seeds == []
+
+
+def test_evaluate_gaia_agent_passes_allowed_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_dataset(
+        monkeypatch,
+        [
+            _row("task-1", tools="1. Calculator"),
+            _row("task-2", tools="1. Web browser\n2. Search engine"),
+        ],
+    )
+
+    evaluation = evaluate_gaia_agent(
+        lambda task: task.expected_answer or "",
+        data_dir=tmp_path,
+        allowed_tools=["web browser", "search engine"],
+    )
+
     assert [result.task_id for result in evaluation.results] == ["task-2"]
-    assert calls[0]["dataset"].shuffle_seeds == [7]
 
 
 def test_evaluate_gaia_agent_keeps_test_rows_unscored(
