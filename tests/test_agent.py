@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from ..LLLM.agent import (
     Agent,
+    SYSTEM_PROMPT_V1,
     SYSTEM_PROMPT_V2,
     SUMMARY_PROMPT,
     SUM_KEEP_RECENTS,
@@ -61,6 +62,7 @@ class FakeGenerator:
         self.outputs = list(outputs)
         self.messages: list[list[ChatMessage]] = []
         self.tool_schemas: list[list[dict[str, object]]] = []
+        self.response_formats: list[type[BaseModel] | None] = []
         self.tokenizer = FakeTokenizer(token_count)
 
     def generate_completion(
@@ -79,6 +81,7 @@ class FakeGenerator:
     ) -> ChatCompletion:
         self.messages.append([dict(message) for message in messages])
         self.tool_schemas.append(list(tools or []))
+        self.response_formats.append(response_format)
         output = self.outputs[len(self.messages) - 1]
         if isinstance(output, Exception):
             raise output
@@ -175,9 +178,29 @@ def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     assert context.messages() == [
         Message(role="assistant", content="finished"),
     ]
-    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert generator.messages[0][1] == {"role": "system", "content": "be brief"}
     assert_task_state_message(generator.messages[0][2], "question")
+    assert generator.response_formats == [None]
+
+
+def test_agent_structured_mode_requests_structured_output() -> None:
+    context = ExecutionContext()
+    generator = FakeGenerator([AssistantOutput("finished")])
+    agent = Agent(LlmClient(generator), [], agent_mode="structured")
+
+    result = agent.run("question", context=context)
+
+    assert result.output == "finished"
+    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.response_formats == [AgentStructuredResponse]
+
+
+def test_agent_rejects_unknown_agent_mode() -> None:
+    generator = FakeGenerator([AssistantOutput("finished")])
+
+    with pytest.raises(ValueError, match="unsupported agent_mode"):
+        Agent(LlmClient(generator), [], agent_mode="unknown")  # type: ignore[arg-type]
 
 
 def test_agent_run_executes_successful_tool_round_then_final_answer() -> None:
@@ -196,7 +219,7 @@ def test_agent_run_executes_successful_tool_round_then_final_answer() -> None:
 
     assert result.output == "answer"
 
-    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert_task_state_message(generator.messages[1][1], "question")
     assert generator.messages[1][2:] == [
         {
@@ -390,7 +413,7 @@ def test_agent_reuses_task_state_and_records_later_user_messages() -> None:
             ),
         ]
     )
-    agent = Agent(LlmClient(generator), [])
+    agent = Agent(LlmClient(generator), [], agent_mode="structured")
 
     first = agent.run("initial task", context=context)
     second = agent.run("continue", context=context)
@@ -470,7 +493,7 @@ def test_agent_does_not_summarize_short_history() -> None:
     agent.step(context)
 
     assert len(generator.messages) == 1
-    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert generator.messages[0][1:] == [
         {"role": "user", "content": f"item {index}"}
         for index in range(SUM_KEEP_RECENTS + 1)
@@ -488,7 +511,7 @@ def test_agent_does_not_summarize_long_history_below_token_threshold() -> None:
     agent.step(context)
 
     assert len(generator.messages) == 1
-    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[0][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert generator.messages[0][1:] == [
         {"role": "user", "content": "item 0"},
         {"role": "assistant", "content": "item 1"},
@@ -523,7 +546,7 @@ def test_agent_summarizes_middle_history_only_in_llm_request() -> None:
         {"role": "assistant", "content": "item 1"},
         {"role": "user", "content": "item 2"},
     ]
-    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert generator.messages[1][1:] == [
         {
             "role": "system",
@@ -558,7 +581,7 @@ def test_agent_summarization_preserves_task_state_and_summarizes_history_after_i
         {"role": "assistant", "content": "item 1"},
         {"role": "user", "content": "item 2"},
     ]
-    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert_task_state_message(generator.messages[1][1], "root task")
     assert generator.messages[1][2:] == [
         {
@@ -587,7 +610,7 @@ def test_agent_falls_back_to_unsummarized_history_on_summary_error() -> None:
     agent.step(context)
 
     assert len(generator.messages) == 2
-    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert generator.messages[1][1:] == [
         {"role": "user", "content": "item 0"},
         {"role": "assistant", "content": "item 1"},
@@ -615,7 +638,7 @@ def test_agent_falls_back_to_unsummarized_history_without_assistant_summary() ->
     agent.step(context)
 
     assert len(generator.messages) == 2
-    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V2}
+    assert generator.messages[1][0] == {"role": "system", "content": SYSTEM_PROMPT_V1}
     assert generator.messages[1][1:] == [
         {"role": "user", "content": "item 0"},
         {"role": "assistant", "content": "item 1"},

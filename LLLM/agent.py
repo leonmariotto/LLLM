@@ -24,7 +24,7 @@ configuration at init, final_answer may be provided by a tool call.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
+from typing import Literal, cast
 
 from .agent_context import (
     AgentStructuredResponse,
@@ -158,6 +158,8 @@ Include only durable information needed to continue:
 Do not answer the user. Do not invent details. Keep it brief and concrete.
 """
 
+AgentMode = Literal["dummy", "structured"]
+
 
 class Agent:
     """
@@ -172,13 +174,16 @@ class Agent:
         *,
         instruction: str = "",
         max_step: int = 8,
+        agent_mode: AgentMode = "dummy",
     ) -> None:
         if max_step < 0:
             raise ValueError("max_step must be non-negative")
         self.llm = llm
         self.tools = tuple(tools)
         self._tools_by_name = self._index_tools(self.tools)
-        self.system_instructions = [SYSTEM_PROMPT_V2]
+        self.agent_mode = agent_mode
+        self.llm_response_format = self._response_format_for_mode(agent_mode)
+        self.system_instructions = [self._system_prompt_for_mode(agent_mode)]
         if instruction:
             self.system_instructions.append(instruction)
         self.max_step = max_step
@@ -251,6 +256,20 @@ class Agent:
             if isinstance(item, Message) and item.role == "assistant":
                 return item.content
         return "Woops!!"
+
+    @staticmethod
+    def _system_prompt_for_mode(agent_mode: AgentMode) -> str:
+        if agent_mode == "dummy":
+            return SYSTEM_PROMPT_V1
+        return SYSTEM_PROMPT_V2
+
+    @staticmethod
+    def _response_format_for_mode(
+        agent_mode: AgentMode,
+    ) -> type[AgentStructuredResponse] | None:
+        if agent_mode == "dummy":
+            return None
+        return AgentStructuredResponse
 
     def step(
         self,
@@ -358,7 +377,7 @@ class Agent:
         return LlmRequest(
             content=request_content,
             tool_schemas=tool_schemas,
-            response_format=AgentStructuredResponse,
+            response_format=self.llm_response_format,
         )
 
     @staticmethod
@@ -385,6 +404,7 @@ class Agent:
                 )
             content.extend(tool_calls)
             return content
+
         return list(response.content)
 
     def _summarize_request_content(
