@@ -290,9 +290,34 @@ def test_generator_completion_uses_chat_template_and_parses_output() -> None:
     assert completion.prompt_tokens == 3
     assert completion.generated_tokens == 2
     assert completion.finish_reason == "length"
+    assert completion.trace is None
     assert tokenizer.messages == [messages]
     assert tokenizer.tools == [tools]
     assert tokenizer.enable_thinking == [False]
+
+
+def test_generator_completion_trace_includes_rendered_prompt_and_raw_completion() -> None:
+    tokenizer = DigitChatTokenizer()
+    generator = Generator(
+        model=RecordingGreedyModel(),
+        tokenizer=tokenizer,
+        cache_length=8,
+    )
+
+    completion = generator.generate_completion(
+        [{"role": "user", "content": "question"}],
+        max_generated_token=2,
+        enable_thinking=False,
+        trace_enabled=True,
+    )
+
+    assert completion.trace is not None
+    assert completion.trace["rendered_prompt"] == "123"
+    assert completion.trace["raw_completion"] == "45"
+    assert completion.trace["prompt_tokens"] == 3
+    assert completion.trace["generated_tokens"] == 2
+    assert completion.trace["finish_reason"] == "length"
+    assert completion.trace["generation_config"]["enable_thinking"] is False
 
 
 def test_generator_stops_before_eos_token() -> None:

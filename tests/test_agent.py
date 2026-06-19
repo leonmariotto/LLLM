@@ -78,6 +78,7 @@ class FakeGenerator:
         top_p: float | None = None,
         enable_thinking: bool = True,
         response_format: type[BaseModel] | None = None,
+        trace_enabled: bool = False,
     ) -> ChatCompletion:
         self.messages.append([dict(message) for message in messages])
         self.tool_schemas.append(list(tools or []))
@@ -102,6 +103,14 @@ class FakeGenerator:
             prompt_tokens=3,
             generated_tokens=4,
             finish_reason="stop",
+            trace=(
+                {
+                    "raw_completion": "raw",
+                    "request": {"messages": [dict(message) for message in messages]},
+                }
+                if trace_enabled
+                else None
+            ),
         )
 
     def count_completion_tokens(
@@ -214,6 +223,30 @@ def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     assert generator.messages[0][1] == {"role": "system", "content": "be brief"}
     assert_task_state_message(generator.messages[0][2], "question")
     assert generator.response_formats == [None]
+    assert context.events[0].metadata == {}
+
+
+def test_agent_trace_enabled_records_llm_and_tool_metadata() -> None:
+    generator = FakeGenerator(
+        [
+            AssistantOutput(
+                "checking",
+                (ToolCall(name="lookup", arguments={"q": "x"}),),
+            ),
+            AssistantOutput("done"),
+        ]
+    )
+    context = ExecutionContext()
+    agent = Agent(LlmClient(generator), [tool("lookup", "found")])
+
+    result = agent.run("question", context=context, trace_enabled=True)
+
+    assert result.output == "done"
+    assert context.events[0].metadata["llm"]["completion"]["raw_completion"] == "raw"
+    assert context.events[1].metadata["tools"][0]["name"] == "lookup"
+    assert context.events[1].metadata["tools"][0]["arguments"] == {"q": "x"}
+    assert context.events[1].metadata["tools"][0]["status"] == "success"
+    assert context.events[2].metadata["llm"]["completion"]["raw_completion"] == "raw"
 
 
 def test_agent_structured_mode_requests_structured_output() -> None:

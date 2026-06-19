@@ -67,15 +67,23 @@ class ChatCompletion:
     prompt_tokens: int
     generated_tokens: int
     finish_reason: Literal["stop", "length"]
+    trace: dict[str, object] | None = None
 
 
 class CompletionParseError(ValueError):
     """Raised when raw generated text cannot be parsed as an assistant message."""
 
-    def __init__(self, raw_completion: str, parse_error: ValueError) -> None:
+    def __init__(
+        self,
+        raw_completion: str,
+        parse_error: ValueError,
+        *,
+        trace: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(str(parse_error))
         self.raw_completion = raw_completion
         self.parse_error = parse_error
+        self.trace = trace
 
 
 class ChatTokenizer(Tokenizer, Protocol):
@@ -1099,6 +1107,7 @@ class Generator:
         top_p: float | None = None,
         enable_thinking: bool = True,
         response_format: type[BaseModel] | None = None,
+        trace_enabled: bool = False,
     ) -> ChatCompletion:
         """Generate and parse one assistant turn from structured chat messages.
 
@@ -1113,6 +1122,16 @@ class Generator:
             tools=tools,
             enable_thinking=enable_thinking,
         )
+        rendered_prompt = (
+            self._render_completion_prompt(
+                tokenizer,
+                messages,
+                tools=tools,
+                enable_thinking=enable_thinking,
+            )
+            if trace_enabled
+            else None
+        )
         raw_completion = self.generate_from_tokens(
             prompt_tokens,
             stop_at_eos=stop_at_eos,
@@ -1124,18 +1143,47 @@ class Generator:
             include_prompt=False,
             response_format=response_format,
         )
+        generated_tokens = self.generated_token_count[-1]
+        finish_reason = "length" if generated_tokens >= max_generated_token else "stop"
+        trace: dict[str, object] | None = None
+        if trace_enabled:
+            trace = {
+                "rendered_prompt": rendered_prompt,
+                "raw_completion": raw_completion,
+                "prompt_tokens": len(prompt_tokens),
+                "generated_tokens": generated_tokens,
+                "finish_reason": finish_reason,
+                "generation_config": {
+                    "stop_at_eos": stop_at_eos,
+                    "max_generated_token": max_generated_token,
+                    "cache_length": cache_length,
+                    "temperature": temperature,
+                    "top_k": top_k,
+                    "top_p": top_p,
+                    "enable_thinking": enable_thinking,
+                    "response_format": (
+                        response_format.__name__
+                        if response_format is not None
+                        else None
+                    ),
+                },
+            }
         try:
             message = tokenizer.parse_assistant_output(raw_completion)
         except ValueError as error:
-            raise CompletionParseError(raw_completion, error) from error
-        generated_tokens = self.generated_token_count[-1]
-        finish_reason = "length" if generated_tokens >= max_generated_token else "stop"
+            if trace is not None:
+                trace["parse_error"] = {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                }
+            raise CompletionParseError(raw_completion, error, trace=trace) from error
         return ChatCompletion(
             message=message,
             raw_completion=raw_completion,
             prompt_tokens=len(prompt_tokens),
             generated_tokens=generated_tokens,
             finish_reason=finish_reason,
+            trace=trace,
         )
 
     def count_completion_tokens(
@@ -1182,6 +1230,25 @@ class Generator:
         if not all(isinstance(token, int) for token in input_tokens):
             raise TypeError("expected input_ids to be a list[int]")
         return cast(list[int], input_tokens)
+
+    @staticmethod
+    def _render_completion_prompt(
+        tokenizer: ChatTokenizer,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[dict[str, object]] | None,
+        enable_thinking: bool,
+    ) -> str:
+        rendered = tokenizer.apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+        if not isinstance(rendered, str):
+            raise TypeError("expected rendered chat template output")
+        return rendered
 
     def _generate_tokens(
         self,

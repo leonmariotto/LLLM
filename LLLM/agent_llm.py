@@ -40,6 +40,7 @@ class LlmRequest:
     content: list[ContentItem] = field(default_factory=_empty_content)
     tool_schemas: list[dict[str, object]] = field(default_factory=_empty_tool_schemas)
     response_format: type[BaseModel] | None = None
+    trace_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class LlmResponse:
     usage_metadata: dict[str, object] = field(default_factory=_empty_usage_metadata)
     error_message: str | None = None
     parsed: BaseModel | None = None
+    trace: dict[str, object] | None = None
     # TODO add confidence hint: logprobe
 
 
@@ -127,6 +129,11 @@ class LlmClient:
     def complete(self, request: LlmRequest) -> LlmResponse:
         """Generate and parse one assistant turn."""
         chat_messages = build_messages(request)
+        request_trace = (
+            self._request_trace(chat_messages, request)
+            if request.trace_enabled
+            else None
+        )
         try:
             completion = self.generator.generate_completion(
                 chat_messages,
@@ -139,15 +146,36 @@ class LlmClient:
                 top_p=self.top_p,
                 enable_thinking=self.enable_thinking,
                 response_format=request.response_format,
+                trace_enabled=request.trace_enabled,
             )
         except CompletionParseError as error:
+            trace = None
+            if request.trace_enabled:
+                trace = {
+                    **(request_trace or {}),
+                    "completion": error.trace,
+                    "error": {
+                        "type": type(error.parse_error).__name__,
+                        "message": str(error),
+                    },
+                }
             return LlmResponse(
                 content=[Message(role="assistant", content=error.raw_completion)],
                 raw_completion=error.raw_completion,
                 error_message=str(error),
+                trace=trace,
             )
         except ValueError as error:
-            return LlmResponse(error_message=str(error))
+            trace = None
+            if request.trace_enabled:
+                trace = {
+                    **(request_trace or {}),
+                    "error": {
+                        "type": type(error).__name__,
+                        "message": str(error),
+                    },
+                }
+            return LlmResponse(error_message=str(error), trace=trace)
 
         assistant_messages: list[ContentItem] = []
         if completion.message.content:
@@ -165,6 +193,15 @@ class LlmClient:
             try:
                 parsed = request.response_format.model_validate_json(payload)
             except ValidationError as error:
+                trace = None
+                if request.trace_enabled:
+                    trace = self._response_trace(
+                        request_trace,
+                        completion,
+                        assistant_messages,
+                        parsed=None,
+                        error=error,
+                    )
                 return LlmResponse(
                     content=assistant_messages,
                     raw_completion=completion.raw_completion,
@@ -174,19 +211,30 @@ class LlmClient:
                         "finish_reason": completion.finish_reason,
                     },
                     error_message=str(error),
+                    trace=trace,
                 )
-        return LlmResponse(
-            content=[
-                *assistant_messages,
-                *[
-                    ToolCall(
-                        tool_call_id=f"call_{index}",
-                        name=tool_call.name,
-                        arguments=dict(tool_call.arguments),
-                    )
-                    for index, tool_call in enumerate(completion.message.tool_calls)
-                ],
+        content: list[ContentItem] = [
+            *assistant_messages,
+            *[
+                ToolCall(
+                    tool_call_id=f"call_{index}",
+                    name=tool_call.name,
+                    arguments=dict(tool_call.arguments),
+                )
+                for index, tool_call in enumerate(completion.message.tool_calls)
             ],
+        ]
+        trace = None
+        if request.trace_enabled:
+            trace = self._response_trace(
+                request_trace,
+                completion,
+                content,
+                parsed=parsed,
+                error=None,
+            )
+        return LlmResponse(
+            content=content,
             raw_completion=completion.raw_completion,
             usage_metadata={
                 "prompt_tokens": completion.prompt_tokens,
@@ -194,6 +242,7 @@ class LlmClient:
                 "finish_reason": completion.finish_reason,
             },
             parsed=parsed,
+            trace=trace,
         )
 
     def count_tokens(self, request: LlmRequest) -> int:
@@ -204,6 +253,68 @@ class LlmClient:
             tools=request.tool_schemas or None,
             enable_thinking=self.enable_thinking,
         )
+
+    def _request_trace(
+        self,
+        chat_messages: list[ChatMessage],
+        request: LlmRequest,
+    ) -> dict[str, object]:
+        """
+        Build the trace request: that will be logged in a json file if trace enabled.
+        """
+        return {
+            "request": {
+                "messages": chat_messages,
+                "tool_schemas": request.tool_schemas,
+                "response_format": (
+                    request.response_format.__name__
+                    if request.response_format is not None
+                    else None
+                ),
+            },
+            "client_config": {
+                "stop_at_eos": self.stop_at_eos,
+                "max_generated_token": self.max_generated_token,
+                "cache_length": self.cache_length,
+                "temperature": self.temperature,
+                "top_k": self.top_k,
+                "top_p": self.top_p,
+                "enable_thinking": self.enable_thinking,
+            },
+        }
+
+    def _response_trace(
+        self,
+        request_trace: dict[str, object] | None,
+        completion: object,
+        content: list[ContentItem],
+        *,
+        parsed: BaseModel | None,
+        error: Exception | None,
+    ) -> dict[str, object]:
+        """
+        Build the trace response: that will be logged in a json file if trace enabled.
+        """
+        completion_trace = getattr(completion, "trace", None)
+        trace: dict[str, object] = {
+            **(request_trace or {}),
+            "completion": completion_trace,
+            "parsed_content": [
+                item.model_dump(mode="json")
+                if isinstance(item, BaseModel)
+                else str(item)
+                for item in content
+            ],
+            "parsed_structured_response": (
+                parsed.model_dump(mode="json") if parsed is not None else None
+            ),
+        }
+        if error is not None:
+            trace["error"] = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+        return trace
 
 
 def _format_tool_result(result: AgentToolResult) -> str:

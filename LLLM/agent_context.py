@@ -138,6 +138,7 @@ class Event(BaseModel):
     timestamp: float = Field(default_factory=lambda: datetime.now().timestamp())
     author: str
     content: Sequence[ContentItem] = Field(default_factory=_empty_content)
+    metadata: dict[str, Any] = Field(default_factory=_empty_state)
 
 
 @dataclass

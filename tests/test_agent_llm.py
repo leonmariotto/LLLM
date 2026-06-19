@@ -58,6 +58,7 @@ class FakeGenerator:
         top_p: float | None = None,
         enable_thinking: bool = True,
         response_format: type[BaseModel] | None = None,
+        trace_enabled: bool = False,
     ) -> ChatCompletion:
         self.messages.append([dict(message) for message in messages])
         self.tool_schemas.append(list(tools or []))
@@ -71,17 +72,43 @@ class FakeGenerator:
                 "top_p": top_p,
                 "enable_thinking": enable_thinking,
                 "response_format": response_format,
+                "trace_enabled": trace_enabled,
             }
         )
         output = self.outputs[len(self.messages) - 1]
         if isinstance(output, ValueError):
-            raise CompletionParseError("bad raw", output)
+            raise CompletionParseError(
+                "bad raw",
+                output,
+                trace=(
+                    {
+                        "raw_completion": "bad raw",
+                        "parse_error": {
+                            "type": type(output).__name__,
+                            "message": str(output),
+                        },
+                    }
+                    if trace_enabled
+                    else None
+                ),
+            )
         return ChatCompletion(
             message=output,
             raw_completion="raw",
             prompt_tokens=3,
             generated_tokens=4,
             finish_reason="stop",
+            trace=(
+                {
+                    "rendered_prompt": "prompt",
+                    "raw_completion": "raw",
+                    "prompt_tokens": 3,
+                    "generated_tokens": 4,
+                    "finish_reason": "stop",
+                }
+                if trace_enabled
+                else None
+            ),
         )
 
     def count_completion_tokens(
@@ -161,6 +188,27 @@ def test_llm_client_complete_returns_text_tool_calls_and_usage() -> None:
     assert generator.messages == [[{"role": "user", "content": "question"}]]
     assert generator.tool_schemas == [[schema]]
     assert generator.calls[0]["max_generated_token"] == 9
+    assert generator.calls[0]["trace_enabled"] is False
+    assert response.trace is None
+
+
+def test_llm_client_complete_returns_trace_when_enabled() -> None:
+    generator = FakeGenerator([AssistantOutput("<think>work</think>\nanswer")])
+
+    response = LlmClient(generator).complete(
+        LlmRequest(
+            content=[Message(role="user", content="question")],
+            trace_enabled=True,
+        )
+    )
+
+    assert response.error_message is None
+    assert response.trace is not None
+    assert response.trace["request"]["messages"] == [
+        {"role": "user", "content": "question"}
+    ]
+    assert response.trace["completion"]["raw_completion"] == "raw"
+    assert response.trace["parsed_content"][0]["content"] == "<think>work</think>\nanswer"
 
 
 def test_llm_client_preserves_parse_error_raw_completion() -> None:
@@ -169,6 +217,17 @@ def test_llm_client_preserves_parse_error_raw_completion() -> None:
     assert response.error_message == "invalid"
     assert response.raw_completion == "bad raw"
     assert response.content == [Message(role="assistant", content="bad raw")]
+
+
+def test_llm_client_trace_preserves_parse_error() -> None:
+    response = LlmClient(FakeGenerator([ValueError("invalid")])).complete(
+        LlmRequest(trace_enabled=True)
+    )
+
+    assert response.error_message == "invalid"
+    assert response.trace is not None
+    assert response.trace["completion"]["raw_completion"] == "bad raw"
+    assert response.trace["error"] == {"type": "ValueError", "message": "invalid"}
 
 
 def test_llm_client_counts_tokens_with_chat_template() -> None:

@@ -281,7 +281,23 @@ def evaluate_gaia_agent(
     if output_path is not None:
         write_gaia_results(evaluation.results, output_path)
     if trace_output_path is not None:
-        write_gaia_trace(evaluation, trace_entries, trace_output_path)
+        write_gaia_trace(
+            evaluation,
+            trace_entries,
+            trace_output_path,
+            run_metadata={
+                "dataset_id": GAIA_DATASET_ID,
+                "split": split,
+                "level": level,
+                "limit": limit,
+                "data_dir": str(data_dir) if data_dir is not None else None,
+                "allowed_tools": list(allowed_tools or []),
+                "shuffle": shuffle,
+                "shuffle_seed": shuffle_seed,
+                "trace_enabled": True,
+                "generated_at_unix": time.time(),
+            },
+        )
     return evaluation
 
 
@@ -301,11 +317,15 @@ def write_gaia_trace(
     evaluation: GaiaEvaluationResult,
     entries: Sequence[Mapping[str, object]],
     output_path: str | Path,
+    *,
+    run_metadata: Mapping[str, object] | None = None,
 ) -> None:
     """Write a full GAIA analysis trace as one JSON document."""
     path = Path(output_path)
     logger.info("Writing {} GAIA trace entries to {}", len(entries), path)
     document = {
+        "schema_version": 1,
+        "run": dict(run_metadata or {}),
         "summary": _evaluation_summary_to_json(evaluation),
         "entries": list(entries),
     }
@@ -535,6 +555,12 @@ def _task_to_json(task: GaiaTask) -> dict[str, object]:
 
 
 def _result_to_json(result: GaiaResult) -> dict[str, object]:
+    normalized_prediction = normalize_gaia_answer(result.prediction)
+    normalized_expected = (
+        normalize_gaia_answer(result.expected_answer)
+        if result.expected_answer is not None
+        else None
+    )
     return {
         "task_id": result.task_id,
         "question": result.question,
@@ -542,7 +568,9 @@ def _result_to_json(result: GaiaResult) -> dict[str, object]:
         "file_path": str(result.file_path) if result.file_path is not None else None,
         "file_name": result.file_name,
         "prediction": result.prediction,
+        "normalized_prediction": normalized_prediction,
         "expected_answer": result.expected_answer,
+        "normalized_expected_answer": normalized_expected,
         "correct": result.correct,
         "elapsed_seconds": result.elapsed_seconds,
         "error": result.error,
@@ -559,12 +587,14 @@ def _trace_entry_to_json(
     return {
         "task": _task_to_json(task),
         "result": _result_to_json(result),
-        "agent_status": agent_status,
-        "agent_context": (
-            _execution_context_to_json(agent_context)
-            if agent_context is not None
-            else None
-        ),
+        "agent": {
+            "status": agent_status,
+            "context": (
+                _execution_context_to_json(agent_context)
+                if agent_context is not None
+                else None
+            ),
+        },
     }
 
 

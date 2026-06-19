@@ -120,7 +120,8 @@ def test_functional_qwen3_06b_gaia_compute_wikipedia_validation(
             "only the final answer using this exact format: "
             "FINAL ANSWER: <answer>\n\n"
             f"Question: {task.question}"
-            f"{attachment_note}"
+            f"{attachment_note}",
+            trace_enabled=True,
         )
         if not isinstance(result.output, str):
             raise AssertionError(

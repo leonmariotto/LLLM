@@ -408,17 +408,22 @@ def test_evaluate_gaia_agent_writes_trace_with_agent_context(
     )
 
     document = json.loads(trace_path.read_text())
+    assert document["schema_version"] == 1
+    assert document["run"]["split"] == "validation"
+    assert document["run"]["trace_enabled"] is True
     assert document["summary"]["total_tasks"] == evaluation.total_tasks
     entry = document["entries"][0]
     assert entry["task"]["task_id"] == "task-1"
     assert entry["task"]["question"] == "Question?"
     assert entry["result"]["prediction"] == "FINAL ANSWER: Paris"
+    assert entry["result"]["normalized_prediction"] == "paris"
+    assert entry["result"]["normalized_expected_answer"] == "paris"
     assert entry["result"]["correct"] is True
-    assert entry["agent_status"] == "complete"
-    assert entry["agent_context"]["final_result"] == "FINAL ANSWER: Paris"
-    assert entry["agent_context"]["events"][0]["content"][0]["role"] == "user"
+    assert entry["agent"]["status"] == "complete"
+    assert entry["agent"]["context"]["final_result"] == "FINAL ANSWER: Paris"
+    assert entry["agent"]["context"]["events"][0]["content"][0]["role"] == "user"
     assert (
-        entry["agent_context"]["events"][1]["content"][0]["content"]
+        entry["agent"]["context"]["events"][1]["content"][0]["content"]
         == "FINAL ANSWER: Paris"
     )
 
@@ -439,8 +444,8 @@ def test_evaluate_gaia_agent_trace_allows_string_agents(
     document = json.loads(trace_path.read_text())
     entry = document["entries"][0]
     assert entry["result"]["prediction"] == "Paris"
-    assert entry["agent_context"] is None
-    assert entry["agent_status"] is None
+    assert entry["agent"]["context"] is None
+    assert entry["agent"]["status"] is None
 
 
 def test_export_gaia_predictions_writes_task_id_and_answer_only(

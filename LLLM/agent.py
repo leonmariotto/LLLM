@@ -24,6 +24,7 @@ configuration at init, final_answer may be provided by a tool call.
 from __future__ import annotations
 
 from collections.abc import Sequence
+import time
 from typing import Literal, cast
 
 from .agent_context import (
@@ -196,6 +197,7 @@ class Agent:
         *,
         context: ExecutionContext | None = None,
         container_env: "ContainerEnv | None" = None,
+        trace_enabled: bool = False,
     ) -> AgentResult:
         """
         Run the agent until the model returns an assistant answer.
@@ -205,6 +207,7 @@ class Agent:
             init here.
         @param container_env: the containerized environment where tools run.
                               agent don't start the container, must be start by caller.
+        @param trace_enabled: store full LLM/tool diagnostics in event metadata.
         @return agent final answer.
         """
 
@@ -222,7 +225,11 @@ class Agent:
             execution_context.final_result is None
             and execution_context.current_step < self.max_step
         ):
-            _ = self.step(execution_context, container_env=container_env)
+            _ = self.step(
+                execution_context,
+                container_env=container_env,
+                trace_enabled=trace_enabled,
+            )
 
             # Check if the last event is a final response
             if execution_context.events:
@@ -278,6 +285,7 @@ class Agent:
         context: ExecutionContext,
         *,
         container_env: "ContainerEnv | None" = None,
+        trace_enabled: bool = False,
     ) -> None:
         """
         Perform one ReAct think-act cycle.
@@ -286,7 +294,7 @@ class Agent:
         @param container_env: the containerized environment where tools run.
         @return None.
         """
-        request = self._prepare_llm_request(context)
+        request = self._prepare_llm_request(context, trace_enabled=trace_enabled)
 
         # Get LLM's decision
         response = self.think(request)
@@ -302,12 +310,22 @@ class Agent:
             execution_id=context.execution_id,
             author="agent",
             content=response_content,
+            metadata=(
+                {"llm": response.trace}
+                if trace_enabled and response.trace is not None
+                else {}
+            ),
         )
         context.add_event(response_event)
 
         tool_calls = [item for item in response_content if isinstance(item, ToolCall)]
         if tool_calls:
-            _ = self.act(context, tool_calls, container_env=container_env)
+            _ = self.act(
+                context,
+                tool_calls,
+                container_env=container_env,
+                trace_enabled=trace_enabled,
+            )
         context.increment_step()
         return None
 
@@ -337,7 +355,12 @@ class Agent:
             content="\n".join(lines),
         )
 
-    def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
+    def _prepare_llm_request(
+        self,
+        context: ExecutionContext,
+        *,
+        trace_enabled: bool = False,
+    ) -> LlmRequest:
         """
         Build the complete LLM request for one agent turn.
 
@@ -393,6 +416,7 @@ class Agent:
             content=request_content,
             tool_schemas=tool_schemas,
             response_format=self.llm_response_format,
+            trace_enabled=trace_enabled,
         )
 
     @staticmethod
@@ -498,6 +522,7 @@ class Agent:
         tool_calls: Sequence[ToolCall],
         *,
         container_env: "ContainerEnv | None" = None,
+        trace_enabled: bool = False,
     ) -> None:
         """
         Execute tool calls and append their results to the context.
@@ -507,14 +532,36 @@ class Agent:
         @param container_env: the containerized environment where tools run.
         @return stored tool results.
         """
-        tool_results = [
-            self._execute_tool_call(tool_call, container_env=container_env)
-            for tool_call in tool_calls
-        ]
+        tool_results: list[AgentToolResult] = []
+        tool_traces: list[dict[str, object]] = []
+        for tool_call in tool_calls:
+            started = time.perf_counter()
+            tool_result = self._execute_tool_call(
+                tool_call,
+                container_env=container_env,
+            )
+            elapsed = time.perf_counter() - started
+            tool_results.append(tool_result)
+            if trace_enabled:
+                tool_traces.append(
+                    {
+                        "tool_call_id": tool_call.tool_call_id,
+                        "name": tool_call.name,
+                        "arguments": dict(tool_call.arguments),
+                        "status": tool_result.status,
+                        "elapsed_seconds": elapsed,
+                        "error": (
+                            str(tool_result.content[0])
+                            if tool_result.status == "error" and tool_result.content
+                            else None
+                        ),
+                    }
+                )
         tool_event = Event(
             execution_id=context.execution_id,
             author="tool",
             content=tool_results,
+            metadata={"tools": tool_traces} if trace_enabled else {},
         )
         context.add_event(tool_event)
         return None
