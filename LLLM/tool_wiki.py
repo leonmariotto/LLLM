@@ -505,9 +505,11 @@ def _fetch_page(target: _OpenTarget) -> _FetchedPage:
     if not isinstance(title, str) or not title:
         title = target.title
     if page.get("missing") is not None:
+        logger.error("Wiki page not found {}", target.title)
         raise ValueError(f"wiki page not found: {target.title}")
     extract = page.get("extract")
     if not isinstance(extract, str):
+        logger.error("Wiki page has no extract {}", target.title)
         raise ValueError(f"wiki page has no extract: {title}")
 
     return _FetchedPage(

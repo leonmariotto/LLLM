@@ -294,6 +294,8 @@ class Agent:
         logger.debug("response.content = [{}]", response.content)
 
         response_content = self._response_event_content(context, response)
+        for i, content in enumerate(response_content):
+            logger.debug("response_content[{}] : {} = {}", i, content.type, content)
 
         # Record LLM response as an event
         response_event = Event(
@@ -320,16 +322,19 @@ class Agent:
 
     def _task_state_message(self, task_state: TaskState) -> Message:
         """Format task state as a deterministic system message."""
+        lines = [
+            "Task state:",
+            f"original_request: {task_state.original_request}",
+        ]
+        if task_state.todos:
+            lines.append("todos:")
+            lines.append(self._format_state_list(task_state.todos))
+        if task_state.facts:
+            lines.append("facts:")
+            lines.append(self._format_state_list(task_state.facts))
         return Message(
             role="system",
-            content=(
-                "Task state:\n"
-                f"original_request: {task_state.original_request}\n"
-                "todos:\n"
-                f"{self._format_state_list(task_state.todos)}\n"
-                "facts:\n"
-                f"{self._format_state_list(task_state.facts)}"
-            ),
+            content="\n".join(lines),
         )
 
     def _prepare_llm_request(self, context: ExecutionContext) -> LlmRequest:
@@ -346,9 +351,9 @@ class Agent:
             Message(role="system", content=instruction)
             for instruction in self.system_instructions
         ]
+        # TODO task_state should never be None
         if context.task_state is not None:
             task_state_msg = self._task_state_message(context.task_state)
-            logger.debug(task_state_msg)
             prefix.append(task_state_msg)
 
         compacted_history = self._compact_request_content(context.items())
@@ -366,6 +371,8 @@ class Agent:
             SUMMARIZE_TOKEN_THRESHOLD,
         )
 
+        # TODO: in the current state of thing, if we reach the threshold, summarization is done at each step, which
+        # is inneficient and prone to errors...
         if token_count > SUMMARIZE_TOKEN_THRESHOLD:
             request_content = self._summarize_request_content(
                 prefix=prefix,
@@ -376,6 +383,12 @@ class Agent:
                 "skip history summarization because request is below token threshold"
             )
 
+        logger.info(
+            "Forge LlmRequest len(content)={} len(tools)={} response_format={}",
+            len(request_content),
+            len(tool_schemas),
+            self.llm_response_format,
+        )
         return LlmRequest(
             content=request_content,
             tool_schemas=tool_schemas,
@@ -384,8 +397,6 @@ class Agent:
 
     @staticmethod
     def _format_state_list(items: Sequence[str]) -> str:
-        if not items:
-            return "- <empty>"
         return "\n".join(f"- {item}" for item in items)
 
     def _response_event_content(

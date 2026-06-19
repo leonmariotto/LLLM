@@ -66,3 +66,6 @@ class ToolCall(BaseModel):
             data["name"] = args[0]
             data["arguments"] = args[1]
         super().__init__(**data)
+
+    def __str__(self) -> str:
+        return f"[{self.name}, {self.arguments}]"

@@ -163,6 +163,38 @@ def assert_task_state_message(message: ChatMessage, original_request: str) -> No
     assert f"original_request: {original_request}" in str(message["content"])
 
 
+def test_agent_task_state_message_omits_empty_todos_and_facts() -> None:
+    context = ExecutionContext()
+    generator = FakeGenerator([AssistantOutput("finished")])
+    agent = Agent(LlmClient(generator), [])
+
+    agent.run("question", context=context)
+
+    content = str(generator.messages[0][1]["content"])
+    assert content == "Task state:\noriginal_request: question"
+    assert "todos:" not in content
+    assert "facts:" not in content
+    assert "<empty>" not in content
+
+
+def test_agent_task_state_message_includes_only_non_empty_lists() -> None:
+    context = ExecutionContext(
+        task_state=TaskState(
+            original_request="root",
+            facts=["repo uses uv"],
+        )
+    )
+    generator = FakeGenerator([AssistantOutput("finished")])
+    agent = Agent(LlmClient(generator), [])
+
+    agent.run("continue", context=context)
+
+    content = str(generator.messages[0][1]["content"])
+    assert content == "Task state:\noriginal_request: root\nfacts:\n- repo uses uv"
+    assert "todos:" not in content
+    assert "<empty>" not in content
+
+
 def test_agent_run_returns_simple_answer_and_updates_context() -> None:
     context = ExecutionContext()
     generator = FakeGenerator([AssistantOutput("finished")])

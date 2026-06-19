@@ -13,7 +13,7 @@ Gaia level-1 with Qwen3-06B got ~ 1/10 without any tool.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import importlib
 import json
 from pathlib import Path
@@ -23,6 +23,9 @@ import time
 from typing import Any, Literal, cast
 
 from loguru import logger
+from pydantic import BaseModel
+
+from .agent_context import AgentResult, ExecutionContext
 
 load_dataset = cast(
     Callable[..., Any], importlib.import_module("datasets").load_dataset
@@ -107,7 +110,8 @@ class GaiaEvaluationResult:
     results: tuple[GaiaResult, ...]
 
 
-GaiaAgent = Callable[[GaiaTask], str]
+GaiaAgentOutput = str | AgentResult
+GaiaAgent = Callable[[GaiaTask], GaiaAgentOutput]
 
 
 def load_gaia_tasks(
@@ -173,6 +177,7 @@ def evaluate_gaia_agent(
     limit: int | None = None,
     data_dir: str | Path | None = None,
     output_path: str | Path | None = None,
+    trace_output_path: str | Path | None = None,
     allowed_tools: Sequence[GaiaToolName] | None = None,
     shuffle: bool = False,
     shuffle_seed: int = 0,
@@ -184,6 +189,10 @@ def evaluate_gaia_agent(
     answer as a string.  Exceptions are captured as row-level failures so a long
     evaluation can continue.  Rows with hidden or missing expected answers, such
     as GAIA test rows, are included in the results with ``correct=None``.
+
+    When ``trace_output_path`` is provided, a JSON analysis artifact is written
+    containing every normalized GAIA task, its scored result, and the complete
+    agent execution context when the callable returns :class:`AgentResult`.
     """
     tasks = load_gaia_tasks(
         split=split,
@@ -195,6 +204,7 @@ def evaluate_gaia_agent(
         shuffle_seed=shuffle_seed,
     )
     results: list[GaiaResult] = []
+    trace_entries: list[dict[str, object]] = []
 
     for index, task in enumerate(tasks, start=1):
         logger.info(
@@ -207,8 +217,11 @@ def evaluate_gaia_agent(
         started = time.perf_counter()
         prediction = ""
         error: str | None = None
+        agent_context: ExecutionContext | None = None
+        agent_status: str | None = None
         try:
-            prediction = agent_evaluate(task)
+            agent_output = agent_evaluate(task)
+            prediction, agent_context, agent_status = _coerce_agent_output(agent_output)
         except Exception as exc:
             error = str(exc)
             logger.exception("GAIA task {} failed", task.task_id)
@@ -233,18 +246,25 @@ def evaluate_gaia_agent(
             correct,
             elapsed,
         )
-        results.append(
-            GaiaResult(
-                task_id=task.task_id,
-                question=task.question,
-                level=task.level,
-                file_path=task.file_path,
-                file_name=task.file_name,
-                prediction=prediction,
-                expected_answer=task.expected_answer,
-                correct=correct,
-                elapsed_seconds=elapsed,
-                error=error,
+        result = GaiaResult(
+            task_id=task.task_id,
+            question=task.question,
+            level=task.level,
+            file_path=task.file_path,
+            file_name=task.file_name,
+            prediction=prediction,
+            expected_answer=task.expected_answer,
+            correct=correct,
+            elapsed_seconds=elapsed,
+            error=error,
+        )
+        results.append(result)
+        trace_entries.append(
+            _trace_entry_to_json(
+                task,
+                result,
+                agent_context=agent_context,
+                agent_status=agent_status,
             )
         )
 
@@ -260,6 +280,8 @@ def evaluate_gaia_agent(
     )
     if output_path is not None:
         write_gaia_results(evaluation.results, output_path)
+    if trace_output_path is not None:
+        write_gaia_trace(evaluation, trace_entries, trace_output_path)
     return evaluation
 
 
@@ -273,6 +295,24 @@ def write_gaia_results(
     with path.open("w", encoding="utf-8") as handle:
         for result in results:
             handle.write(json.dumps(_result_to_json(result), sort_keys=True) + "\n")
+
+
+def write_gaia_trace(
+    evaluation: GaiaEvaluationResult,
+    entries: Sequence[Mapping[str, object]],
+    output_path: str | Path,
+) -> None:
+    """Write a full GAIA analysis trace as one JSON document."""
+    path = Path(output_path)
+    logger.info("Writing {} GAIA trace entries to {}", len(entries), path)
+    document = {
+        "summary": _evaluation_summary_to_json(evaluation),
+        "entries": list(entries),
+    }
+    path.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def export_gaia_predictions(
@@ -441,6 +481,16 @@ def _score_prediction(
     return score_gaia_answer(prediction, expected_answer)
 
 
+def _coerce_agent_output(
+    agent_output: GaiaAgentOutput,
+) -> tuple[str, ExecutionContext | None, str | None]:
+    if isinstance(agent_output, AgentResult):
+        output = agent_output.output
+        prediction = output if isinstance(output, str) else str(output)
+        return prediction, agent_output.context, agent_output.status
+    return agent_output, None, None
+
+
 def _build_evaluation_result(results: list[GaiaResult]) -> GaiaEvaluationResult:
     scored = [result for result in results if result.correct is not None]
     correct_count = sum(1 for result in scored if result.correct)
@@ -462,6 +512,28 @@ def _build_evaluation_result(results: list[GaiaResult]) -> GaiaEvaluationResult:
     )
 
 
+def _evaluation_summary_to_json(evaluation: GaiaEvaluationResult) -> dict[str, object]:
+    return {
+        "total_tasks": evaluation.total_tasks,
+        "scored_tasks": evaluation.scored_tasks,
+        "correct_tasks": evaluation.correct_tasks,
+        "overall_accuracy": evaluation.overall_accuracy,
+        "per_level_accuracy": evaluation.per_level_accuracy,
+    }
+
+
+def _task_to_json(task: GaiaTask) -> dict[str, object]:
+    return {
+        "task_id": task.task_id,
+        "question": task.question,
+        "level": task.level,
+        "file_path": str(task.file_path) if task.file_path is not None else None,
+        "file_name": task.file_name,
+        "metadata": _json_safe(task.metadata),
+        "expected_answer": task.expected_answer,
+    }
+
+
 def _result_to_json(result: GaiaResult) -> dict[str, object]:
     return {
         "task_id": result.task_id,
@@ -475,3 +547,45 @@ def _result_to_json(result: GaiaResult) -> dict[str, object]:
         "elapsed_seconds": result.elapsed_seconds,
         "error": result.error,
     }
+
+
+def _trace_entry_to_json(
+    task: GaiaTask,
+    result: GaiaResult,
+    *,
+    agent_context: ExecutionContext | None,
+    agent_status: str | None,
+) -> dict[str, object]:
+    return {
+        "task": _task_to_json(task),
+        "result": _result_to_json(result),
+        "agent_status": agent_status,
+        "agent_context": (
+            _execution_context_to_json(agent_context)
+            if agent_context is not None
+            else None
+        ),
+    }
+
+
+def _execution_context_to_json(context: ExecutionContext) -> dict[str, object]:
+    return cast(dict[str, object], _json_safe(context))
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, BaseModel):
+        return _json_safe(value.model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: _json_safe(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_json_safe(item) for item in value]
+    return str(value)

@@ -10,6 +10,7 @@ import pytest
 from loguru import logger
 
 from ..LLLM.agent import Agent
+from ..LLLM.agent_context import AgentResult
 from ..LLLM.agent_llm import LlmClient
 from ..LLLM.eval_gaia import GaiaTask, GaiaToolName, evaluate_gaia_agent
 from ..LLLM.fetch import fetch_embedding_model_ir, fetch_model_ir
@@ -30,6 +31,9 @@ GAIA_COMPUTE_WIKIPEDIA_TOOLS: tuple[GaiaToolName, ...] = (
     "calculator",
     "calculator (or ability to count)",
     "wikipedia",
+)
+GAIA_COMPUTE_WIKIPEDIA_TRACE_PATH = Path(
+    "gaia_qwen3_06b_compute_wikipedia_trace.json"
 )
 
 
@@ -95,14 +99,14 @@ def qwen3_4b_gaia_agent() -> Agent:
 
 
 @pytest.mark.slow
-def test_functional_qwen3_06b_dummy_gaia_compute_wikipedia_validation(
+def test_functional_qwen3_06b_gaia_compute_wikipedia_validation(
     qwen3_06b_gaia_agent_with_tools: Agent,
 ) -> None:
-    def agent(task: GaiaTask) -> str:
+    def agent(task: GaiaTask) -> AgentResult:
         attachment_note = (
             f"\nAttached file path: {task.file_path}"
             if task.file_path is not None
-            else "\nNo attached file is available for this task."
+            else ""
         )
         result = qwen3_06b_gaia_agent_with_tools.run(
             "Answer this GAIA benchmark question. You are running in dummy "
@@ -122,14 +126,19 @@ def test_functional_qwen3_06b_dummy_gaia_compute_wikipedia_validation(
             raise AssertionError(
                 f"agent did not return a final string: {result.output!r}"
             )
-        return result.output.strip()
+        return result
 
     evaluation = evaluate_gaia_agent(
         agent,
         split="validation",
         allowed_tools=GAIA_COMPUTE_WIKIPEDIA_TOOLS,
+        trace_output_path=GAIA_COMPUTE_WIKIPEDIA_TRACE_PATH,
     )
-    logger.info("evaluation={}", evaluation)
+    logger.info(
+        "evaluation={} trace_output_path={}",
+        evaluation,
+        GAIA_COMPUTE_WIKIPEDIA_TRACE_PATH,
+    )
 
     assert evaluation.total_tasks > 0
     assert evaluation.scored_tasks == evaluation.total_tasks
@@ -147,7 +156,7 @@ def test_functional_qwen3_06b_no_harness_gaia_validation(
         attachment_note = (
             f"\nAttached file path: {task.file_path}"
             if task.file_path is not None
-            else "\nNo attached file is available for this task."
+            else ""
         )
         messages = [
                 {
@@ -195,7 +204,7 @@ def test_functional_qwen3_4b_gaia_validation(
         attachment_note = (
             f"\nAttached file path: {task.file_path}"
             if task.file_path is not None
-            else "\nNo attached file is available for this task."
+            else ""
         )
         #TODO: GAIA output format should be part of gaia contract and derived
         #from a pydantic type.

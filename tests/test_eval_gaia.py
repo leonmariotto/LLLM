@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from ..LLLM import eval_gaia
+from ..LLLM.agent_context import AgentResult, Event, ExecutionContext, Message
 from ..LLLM.eval_gaia import (
     GaiaTask,
     evaluate_gaia_agent,
@@ -378,6 +379,68 @@ def test_evaluate_gaia_agent_writes_full_jsonl_results(
     assert rows[0]["expected_answer"] == "Paris"
     assert rows[0]["correct"] is True
     assert "elapsed_seconds" in rows[0]
+
+
+def test_evaluate_gaia_agent_writes_trace_with_agent_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_dataset(monkeypatch, [_row("task-1", final_answer="Paris")])
+    trace_path = tmp_path / "trace.json"
+
+    def agent(task: GaiaTask) -> AgentResult:
+        context = ExecutionContext()
+        context.add_user_message(task.question)
+        context.add_event(
+            Event(
+                execution_id=context.execution_id,
+                author="assistant",
+                content=[Message(role="assistant", content="FINAL ANSWER: Paris")],
+            )
+        )
+        context.final_result = "FINAL ANSWER: Paris"
+        return AgentResult(output="FINAL ANSWER: Paris", context=context)
+
+    evaluation = evaluate_gaia_agent(
+        agent,
+        data_dir=tmp_path,
+        trace_output_path=trace_path,
+    )
+
+    document = json.loads(trace_path.read_text())
+    assert document["summary"]["total_tasks"] == evaluation.total_tasks
+    entry = document["entries"][0]
+    assert entry["task"]["task_id"] == "task-1"
+    assert entry["task"]["question"] == "Question?"
+    assert entry["result"]["prediction"] == "FINAL ANSWER: Paris"
+    assert entry["result"]["correct"] is True
+    assert entry["agent_status"] == "complete"
+    assert entry["agent_context"]["final_result"] == "FINAL ANSWER: Paris"
+    assert entry["agent_context"]["events"][0]["content"][0]["role"] == "user"
+    assert (
+        entry["agent_context"]["events"][1]["content"][0]["content"]
+        == "FINAL ANSWER: Paris"
+    )
+
+
+def test_evaluate_gaia_agent_trace_allows_string_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _patch_dataset(monkeypatch, [_row("task-1", final_answer="Paris")])
+    trace_path = tmp_path / "trace.json"
+
+    evaluate_gaia_agent(
+        lambda task: "Paris",
+        data_dir=tmp_path,
+        trace_output_path=trace_path,
+    )
+
+    document = json.loads(trace_path.read_text())
+    entry = document["entries"][0]
+    assert entry["result"]["prediction"] == "Paris"
+    assert entry["agent_context"] is None
+    assert entry["agent_status"] is None
 
 
 def test_export_gaia_predictions_writes_task_id_and_answer_only(
