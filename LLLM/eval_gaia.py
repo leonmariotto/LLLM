@@ -421,6 +421,7 @@ def _row_required_tools(row: DatasetRow) -> set[GaiaToolName]:
     metadata = row.get("Annotator Metadata")
     if not isinstance(metadata, Mapping):
         return set()
+    metadata = cast(Mapping[str, Any], metadata)
     tools_value = metadata.get("Tools")
     if not isinstance(tools_value, str):
         return set()
@@ -455,7 +456,7 @@ def _normalize_gaia_tool_name(raw_tool: str) -> GaiaToolName | None:
         "image recognition tools": "image recognition",
     }
     normalized = aliases.get(normalized, cast(GaiaToolName, normalized))
-    return cast(GaiaToolName, normalized)
+    return normalized
 
 
 def _row_to_task(row: DatasetRow, root: Path) -> GaiaTask:
@@ -615,7 +616,9 @@ def _json_safe(value: object) -> object:
             for field in fields(value)
         }
     if isinstance(value, Mapping):
+        value = cast(Mapping[str, Any], value)
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        value = cast(Sequence[Any], value)
         return [_json_safe(item) for item in value]
     return str(value)

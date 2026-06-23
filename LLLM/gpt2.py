@@ -5,7 +5,7 @@ GPT2 (Generative Pretrained Tranformer)
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, TYPE_CHECKING, cast, TypeAlias, Dict, Optional
+from typing import Any, TYPE_CHECKING, cast, TypeAlias, Optional
 from typing import TypedDict, Literal
 
 import torch
@@ -257,7 +257,7 @@ TokenId: TypeAlias = int
 
 class GPT2Tokenizer:
     def __init__(
-        self, name: str = "custom", extra_special_tokens: Dict[str, int] = {}
+        self, name: str = "custom", extra_special_tokens: dict[str, int] = {}
     ) -> None:
         base_args = gpt2_tiktoken_base_args()
         base_special_tokens: dict[str, int] = cast(
@@ -266,7 +266,7 @@ class GPT2Tokenizer:
         base_mergeable_ranks: dict[bytes, int] = cast(
             dict[bytes, int], base_args.get("mergeable_ranks")
         )
-        special_tokens: Dict[str, int] = base_special_tokens | extra_special_tokens
+        special_tokens: dict[str, int] = base_special_tokens | extra_special_tokens
         self.tiktok: Encoding = tiktoken.Encoding(
             name=f"gpt2_{name}",
             pat_str=str(base_args["pat_str"]),

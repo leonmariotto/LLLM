@@ -466,7 +466,7 @@ def _format_vector_search_results(
             "different short search query."
         )
 
-    blocks = []
+    blocks: list[str] = []
     for index, result in enumerate(results, start=1):
         text = re.sub(r"\s+", " ", result.sequence).strip()
         blocks.append(f"Result {index} (score={result.score:.4f}):\n{text}")

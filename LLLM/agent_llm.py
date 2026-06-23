@@ -299,12 +299,7 @@ class LlmClient:
         trace: dict[str, object] = {
             **(request_trace or {}),
             "completion": completion_trace,
-            "parsed_content": [
-                item.model_dump(mode="json")
-                if isinstance(item, BaseModel)
-                else str(item)
-                for item in content
-            ],
+            "parsed_content": [item.model_dump(mode="json") for item in content],
             "parsed_structured_response": (
                 parsed.model_dump(mode="json") if parsed is not None else None
             ),
