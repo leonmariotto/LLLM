@@ -19,6 +19,7 @@ from ..LLLM.eval import (
 from ..LLLM.fetch import fetch_model_ir
 from ..LLLM.generator import Generator
 from ..LLLM.qwen3 import Qwen3Model, Qwen3Tokenizer
+from ..LLLM.utils import get_device
 
 pytestmark = pytest.mark.slow
 
@@ -200,6 +201,8 @@ def test_functional_qwen3_06b_runs_instruction_eval(
     max_generated_token: int,
 ) -> None:
     model, tokenizer = qwen3_06b_model_and_tokenizer
+    device = get_device()
+    model.to(device)
 
     accuracy = evaluate_instructions_model(
         model=model,
