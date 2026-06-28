@@ -2,7 +2,8 @@
 
 A from scratch implementation of LLM inference using **pytorch**. Currently 
 supporting **GPT2**, **Gemma3**, **Llama3**, **Qwen3** models inferences. Implement
-**sliding KV caching** and **quantization** optimizations.
+**sliding KV caching** and **quantization** optimizations. Implement **structured 
+output** at generation level for a very small subset of JSON-schema.
 
 To easily integrate new model provide an evaluation system using dataset like
 **BoolQ**, **GSM8K** and **Squad** for instructions-tuned models and **Wikitext-2** for
@@ -19,6 +20,12 @@ representation (**model_ir** or **model_ir**) which is then used by models. This
 format and internal logic.
 
 Full coverage test suite including **unit-tests** and **functional tests**.
+
+Also implement a (from scratch) **agent harness**. The agent have an **integrated containerization layer** at the tool call level. 
+Implement basic **context management** technics such as tool-specific context
+compaction and summarization. Implement some tools : wiki , compute, python, ...
+
+Integrate some **agent evaluation dataset**: GAIA, SWE-bench.
 
 Based on :
 - *Build a Large Language Model from scratch* book by Sebastian Raschka.
