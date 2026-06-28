@@ -14,12 +14,15 @@ import re
 import sys
 from typing import Any, Callable, Protocol, TypedDict, cast
 
+import torch
+
 import click
 from loguru import logger
 from rich.text import Text
 
 from .vector_db import DEFAULT_EMBEDDING_MODEL, VectorDB
 from .vector_search import SearchResult, TextEmbedder
+from .utils import get_device
 
 
 DEFAULT_CHAT_MODEL_REPO_ID = "Qwen/Qwen3-0.6B"
@@ -107,6 +110,10 @@ def _build_qwen3_generator(
     tokenizer = Qwen3Tokenizer(str(path / "tokenizer.json"))
     model = Qwen3Model(cfg)
     model.load_ir_weights(ir)
+    device = get_device()
+    model.to(device)
+    # It appear that the model generate gibberish if dtype set here.
+    # model.to(device, dtype=torch.float16)
 
     return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
 
