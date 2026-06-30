@@ -14,8 +14,6 @@ import re
 import sys
 from typing import Any, Callable, Protocol, TypedDict, cast
 
-import torch
-
 import click
 from loguru import logger
 from rich.text import Text
