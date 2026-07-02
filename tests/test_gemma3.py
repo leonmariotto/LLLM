@@ -67,7 +67,10 @@ def test_gemma3_tokenizer_uses_native_chat_and_tool_fallback_templates() -> None
     tokenizer = Gemma3Tokenizer.__new__(Gemma3Tokenizer)
 
     native_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": "Question?"}],
+        [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Question?"},
+        ],
         tokenize=False,
         add_generation_prompt=True,
     )
@@ -77,17 +80,22 @@ def test_gemma3_tokenizer_uses_native_chat_and_tool_fallback_templates() -> None
         tokenize=False,
         add_generation_prompt=True,
     )
-    output = tokenizer.parse_assistant_output(" Answer. ")
+    output = tokenizer.parse_assistant_output(
+        'Checking.\ntool_call: {"name":"lookup","arguments":{"q":"x"}}'
+    )
 
     assert native_prompt == (
-        "<bos><start_of_turn>user\nQuestion?<end_of_turn>\n"
+        "<bos><start_of_turn>user\nBe concise.\n\nQuestion?<end_of_turn>\n"
         "<start_of_turn>model\n"
     )
     assert isinstance(tool_prompt, str)
     assert "system: Available tools:" in tool_prompt
     assert '"name": "lookup"' in tool_prompt
-    assert output.content == "Answer."
-    assert output.tool_calls == ()
+    assert "To call a tool, output one line per call" in tool_prompt
+    assert output.content == "Checking."
+    assert len(output.tool_calls) == 1
+    assert output.tool_calls[0].name == "lookup"
+    assert output.tool_calls[0].arguments == {"q": "x"}
 
 
 def test_gemma3_config_from_ir_translates_hugging_face_names() -> None:

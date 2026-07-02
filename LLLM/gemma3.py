@@ -917,18 +917,18 @@ class Gemma3Tokenizer:
         """Build a Gemma3 tokenizer from tokenizer data embedded in a GGUF file."""
         return cls(gguf_path)
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, input: str) -> list[int]:
         """
         Encode text into token ids.
 
         Args:
-            text: Input text to encode.
+            input: Input text to encode.
 
         Returns:
             Encoded token ids.
         """
         encode = cast(Callable[[str], Any], cast(Any, self.tok).encode)
-        encoded = encode(text)
+        encoded = encode(input)
         return cast(list[int], encoded.ids)
 
     def encode_instruct_prompt(self, user_text: str) -> list[int]:
@@ -969,18 +969,28 @@ class Gemma3Tokenizer:
             return {"input_ids": self.encode(prompt)}
 
         prompt = "<bos>"
+        pending_instructions: list[str] = []
         for message in messages:
             role = message.get("role")
             if not isinstance(role, str):
                 raise TypeError("message role must be a string")
+            content = message.get("content")
+            if not isinstance(content, str):
+                raise TypeError("message content must be a string")
+            if role == "system":
+                pending_instructions.append(content)
+                continue
             if role == "assistant":
                 role = "model"
             if role not in {"user", "model"}:
                 raise ValueError(f"unsupported Gemma3 chat role {role!r}")
-            content = message.get("content")
-            if not isinstance(content, str):
-                raise TypeError("message content must be a string")
+            if role == "user" and pending_instructions:
+                content = "\n\n".join([*pending_instructions, content])
+                pending_instructions.clear()
             prompt += f"<start_of_turn>{role}\n{content}<end_of_turn>\n"
+        if pending_instructions:
+            content = "\n\n".join(pending_instructions)
+            prompt += f"<start_of_turn>user\n{content}<end_of_turn>\n"
         if add_generation_prompt:
             prompt += "<start_of_turn>model\n"
         if not tokenize:
@@ -997,15 +1007,15 @@ class Gemma3Tokenizer:
         token_id = cast(int | None, token_to_id(token))
         return token_id
 
-    def decode(self, ids: list[int]) -> str:
+    def decode(self, tok: list[int]) -> str:
         """
         Decode token ids into text.
 
         Args:
-            ids: Token ids to decode.
+            tok: Token ids to decode.
 
         Returns:
             Decoded text.
         """
         decode = cast(Any, self.tok).decode
-        return cast(str, decode(ids, skip_special_tokens=False))
+        return cast(str, decode(tok, skip_special_tokens=False))
