@@ -27,7 +27,9 @@ dependencies = [
     "loguru",
     "requests",
     "textual>=8.2.7",
-    "pydantic"
+    "pydantic",
+    "fastapi",
+    "uvicorn",
 ]
 
 [build-system]
@@ -38,6 +40,7 @@ build-backend = "setuptools.build_meta"
 coder = "LLLM.coder:coder_cli"
 chat = "LLLM.chat:chat_cli"
 planner = "LLLM.planner:planner_cli"
+server = "LLLM.server:server_cli"
 vector_db = "LLLM.vector_db:vector_db_builder_cli"
 # 
 # [tool.uv]
@@ -45,7 +48,7 @@ vector_db = "LLLM.vector_db:vector_db_builder_cli"
 
 [dependency-groups]
 build = ["pyright", "ruff"]
-dev =  ["pytest-cov", "pytest", "pytest-dependency"]
+dev =  ["pytest-cov", "pytest", "pytest-dependency", "httpx"]
 
 [tool.pyright]
 venvPath = "."

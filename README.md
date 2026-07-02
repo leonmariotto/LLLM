@@ -47,6 +47,37 @@ $> uv run chat
 
 <img width="1920" height="1080" alt="Screenshot from 2026-05-24 16-23-11" src="https://github.com/user-attachments/assets/9df05958-152d-4df4-999e-9a78c1b218cb" />
 
+## Inference server
+
+Run the OpenAI-compatible chat completions server:
+
+```sh
+uv run server --served-model-name lllm
+```
+
+The server detects the model architecture from its artifacts. Qwen3 and Gemma3
+models are currently supported, for example:
+
+```sh
+uv run server --model google/gemma-3-1b-it --served-model-name gemma3
+```
+
+Then send a non-streaming request:
+
+```sh
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "lllm",
+    "messages": [{"role": "user", "content": "Say hello"}],
+    "max_tokens": 64
+  }'
+```
+
+Function tools use the OpenAI chat-completions loop: the server returns requested
+tool calls, while the client executes them and sends their results back as `tool`
+messages. The server does not execute tools.
+
 ## vector_db
 
 vector_db can be used to build an embedding vector database, which then can be used in chat application 
@@ -99,7 +130,7 @@ space before storing them in the KV cache.
 - Add Hugging Face and GGUF exporters for distributing fine-tuned native IR checkpoints outside this project.
 
 - add suport for tool_choice="required"
-- add a strong hard constrined generation for tool calls.
+- add a strong hard constrained generation for tool calls.
 - add typed output in generator (now that we have typed generation), not only str.
 
 ## Development note.
