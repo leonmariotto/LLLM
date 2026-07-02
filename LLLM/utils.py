@@ -53,7 +53,10 @@ def render_plain_chat_template(
         prompt += "system: Available tools:\n"
         for tool in tools:
             prompt += json.dumps(tool, ensure_ascii=False) + "\n"
-        prompt += "\n"
+        prompt += (
+            "\nTo call a tool, output one line per call in this exact format:\n"
+            'tool_call: {"name":"function_name","arguments":{"key":"value"}}\n\n'
+        )
 
     for message in messages:
         role = _message_role(message)
@@ -79,7 +82,36 @@ def render_plain_chat_template(
 
 def parse_plain_assistant_output(completion: str) -> AssistantOutput:
     """Parse plain text output from tokenizers with no native tool syntax."""
-    return AssistantOutput(content=completion.strip())
+    content_lines: list[str] = []
+    tool_calls: list[ToolCall] = []
+    for line in completion.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("tool_call:"):
+            content_lines.append(line)
+            continue
+
+        payload = stripped[len("tool_call:") :].strip()
+        try:
+            raw_call = cast(object, json.loads(payload))
+        except json.JSONDecodeError as error:
+            raise ValueError("tool call must contain valid JSON") from error
+        if not isinstance(raw_call, dict):
+            raise ValueError("tool call must be a JSON object")
+        call = cast(dict[str, object], raw_call)
+        name = call.get("name")
+        arguments = call.get("arguments")
+        if not isinstance(name, str) or not name:
+            raise ValueError("tool call name must be a non-empty string")
+        if not isinstance(arguments, dict):
+            raise ValueError("tool call arguments must be a JSON object")
+        tool_calls.append(
+            ToolCall(name=name, arguments=cast(dict[str, object], arguments))
+        )
+
+    return AssistantOutput(
+        content="\n".join(content_lines).strip(),
+        tool_calls=tuple(tool_calls),
+    )
 
 
 def _message_role(message: Mapping[str, object]) -> str:
