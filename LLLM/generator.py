@@ -42,9 +42,9 @@ class TensorModel(Protocol):
 
 
 class Tokenizer(Protocol):
-    def encode(self, input: str) -> list[int]: ...
+    def encode(self, input: str, /) -> list[int]: ...
 
-    def decode(self, tok: list[int]) -> str: ...
+    def decode(self, tok: list[int], /) -> str: ...
 
     def get_eos(self) -> int | None: ...
 
@@ -115,7 +115,7 @@ JsonKind = Literal["str", "int", "float", "bool"]
 class ConstraintTokenizer(Protocol):
     """Tokenizer operations needed to build token-level JSON masks."""
 
-    def decode(self, tok: list[int]) -> str: ...
+    def decode(self, tok: list[int], /) -> str: ...
 
     def get_eos(self) -> int | None: ...
 
@@ -1283,6 +1283,7 @@ class Generator:
                 trace["parse_error"] = {
                     "type": type(error).__name__,
                     "message": str(error),
+                    "raw_completion": raw_completion,
                 }
             raise CompletionParseError(raw_completion, error, trace=trace) from error
         return ChatCompletion(

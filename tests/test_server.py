@@ -5,7 +5,13 @@ from threading import Event, Lock
 
 import httpx
 
-from LLLM.generator import AssistantOutput, ChatCompletion, ChatMessage, JsonObjectSpec
+from LLLM.generator import (
+    AssistantOutput,
+    ChatCompletion,
+    ChatMessage,
+    CompletionParseError,
+    JsonObjectSpec,
+)
 from LLLM.server import create_app
 
 
@@ -29,6 +35,7 @@ class BlockingGenerator:
         top_p: float | None = None,
         enable_thinking: bool = True,
         response_format: JsonObjectSpec | None = None,
+        trace_enabled: bool = False,
     ) -> ChatCompletion:
         del (
             messages,
@@ -39,6 +46,7 @@ class BlockingGenerator:
             top_p,
             enable_thinking,
             response_format,
+            trace_enabled,
         )
         with self._state_lock:
             self.calls += 1
@@ -103,6 +111,52 @@ def test_concurrent_completions_wait_without_overlapping_generation() -> None:
         assert generator.max_active == 1
 
     asyncio.run(run_requests())
+
+
+def test_completion_parse_error_returns_structured_trace() -> None:
+    async def send_request() -> None:
+        generator = BlockingGenerator()
+        generator.release.set()
+        parse_error = ValueError("invalid tool arguments")
+        trace = {
+            "raw_completion": "<tool_call>bad</tool_call>",
+            "parse_error": {
+                "type": "ValueError",
+                "message": "invalid tool arguments",
+                "raw_completion": "<tool_call>bad</tool_call>",
+            },
+        }
+
+        def fail_generation(*args: object, **kwargs: object) -> ChatCompletion:
+            assert kwargs["trace_enabled"] is True
+            raise CompletionParseError(
+                "<tool_call>bad</tool_call>",
+                parse_error,
+                trace=trace,
+            )
+
+        generator.generate_completion = fail_generation  # type: ignore[method-assign]
+        app = create_app(generator)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "lllm",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["type"] == "completion_parse_error"
+        assert detail["parse_error"] == trace["parse_error"]
+        assert detail["trace"] == trace
+
+    asyncio.run(send_request())
 
 
 def test_api_key_is_optional() -> None:

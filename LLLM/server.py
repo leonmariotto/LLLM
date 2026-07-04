@@ -27,7 +27,7 @@ import torch
 import uvicorn
 
 from .fetch import fetch_model_ir
-from .generator import Generator
+from .generator import CompletionParseError, Generator
 from .generator import ChatCompletion as LocalChatCompletion
 from .generator import ChatMessage as LocalChatMessage
 from .generator import JsonObjectSpec, schema_from_json_schema
@@ -57,6 +57,7 @@ class CompletionGenerator(Protocol):
         top_p: float | None = None,
         enable_thinking: bool = True,
         response_format: JsonObjectSpec | None = None,
+        trace_enabled: bool = False,
     ) -> LocalChatCompletion: ...
 
 
@@ -564,15 +565,36 @@ def create_app(
                 top_p=request.top_p,
                 enable_thinking=request_enable_thinking,
                 response_format=response_format,
+                trace_enabled=True,
             )
 
         # Waiting requests stay suspended on the event loop instead of occupying
         # worker threads or allocating inference state. Only the lock holder is
         # dispatched to a worker because generation is synchronous and CPU/GPU
         # intensive.
-        async with generation_lock:
-            logger.debug("Running request")
-            completion = await run_in_threadpool(generate)
+        try:
+            async with generation_lock:
+                logger.debug("Running request")
+                completion = await run_in_threadpool(generate)
+        except CompletionParseError as error:
+            parse_error = {
+                "type": type(error.parse_error).__name__,
+                "message": str(error.parse_error),
+                "raw_completion": error.raw_completion,
+            }
+            if error.trace is not None:
+                traced_parse_error = error.trace.get("parse_error")
+                if isinstance(traced_parse_error, dict):
+                    parse_error = cast(dict[str, object], traced_parse_error)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "type": "completion_parse_error",
+                    "message": str(error.parse_error),
+                    "parse_error": parse_error,
+                    "trace": error.trace,
+                },
+            ) from error
 
         tool_calls = _response_tool_calls(completion)
         usage = CompletionUsage(
