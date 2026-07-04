@@ -17,13 +17,20 @@ import math
 import time
 from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast, List
 
-from .tool_common import ToolCall
-
 from loguru import logger
 from pydantic import BaseModel
 import torch
 
 from .kv_cache import KVCache
+
+
+class ToolCall(BaseModel):
+    """A parsed assistant request to call one tool."""
+
+    type: Literal["tool_call"] = "tool_call"
+    tool_call_id: str = ""
+    name: str
+    arguments: dict[str, object]
 
 
 class TensorModel(Protocol):
@@ -134,15 +141,22 @@ class JsonFieldSpec:
 
 @dataclass(frozen=True)
 class JsonObjectSpec:
-    """Minimal fixed-order object schema extracted from a Pydantic model."""
+    """Minimal fixed-order object schema used for constrained decoding."""
 
-    model: type[BaseModel]
+    name: str
     fields: tuple[JsonFieldSpec, ...]
+    validate_json: Callable[[str], object] | None = None
 
-    @property
-    def name(self) -> str:
-        """Return the schema model name for logs and errors."""
-        return self.model.__name__
+
+ResponseFormat = type[BaseModel] | JsonObjectSpec
+
+
+def _response_format_name(response_format: ResponseFormat | None) -> str | None:
+    if response_format is None:
+        return None
+    if isinstance(response_format, JsonObjectSpec):
+        return response_format.name
+    return response_format.__name__
 
 
 @dataclass
@@ -242,20 +256,39 @@ PrefixChecker = Callable[[str], bool]
 def schema_from_pydantic(response_format: type[BaseModel]) -> JsonObjectSpec:
     """Extract the supported schema subset from a non-recursive Pydantic model."""
     schema = response_format.model_json_schema()
+    spec = schema_from_json_schema(
+        schema,
+        name=response_format.__name__,
+        field_order=tuple(response_format.model_fields),
+    )
+    return JsonObjectSpec(
+        name=spec.name,
+        fields=spec.fields,
+        validate_json=response_format.model_validate_json,
+    )
+
+
+def schema_from_json_schema(
+    schema: dict[str, Any],
+    *,
+    name: str,
+    field_order: tuple[str, ...] | None = None,
+) -> JsonObjectSpec:
+    """Extract the supported schema subset from an OpenAI JSON schema."""
     defs = _schema_defs(schema)
     fields = _object_fields_from_schema(
         schema,
-        response_format.__name__,
+        name,
         defs,
-        field_order=tuple(response_format.model_fields),
+        field_order=field_order,
     )
 
     logger.info(
         "Accepted constrained response_format={} fields={}",
-        response_format.__name__,
+        name,
         [field.name for field in fields],
     )
-    return JsonObjectSpec(model=response_format, fields=fields)
+    return JsonObjectSpec(name=name, fields=fields)
 
 
 def _schema_defs(schema: dict[str, Any]) -> dict[str, object]:
@@ -366,6 +399,7 @@ class JsonConstrainedDecoder:
         self.tokenizer = tokenizer
         self.trie = trie
         self.generated_text = ""
+        self._generated_token_ids: list[int] = []
         self._mask_cache: dict[str, torch.Tensor] = {}
         self._fast_mask_cache: dict[str, torch.Tensor] = {}
         self.stats = JsonConstraintStats(
@@ -383,7 +417,8 @@ class JsonConstrainedDecoder:
 
     def append_token(self, token_id: int) -> None:
         """Append one selected token to the tracked JSON completion."""
-        self.generated_text += self.tokenizer.decode([token_id])
+        self._generated_token_ids.append(token_id)
+        self.generated_text = self.tokenizer.decode(self._generated_token_ids)
 
     def mask_for_next_token(
         self, logits: torch.Tensor, eos: int | None
@@ -448,17 +483,18 @@ class JsonConstrainedDecoder:
                 self.generated_text,
             )
             raise ValueError("generated text ended before constrained JSON payload")
-        try:
-            self.spec.model.model_validate_json(payload)
-        except ValueError as error:
-            logger.error(
-                "Constrained JSON final validation failed schema={} text={!r}",
-                self.spec.name,
-                self.generated_text,
-            )
-            raise ValueError(
-                "generated JSON failed response_format validation"
-            ) from error
+        if self.spec.validate_json is not None:
+            try:
+                self.spec.validate_json(payload)
+            except ValueError as error:
+                logger.error(
+                    "Constrained JSON final validation failed schema={} text={!r}",
+                    self.spec.name,
+                    self.generated_text,
+                )
+                raise ValueError(
+                    f"generated JSON failed response_format validation: {error}"
+                ) from error
         logger.info(
             "Constrained JSON final validation succeeded schema={} chars={} "
             "mask_cache_hits={} mask_cache_misses={} "
@@ -499,14 +535,12 @@ class JsonConstrainedDecoder:
         # If incomplete string detected, use a cheap mask
         self.stats.fast_text_mask_hits += 1
         return self._mask_from_token_filter(
-            # string_state.escaped here say if the last char so far is a backlash
-            # if so _mask_from_token_filter will return another mask.
-            f"json_string_escaped_{string_state.escaped}",
+            f"json_string_{string_state.mode}_{string_state.digits}",
             logits,
             eos,
-            lambda token_text: _is_safe_json_string_token(
+            lambda token_text: _is_safe_json_string_token_from_state(
                 token_text,
-                escaped=string_state.escaped,
+                state=string_state,
             ),
         )
 
@@ -674,11 +708,22 @@ def _parse_complete_object(text: str, spec: JsonObjectSpec) -> bool:
     return position == len(text)
 
 
+JsonStringMode = Literal[
+    "text",
+    "escape",
+    "unicode",
+    "high_surrogate",
+    "high_surrogate_escape",
+    "low_surrogate",
+]
+
+
 @dataclass(frozen=True)
 class JsonStringPrefixState:
     """State of an incomplete JSON string value prefix."""
 
-    escaped: bool
+    mode: JsonStringMode
+    digits: str = ""
 
 
 _THINK_OPEN = "<think>"
@@ -727,37 +772,37 @@ def _incomplete_string_value_state(
     try:
         _ = _parse_object(text, 0, spec)
     except _IncompleteStringValue as state:
-        return JsonStringPrefixState(escaped=state.escaped)
+        return JsonStringPrefixState(mode=state.mode, digits=state.digits)
     except (_Incomplete, _Invalid):
         return None
     return None
 
 
-def _is_safe_json_string_token(token_text: str, *, escaped: bool) -> bool:
-    """
-    Return whether a decoded token can continue or close a JSON string value.
-    Used to build the cheap masks for free-form string.
-    @param escaped say if last char is a backlash.
-    """
+def _is_safe_json_string_token_from_state(
+    token_text: str,
+    *,
+    state: JsonStringPrefixState,
+) -> bool:
+    """Return whether a token is a valid continuation of a JSON string state."""
     if token_text == "":
         return False
 
-    is_escaped = escaped
-    for index, char in enumerate(token_text):
-        if is_escaped:
-            if char not in {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}:
-                return False
-            is_escaped = False
-            continue
-
-        if char == "\\":
-            is_escaped = True
-            continue
-        if char == '"':
-            return index == len(token_text) - 1
-        if ord(char) < 0x20:
-            return False
-    return True
+    state_prefix = {
+        "text": '"',
+        "escape": '"\\',
+        "unicode": f'"\\u{state.digits}',
+        "high_surrogate": '"\\ud800',
+        "high_surrogate_escape": '"\\ud800\\',
+        "low_surrogate": f'"\\ud800\\u{state.digits}',
+    }[state.mode]
+    candidate = state_prefix + token_text
+    try:
+        position = _parse_string(candidate, 0)
+    except _IncompleteStringValue:
+        return True
+    except (_Incomplete, _Invalid):
+        return False
+    return position == len(candidate)
 
 
 def _parse_object(text: str, position: int, spec: JsonObjectSpec) -> int:
@@ -887,14 +932,41 @@ def _parse_string(text: str, position: int) -> int:
         raise _Invalid
 
     index = position + 1
-    escaped = False
-    while index < len(text):
+    pending_high_surrogate = False
+    hex_digits = frozenset("0123456789abcdefABCDEF")
+
+    while True:
+        if pending_high_surrogate:
+            if index >= len(text):
+                raise _IncompleteStringValue(mode="high_surrogate")
+            if text[index] != "\\":
+                raise _Invalid
+            index += 1
+            if index >= len(text):
+                raise _IncompleteStringValue(mode="high_surrogate_escape")
+            if text[index] != "u":
+                raise _Invalid
+            index += 1
+            digits_start = index
+            while index - digits_start < 4:
+                if index >= len(text):
+                    raise _IncompleteStringValue(
+                        mode="low_surrogate",
+                        digits=text[digits_start:index],
+                    )
+                if text[index] not in hex_digits:
+                    raise _Invalid
+                index += 1
+            codepoint = int(text[digits_start:index], 16)
+            if not 0xDC00 <= codepoint <= 0xDFFF:
+                raise _Invalid
+            pending_high_surrogate = False
+            continue
+
+        if index >= len(text):
+            raise _IncompleteStringValue(mode="text")
         char = text[index]
-        if escaped:
-            escaped = False
-        elif char == "\\":
-            escaped = True
-        elif char == '"':
+        if char == '"':
             candidate = text[position : index + 1]
             try:
                 value = json.loads(candidate)
@@ -903,10 +975,36 @@ def _parse_string(text: str, position: int) -> int:
             if not isinstance(value, str):
                 raise _Invalid
             return index + 1
-        elif ord(char) < 0x20:
+        if char == "\\":
+            index += 1
+            if index >= len(text):
+                raise _IncompleteStringValue(mode="escape")
+            escape = text[index]
+            if escape in {'"', "\\", "/", "b", "f", "n", "r", "t"}:
+                index += 1
+                continue
+            if escape != "u":
+                raise _Invalid
+            index += 1
+            digits_start = index
+            while index - digits_start < 4:
+                if index >= len(text):
+                    raise _IncompleteStringValue(
+                        mode="unicode",
+                        digits=text[digits_start:index],
+                    )
+                if text[index] not in hex_digits:
+                    raise _Invalid
+                index += 1
+            codepoint = int(text[digits_start:index], 16)
+            if 0xD800 <= codepoint <= 0xDBFF:
+                pending_high_surrogate = True
+            elif 0xDC00 <= codepoint <= 0xDFFF:
+                raise _Invalid
+            continue
+        if ord(char) < 0x20 or 0xD800 <= ord(char) <= 0xDFFF:
             raise _Invalid
         index += 1
-    raise _IncompleteStringValue(escaped=escaped)
 
 
 def _parse_number(text: str, position: int, *, allow_float: bool) -> int:
@@ -963,9 +1061,15 @@ class _Incomplete(Exception):
 
 
 class _IncompleteStringValue(_Incomplete):
-    def __init__(self, *, escaped: bool) -> None:
+    def __init__(
+        self,
+        *,
+        mode: JsonStringMode,
+        digits: str = "",
+    ) -> None:
         super().__init__()
-        self.escaped = escaped
+        self.mode: JsonStringMode = mode
+        self.digits = digits
 
 
 class _Invalid(Exception):
@@ -1001,7 +1105,7 @@ class Generator:
         top_k: int | None = None,
         top_p: float | None = None,
         include_prompt: bool = True,
-        response_format: type[BaseModel] | None = None,
+        response_format: ResponseFormat | None = None,
     ) -> str:
         """
         Generate text from a prompt.
@@ -1058,7 +1162,7 @@ class Generator:
         top_k: int | None = None,
         top_p: float | None = None,
         include_prompt: bool = True,
-        response_format: type[BaseModel] | None = None,
+        response_format: ResponseFormat | None = None,
     ) -> str:
         """
         Generate text from already-encoded prompt tokens.
@@ -1106,7 +1210,7 @@ class Generator:
         top_k: int | None = None,
         top_p: float | None = None,
         enable_thinking: bool = True,
-        response_format: type[BaseModel] | None = None,
+        response_format: ResponseFormat | None = None,
         trace_enabled: bool = False,
     ) -> ChatCompletion:
         """Generate and parse one assistant turn from structured chat messages.
@@ -1161,11 +1265,7 @@ class Generator:
                     "top_k": top_k,
                     "top_p": top_p,
                     "enable_thinking": enable_thinking,
-                    "response_format": (
-                        response_format.__name__
-                        if response_format is not None
-                        else None
-                    ),
+                    "response_format": _response_format_name(response_format),
                 },
             }
         try:
@@ -1260,7 +1360,7 @@ class Generator:
         temperature: float,
         top_k: int | None,
         top_p: float | None,
-        response_format: type[BaseModel] | None,
+        response_format: ResponseFormat | None,
     ) -> tuple[list[int], int, float]:
         """
         Implement top-k/top-p sampling and temperature.
@@ -1283,7 +1383,7 @@ class Generator:
             top_k,
             top_p,
             stop_at_eos,
-            response_format.__name__ if response_format is not None else None,
+            _response_format_name(response_format),
         )
         self.model.eval()
         idx = torch.tensor(
@@ -1344,13 +1444,17 @@ class Generator:
         )
 
     def _constrained_decoder(
-        self, response_format: type[BaseModel] | None
+        self, response_format: ResponseFormat | None
     ) -> JsonConstrainedDecoder | None:
         """Create a constrained JSON decoder when typed output is requested."""
         if response_format is None:
             logger.debug("Constrained JSON decoding disabled")
             return None
-        spec = schema_from_pydantic(response_format)
+        spec = (
+            response_format
+            if isinstance(response_format, JsonObjectSpec)
+            else schema_from_pydantic(response_format)
+        )
         if self._json_trie is None:
             self._json_trie = TokenTrie(self.tokenizer)
         return JsonConstrainedDecoder(

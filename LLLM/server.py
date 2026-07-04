@@ -24,8 +24,9 @@ from .fetch import fetch_model_ir
 from .generator import Generator
 from .generator import ChatCompletion as LocalChatCompletion
 from .generator import ChatMessage as LocalChatMessage
+from .generator import JsonObjectSpec, schema_from_json_schema
 from .model_ir import ModelIR
-from .tool_common import ToolCall as LocalToolCall
+from .generator import ToolCall
 from .utils import get_device
 
 
@@ -45,8 +46,10 @@ class CompletionGenerator(Protocol):
         tools: Sequence[dict[str, object]] | None = None,
         max_generated_token: int = 20,
         temperature: float = 0.0,
+        top_k: int | None = None,
         top_p: float | None = None,
         enable_thinking: bool = True,
+        response_format: JsonObjectSpec | None = None,
     ) -> LocalChatCompletion: ...
 
 
@@ -174,18 +177,33 @@ class NamedFunctionToolChoice(_StrictModel):
     function: NamedFunctionChoice
 
 
+class JsonSchemaDefinition(_StrictModel):
+    name: str = Field(min_length=1)
+    description: str | None = None
+    schema_value: dict[str, object] = Field(alias="schema")
+    strict: bool | None = None
+
+
+class JsonSchemaResponseFormat(_StrictModel):
+    type: Literal["json_schema"]
+    json_schema: JsonSchemaDefinition
+
+
 class ChatCompletionRequest(_StrictModel):
     model: str
     messages: list[ChatCompletionMessage] = Field(min_length=1)
     max_tokens: int = Field(default=1024, ge=1)
     temperature: float = Field(default=0.6, ge=0.0, le=2.0)
+    top_k: int | None = Field(default=None, ge=1)
     top_p: float = Field(default=0.95, gt=0.0, le=1.0)
+    enable_thinking: bool | None = None
     stream: bool = False
     tools: list[FunctionTool] | None = None
-    tool_choice: Literal["none", "auto", "required"] | NamedFunctionToolChoice | None = (
-        None
-    )
+    tool_choice: (
+        Literal["none", "auto", "required"] | NamedFunctionToolChoice | None
+    ) = None
     parallel_tool_calls: bool = True
+    response_format: JsonSchemaResponseFormat | None = None
 
 
 class AssistantMessage(_StrictModel):
@@ -223,7 +241,7 @@ def _local_messages(
     for message in messages:
         if isinstance(message, AssistantInputMessage):
             local_calls = [
-                LocalToolCall(
+                ToolCall(
                     tool_call_id=tool_call.id,
                     name=tool_call.function.name,
                     arguments=cast(
@@ -259,10 +277,7 @@ def _tool_schemas(request: ChatCompletionRequest) -> list[dict[str, object]] | N
     if request.tool_choice == "none":
         has_tool_history = any(
             isinstance(message, ToolInputMessage)
-            or (
-                isinstance(message, AssistantInputMessage)
-                and bool(message.tool_calls)
-            )
+            or (isinstance(message, AssistantInputMessage) and bool(message.tool_calls))
             for message in request.messages
         )
         # An empty list keeps the tool-aware history template active without
@@ -297,6 +312,21 @@ def _response_tool_calls(
         )
         for tool_call in completion.message.tool_calls
     ]
+
+
+def _response_format_spec(
+    response_format: JsonSchemaResponseFormat | None,
+) -> JsonObjectSpec | None:
+    if response_format is None:
+        return None
+    definition = response_format.json_schema
+    try:
+        return schema_from_json_schema(
+            definition.schema_value,
+            name=definition.name,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 def create_app(
@@ -347,8 +377,14 @@ def create_app(
                 tools=_tool_schemas(request),
                 max_generated_token=request.max_tokens,
                 temperature=request.temperature,
+                top_k=request.top_k,
                 top_p=request.top_p,
-                enable_thinking=enable_thinking,
+                enable_thinking=(
+                    enable_thinking
+                    if request.enable_thinking is None
+                    else request.enable_thinking
+                ),
+                response_format=_response_format_spec(request.response_format),
             )
 
         tool_calls = _response_tool_calls(completion)
@@ -378,6 +414,12 @@ def create_app(
 
     app.add_api_route(
         "/v1/chat/completions",
+        _create_chat_completion,
+        methods=["POST"],
+        response_model=ChatCompletionResponse,
+    )
+    app.add_api_route(
+        "/chat/completions",
         _create_chat_completion,
         methods=["POST"],
         response_model=ChatCompletionResponse,

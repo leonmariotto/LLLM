@@ -123,6 +123,9 @@ def test_functional_qwen3_06b_generates_constrained_response_format(
         max_generated_token=1024,
         include_prompt=False,
         response_format=StructuredQwen3Smoke,
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
     )
 
     parsed = StructuredQwen3Smoke.model_validate_json(generated_text)

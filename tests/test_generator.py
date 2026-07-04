@@ -17,7 +17,7 @@ from ..LLLM.generator import (
     TokenTrie,
     schema_from_pydantic,
 )
-from ..LLLM.tool_common import ToolCall
+from ..LLLM.generator import ToolCall
 
 
 class DigitTokenizer:
@@ -199,7 +199,9 @@ class DigitChatTokenizer(DigitTokenizer):
 
     def parse_assistant_output(self, completion: str) -> AssistantOutput:
         if completion == "45":
-            return AssistantOutput("parsed", (ToolCall(name="lookup", arguments={"x": 1}),))
+            return AssistantOutput(
+                "parsed", (ToolCall(name="lookup", arguments={"x": 1}),)
+            )
         return AssistantOutput(completion)
 
 
@@ -296,7 +298,9 @@ def test_generator_completion_uses_chat_template_and_parses_output() -> None:
     assert tokenizer.enable_thinking == [False]
 
 
-def test_generator_completion_trace_includes_rendered_prompt_and_raw_completion() -> None:
+def test_generator_completion_trace_includes_rendered_prompt_and_raw_completion() -> (
+    None
+):
     tokenizer = DigitChatTokenizer()
     generator = Generator(
         model=RecordingGreedyModel(),
@@ -919,6 +923,80 @@ def test_response_format_returns_to_strict_mask_after_string_value_closes() -> N
     assert not bool(mask[tokenizer.token_to_id["x"]])
 
 
+def test_response_format_rejects_unpaired_json_unicode_surrogates() -> None:
+    tokenizer = JsonTokenizer()
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=TokenTrie(tokenizer),
+    )
+
+    decoder.generated_text = r'{"name":"\ud800","ok":true,"scores":[1,2,3]}'
+    assert not decoder.is_complete()
+
+    decoder.generated_text = r'{"name":"\udfff","ok":true,"scores":[1,2,3]}'
+    assert not decoder.is_complete()
+
+
+def test_response_format_accepts_paired_json_unicode_surrogates() -> None:
+    tokenizer = JsonTokenizer()
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=TokenTrie(tokenizer),
+    )
+    decoder.generated_text = r'{"name":"\ud83d\ude00","ok":true,"scores":[1,2,3]}'
+
+    assert decoder.is_complete()
+    decoder.validate_final()
+
+
+def test_response_format_masks_string_close_until_high_surrogate_is_paired() -> None:
+    tokenizer = JsonTokenizer()
+    tokenizer.tokens.extend([r"\ud800", r"\udc00"])
+    tokenizer.token_to_id = {
+        token: index for index, token in enumerate(tokenizer.tokens)
+    }
+    tokenizer.eos = tokenizer.token_to_id["<eos>"]
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=TokenTrie(tokenizer),
+    )
+    decoder.generated_text = r'{"name":"\ud800'
+    logits = torch.zeros(1, tokenizer.vocabulary_size)
+
+    mask = decoder.mask_for_next_token(logits, tokenizer.eos)
+
+    assert not bool(mask[tokenizer.token_to_id['"']])
+    assert bool(mask[tokenizer.token_to_id[r"\udc00"]])
+
+
+def test_response_format_tracks_full_sequence_decode_for_byte_tokens() -> None:
+    class NonAdditiveTokenizer:
+        vocabulary_size = 2
+
+        def decode(self, tokens: list[int]) -> str:
+            if tokens == [0, 1]:
+                return "¡"
+            return "".join("�" for _ in tokens)
+
+        def get_eos(self) -> int | None:
+            return None
+
+    tokenizer = NonAdditiveTokenizer()
+    decoder = JsonConstrainedDecoder(
+        spec=schema_from_pydantic(JsonProbe),
+        tokenizer=tokenizer,
+        trie=TokenTrie(tokenizer),
+    )
+
+    decoder.append_token(0)
+    assert decoder.generated_text == "�"
+    decoder.append_token(1)
+    assert decoder.generated_text == "¡"
+
+
 def test_response_format_performance_overhead_is_logged_and_bounded() -> None:
     tokenizer = JsonTokenizer()
     target = '{"name":"max","ok":true,"scores":[1,2,3]}'
@@ -935,7 +1013,9 @@ def test_response_format_performance_overhead_is_logged_and_bounded() -> None:
     )
 
     baseline_start = time.perf_counter()
-    baseline_generator.generate("", max_generated_token=len(target), include_prompt=False)
+    baseline_generator.generate(
+        "", max_generated_token=len(target), include_prompt=False
+    )
     baseline_seconds = time.perf_counter() - baseline_start
 
     constrained_start = time.perf_counter()

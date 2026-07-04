@@ -30,6 +30,7 @@ dependencies = [
     "pydantic",
     "fastapi",
     "uvicorn",
+    "litellm>=1.90.2",
 ]
 
 [build-system]
