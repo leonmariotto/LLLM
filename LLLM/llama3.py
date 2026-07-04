@@ -392,6 +392,27 @@ class Llama3Model(nn.Module):
         Returns:
             Logits with shape ``[batch, tokens, vocab_size]``.
         """
+        x = self._forward_hidden(in_idx, pos=pos, kv_cache=kv_cache)
+        return self.out_head(x)
+
+    def forward_last_token(
+        self,
+        in_idx: torch.Tensor,
+        pos: int | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+    ) -> torch.Tensor:
+        """Return only the final-token logits needed during inference prefill."""
+        x = self._forward_hidden(in_idx, pos=pos, kv_cache=kv_cache)
+        return self.out_head(x[:, -1:, :])
+
+    def _forward_hidden(
+        self,
+        in_idx: torch.Tensor,
+        pos: int | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+    ) -> torch.Tensor:
         tok_embeds = self.tok_emb(in_idx)
         x = tok_embeds
         for layer_idx, module in enumerate(self.trf_blocks):
@@ -404,8 +425,7 @@ class Llama3Model(nn.Module):
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
             )
-        x = self.final_norm(x)
-        return self.out_head(x)
+        return self.final_norm(x)
 
     def load_ir_weights(self, ir: ModelIR) -> None:
         """Copy canonical dense Llama3 IR tensors into this model."""

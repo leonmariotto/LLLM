@@ -1084,10 +1084,18 @@ class Generator:
         model: TensorModel,
         tokenizer: Tokenizer,
         cache_length: int = 4096,
+        prefill_chunk_size: int = 512,
     ) -> None:
+        """
+        prefill_chunk_size control the chunk size by which we fill the KVCache.
+        This is to prevent peak memory usage.
+        """
+        if prefill_chunk_size <= 0:
+            raise ValueError("prefill_chunk_size must be positive")
         self.model = model
         self.tokenizer = tokenizer
         self.cache_length = cache_length
+        self.prefill_chunk_size = prefill_chunk_size
         self.generated_token_count: List[int] = []
         self.generation_seconds: List[float] = []
         self.generated_sequence_logprob: List[float] = []
@@ -1474,10 +1482,18 @@ class Generator:
             raise ValueError("input_tokens must contain at least one token")
 
         logits: torch.Tensor | None = None
-        for start in range(0, idx.shape[1], cache_length):
-            chunk = idx[:, start : start + cache_length]
+        chunk_size = min(cache_length, self.prefill_chunk_size)
+        for start in range(0, idx.shape[1], chunk_size):
+            chunk = idx[:, start : start + chunk_size]
             with torch.no_grad():
-                logits = self.model(chunk, kv_cache=kv_cache)
+                forward_last_token = getattr(self.model, "forward_last_token", None)
+                if callable(forward_last_token):
+                    logits = cast(
+                        torch.Tensor,
+                        forward_last_token(chunk, kv_cache=kv_cache),
+                    )
+                else:
+                    logits = self.model(chunk, kv_cache=kv_cache)[:, -1:, :]
 
         assert logits is not None
         return logits

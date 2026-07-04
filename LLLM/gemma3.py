@@ -584,6 +584,33 @@ class Gemma3Model(nn.Module):
         Returns:
             Logits with shape ``[batch, tokens, vocab_size]``.
         """
+        x = self._forward_hidden(in_idx, pos=pos, kv_cache=kv_cache)
+        return self._project_logits(x)
+
+    def forward_last_token(
+        self,
+        in_idx: torch.Tensor,
+        pos: int | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+    ) -> torch.Tensor:
+        """
+        Return only the final-token logits needed during inference prefill.
+        This is an optimized version of the "forward" method that avoid allocating
+        memory for all tokens vocabs whil pre-filling the KVCache.
+        So the caller can use this to pre-fill the KVCache, it will allocate less
+        memory than the forward() method.
+        """
+        x = self._forward_hidden(in_idx, pos=pos, kv_cache=kv_cache)
+        return self._project_logits(x[:, -1:, :])
+
+    def _forward_hidden(
+        self,
+        in_idx: torch.Tensor,
+        pos: int | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+    ) -> torch.Tensor:
         x = self.tok_emb(in_idx) * (self.embedded_dim**0.5)
         for layer_idx, module in enumerate(self.trf_blocks):
             block = cast(Gemma3TransformerBlock, module)
@@ -597,7 +624,9 @@ class Gemma3Model(nn.Module):
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
             )
-        x = self.final_norm(x)
+        return self.final_norm(x)
+
+    def _project_logits(self, x: torch.Tensor) -> torch.Tensor:
         logits = self.out_head(x.to(self.dtype))
         if self.final_logit_softcapping is not None:
             logits = logits / self.final_logit_softcapping

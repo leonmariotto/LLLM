@@ -58,6 +58,7 @@ class GPT2Model(nn.Module):
 
     def __init__(self, cfg: GPT2Config) -> None:
         super().__init__()
+        self.context_length = cfg["context_length"]
         self.positional_encoding = cfg["positional_encoding"]
         self.tok_emb = nn.Embedding(cfg["vocab_size"], cfg["emb_dim"])
         self.pos_emb: nn.Embedding | None = None
@@ -234,6 +235,23 @@ class GPT2Model(nn.Module):
         Returns:
             Logits with shape ``[batch, tokens, vocab_size]``.
         """
+        x = self._forward_hidden(in_idx, pos=pos)
+        return self.out_head(x)
+
+    def forward_last_token(
+        self,
+        in_idx: torch.Tensor,
+        pos: int | None = None,
+    ) -> torch.Tensor:
+        """Return only the final-token logits needed during inference."""
+        x = self._forward_hidden(in_idx, pos=pos)
+        return self.out_head(x[:, -1:, :])
+
+    def _forward_hidden(
+        self,
+        in_idx: torch.Tensor,
+        pos: int | None = None,
+    ) -> torch.Tensor:
         _, seq_len = in_idx.shape  # batch_size, seq_len
         tok_embeds = self.tok_emb(in_idx)
         if self.positional_encoding == "gpt2":
@@ -248,8 +266,7 @@ class GPT2Model(nn.Module):
         # is the input of transformer 2 and so on.
         for blk in self.trf_blocks:
             x = blk(x, pos)
-        x = self.final_norm(x)
-        return self.out_head(x)
+        return self.final_norm(x)
 
 
 TokenId: TypeAlias = int
@@ -367,10 +384,6 @@ class GeneratorGPT2(Generator):
         top_p: float | None,
         response_format: object | None,
     ) -> tuple[list[int], int, float]:
-        if top_p is not None:
-            raise NotImplementedError(
-                "top_p sampling is not supported by GeneratorGPT2"
-            )
         if response_format is not None:
             raise NotImplementedError(
                 "response_format sampling is not supported by GeneratorGPT2"
@@ -389,10 +402,14 @@ class GeneratorGPT2(Generator):
         for _ in range(max_generated_token):
             idx_cond = idx[:, -cache_length:]
             with torch.no_grad():
-                logits = self.model(idx_cond)
+                forward_last_token = getattr(self.model, "forward_last_token", None)
+                if callable(forward_last_token):
+                    logits = cast(torch.Tensor, forward_last_token(idx_cond))
+                else:
+                    logits = self.model(idx_cond)[:, -1:, :]
 
             logits = logits[:, -1, :]
-            logits = self._filter_logits(logits, top_k)
+            logits = self._filter_logits(logits, top_k, top_p)
             idx_next = self._select_next_token(logits, temperature)
             if stop_at_eos and eos is not None and bool((idx_next == eos).all().item()):
                 break
