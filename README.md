@@ -129,12 +129,18 @@ space before storing them in the KV cache.
 - Improve output metrics. Use sklearn/evaluate to add metrics.
 - Add an optional cache to detect specialized neural regions activated for tasks.
 - bitsandbytes for memory pressure
-- Add a training app that exports native IR checkpoints and persists optimizer/scheduler state for training resumption.
+- Add HF/GGUF exporter
 - Add Hugging Face and GGUF exporters for distributing fine-tuned native IR checkpoints outside this project.
 
 - add suport for tool_choice="required"
 - add a strong hard constrained generation for tool calls.
 - add typed output in generator (now that we have typed generation), not only str.
+- HF kernel hub for optimization ?
+
+- **add tests for constrained output and fix it**
+
+- add support for Gemma4-12B
+- Add support for qwen3.6-??
 
 ### Embedded models inference
 
