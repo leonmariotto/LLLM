@@ -24,6 +24,13 @@ class KVCacheView:
         yield self.values
 
 
+@dataclass
+class _KVCacheStorage:
+    keys: torch.Tensor
+    values: torch.Tensor
+    capacity: int
+
+
 class KVCache:
     """
     Store per-layer key/value tensors for incremental decoding.
@@ -40,11 +47,13 @@ class KVCache:
         self.cache_length = cache_length
         self.sliding = sliding
         self._layers: dict[int, KVCacheView] = {}
+        self._storage: dict[int, _KVCacheStorage] = {}
         self._next_pos: dict[int, int] = {}
 
     def reset(self) -> None:
         """Drop all cached layer state."""
         self._layers.clear()
+        self._storage.clear()
         self._next_pos.clear()
 
     def layer_seq_len(self, layer_idx: int) -> int:
@@ -95,31 +104,106 @@ class KVCache:
             )
 
         cached = self._layers.get(layer_idx)
-        if cached is None:
-            keys_all = keys
-            values_all = values
-            cache_start_pos = start_pos
-        else:
+        cached_length = 0
+        if cached is not None:
             self._validate_cached_tensors(cached.keys, cached.values, keys, values)
-            keys_all = torch.cat((cached.keys, keys), dim=-2)
-            values_all = torch.cat((cached.values, values), dim=-2)
-            cache_start_pos = cached.start_pos
+            cached_length = int(cached.keys.shape[-2])
 
         next_pos = start_pos + int(keys.shape[-2])
-        if self.cache_length is not None and keys_all.shape[-2] > self.cache_length:
-            if not self.sliding:
-                raise ValueError(
-                    f"KV cache length {keys_all.shape[-2]} exceeds cache_length "
-                    f"{self.cache_length}"
-                )
-            keys_all = keys_all[:, :, -self.cache_length :, :]
-            values_all = values_all[:, :, -self.cache_length :, :]
-            cache_start_pos = next_pos - int(keys_all.shape[-2])
+        combined_length = cached_length + int(keys.shape[-2])
+        if (
+            self.cache_length is not None
+            and combined_length > self.cache_length
+            and not self.sliding
+        ):
+            raise ValueError(
+                f"KV cache length {combined_length} exceeds cache_length "
+                f"{self.cache_length}"
+            )
+
+        retained_length = (
+            combined_length
+            if self.cache_length is None
+            else min(combined_length, self.cache_length)
+        )
+        previous_storage = self._storage.get(layer_idx)
+        storage = self._ensure_capacity(
+            layer_idx,
+            keys,
+            values,
+            retained_length,
+            cached,
+        )
+
+        incoming_length = int(keys.shape[-2])
+        if incoming_length >= retained_length:
+            storage.keys[:, :, :retained_length, :].copy_(
+                keys[:, :, -retained_length:, :]
+            )
+            storage.values[:, :, :retained_length, :].copy_(
+                values[:, :, -retained_length:, :]
+            )
+        else:
+            retained_cached_length = retained_length - incoming_length
+            if retained_cached_length:
+                assert cached is not None
+                if not (
+                    storage is previous_storage
+                    and retained_cached_length == cached_length
+                ):
+                    cached_keys = cached.keys[:, :, -retained_cached_length:, :]
+                    cached_values = cached.values[:, :, -retained_cached_length:, :]
+                    if storage is previous_storage:
+                        cached_keys = cached_keys.clone()
+                        cached_values = cached_values.clone()
+                    storage.keys[:, :, :retained_cached_length, :].copy_(cached_keys)
+                    storage.values[:, :, :retained_cached_length, :].copy_(
+                        cached_values
+                    )
+            storage.keys[:, :, retained_cached_length:retained_length, :].copy_(keys)
+            storage.values[:, :, retained_cached_length:retained_length, :].copy_(
+                values
+            )
+
+        keys_all = storage.keys[:, :, :retained_length, :]
+        values_all = storage.values[:, :, :retained_length, :]
+        cache_start_pos = next_pos - retained_length
 
         view = KVCacheView(keys=keys_all, values=values_all, start_pos=cache_start_pos)
         self._layers[layer_idx] = view
         self._next_pos[layer_idx] = next_pos
         return view
+
+    def _ensure_capacity(
+        self,
+        layer_idx: int,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+        required: int,
+        cached: KVCacheView | None,
+    ) -> _KVCacheStorage:
+        storage = self._storage.get(layer_idx)
+        if storage is not None and storage.capacity >= required:
+            return storage
+
+        capacity = 1 if storage is None else storage.capacity
+        while capacity < required:
+            capacity *= 2
+        if self.cache_length is not None:
+            capacity = min(capacity, self.cache_length)
+
+        shape = (*keys.shape[:-2], capacity, keys.shape[-1])
+        new_storage = _KVCacheStorage(
+            keys=keys.new_empty(shape),
+            values=values.new_empty(shape),
+            capacity=capacity,
+        )
+        if cached is not None:
+            cached_length = int(cached.keys.shape[-2])
+            new_storage.keys[:, :, :cached_length, :].copy_(cached.keys)
+            new_storage.values[:, :, :cached_length, :].copy_(cached.values)
+        self._storage[layer_idx] = new_storage
+        return new_storage
 
     @staticmethod
     def _validate_new_tensors(keys: torch.Tensor, values: torch.Tensor) -> None:
