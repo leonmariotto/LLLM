@@ -50,8 +50,12 @@ Run the OpenAI-compatible chat completions server:
 uv run server --served-model-name lllm
 ```
 
-The server detects the model architecture from its artifacts. Qwen3 and Gemma3
-models are currently supported, for example:
+On CUDA, the server uses float16 inference by default to reduce GPU memory
+pressure. Use `--dtype float32` to force full precision, or `--dtype float16`
+to require reduced-precision inference explicitly.
+
+The server detects the model architecture from its artifacts. GPT-2, Llama 2,
+Llama 3, Qwen 2, Qwen 3, and Gemma 3 models are supported, for example:
 
 ```sh
 uv run server --model google/gemma-3-1b-it --served-model-name gemma3

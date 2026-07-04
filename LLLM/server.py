@@ -5,11 +5,11 @@ Provide a command line interface.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 import json
 from pathlib import Path
 import sys
-from threading import Lock
 import time
 from typing import Annotated, Literal, Protocol, Self, cast
 from uuid import uuid4
@@ -18,6 +18,8 @@ import click
 from fastapi import FastAPI, HTTPException
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
+import torch
 import uvicorn
 
 from .fetch import fetch_model_ir
@@ -34,6 +36,7 @@ DEFAULT_CACHE_LENGTH = 16384
 DEFAULT_SERVER_MODEL_REPO_ID = "Qwen/Qwen3-0.6B"
 DEFAULT_SERVED_MODEL_NAME = "lllm"
 SERVER_LOG_LEVELS = ("critical", "error", "warning", "info", "debug", "trace")
+SERVER_DTYPES = ("auto", "float16", "float32")
 
 
 class CompletionGenerator(Protocol):
@@ -58,24 +61,140 @@ def _tokenizer_artifact_path(ir: ModelIR) -> Path:
     return path if path.suffix.lower() == ".gguf" else path / "tokenizer.json"
 
 
-def _build_qwen3_generator(ir: ModelIR, *, cache_length: int) -> Generator:
+def _sentencepiece_artifact_path(ir: ModelIR) -> Path:
+    path = Path(str(ir.metadata["path"]))
+    if path.suffix.lower() == ".gguf":
+        raise ValueError("Llama 2 server inference requires HF tokenizer.model")
+    tokenizer_path = path / "tokenizer.model"
+    if not tokenizer_path.is_file():
+        raise FileNotFoundError(f"missing tokenizer.model in {path}")
+    return tokenizer_path
+
+
+def _move_model(
+    model: torch.nn.Module,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> None:
+    model.to(device=device, dtype=dtype)
+
+
+def _build_gpt2_generator(
+    ir: ModelIR,
+    *,
+    cache_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Generator:
+    from .gpt2 import GeneratorGPT2, GPT2Model, GPT2Tokenizer
+
+    model = GPT2Model(GPT2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
+    _move_model(model, device=device, dtype=dtype)
+    return GeneratorGPT2(
+        model=model,
+        tokenizer=GPT2Tokenizer(),
+        cache_length=min(cache_length, model.context_length),
+    )
+
+
+def _build_llama2_generator(
+    ir: ModelIR,
+    *,
+    cache_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Generator:
+    from .llama2 import Llama2Model, Llama2Tokenizer
+
+    model = Llama2Model(Llama2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
+    _move_model(model, device=device, dtype=dtype)
+    tokenizer = Llama2Tokenizer(str(_sentencepiece_artifact_path(ir)))
+    return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
+
+
+def _build_llama3_generator(
+    ir: ModelIR,
+    *,
+    cache_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Generator:
+    from .llama3 import Llama3Model, Llama3Tokenizer
+
+    model = Llama3Model(Llama3Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
+    _move_model(model, device=device, dtype=dtype)
+    tokenizer_path = _tokenizer_artifact_path(ir)
+    tokenizer = (
+        Llama3Tokenizer.from_gguf(str(tokenizer_path))
+        if tokenizer_path.suffix.lower() == ".gguf"
+        else Llama3Tokenizer(str(tokenizer_path))
+    )
+    return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
+
+
+def _build_qwen2_generator(
+    ir: ModelIR,
+    *,
+    cache_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Generator:
+    from .qwen2 import Qwen2Model, Qwen2Tokenizer
+
+    model = Qwen2Model(Qwen2Model.config_from_ir(ir))
+    model.load_ir_weights(ir)
+    _move_model(model, device=device, dtype=dtype)
+    tokenizer = Qwen2Tokenizer(str(_tokenizer_artifact_path(ir)))
+    return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
+
+
+def _build_qwen3_generator(
+    ir: ModelIR,
+    *,
+    cache_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Generator:
     from .qwen3 import Qwen3Model, Qwen3Tokenizer
 
     model = Qwen3Model(Qwen3Model.config_from_ir(ir))
     tokenizer = Qwen3Tokenizer(str(_tokenizer_artifact_path(ir)))
     model.load_ir_weights(ir)
-    model.to(get_device())
+    _move_model(model, device=device, dtype=dtype)
     return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
 
 
-def _build_gemma3_generator(ir: ModelIR, *, cache_length: int) -> Generator:
+def _build_gemma3_generator(
+    ir: ModelIR,
+    *,
+    cache_length: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Generator:
     from .gemma3 import Gemma3Model, Gemma3Tokenizer
 
     model = Gemma3Model(Gemma3Model.config_from_ir(ir))
     tokenizer = Gemma3Tokenizer(str(_tokenizer_artifact_path(ir)))
     model.load_ir_weights(ir)
-    model.to(get_device())
+    _move_model(model, device=device, dtype=dtype)
+    model.dtype = dtype
     return Generator(model=model, tokenizer=tokenizer, cache_length=cache_length)
+
+
+def _inference_dtype(name: str, device: torch.device) -> torch.dtype:
+    if name == "auto":
+        return torch.float16 if device.type == "cuda" else torch.float32
+    if name == "float16":
+        if device.type == "cpu":
+            raise ValueError("float16 server inference requires a GPU device")
+        return torch.float16
+    if name == "float32":
+        return torch.float32
+    raise ValueError(f"unsupported inference dtype {name!r}")
 
 
 def build_generator(
@@ -83,16 +202,32 @@ def build_generator(
     *,
     cache_length: int,
     local_files_only: bool,
+    dtype: str = "auto",
 ) -> CompletionGenerator:
     """Load a supported model architecture into the shared generator."""
     ir = fetch_model_ir(repo_id, local_files_only=local_files_only)
-    if ir.architecture == "qwen3":
-        return _build_qwen3_generator(ir, cache_length=cache_length)
-    if ir.architecture == "gemma3":
-        return _build_gemma3_generator(ir, cache_length=cache_length)
+    device = get_device()
+    torch_dtype = _inference_dtype(dtype, device)
+    logger.info("Loading model on device={} dtype={}", device, torch_dtype)
+    builders = {
+        "gpt2": _build_gpt2_generator,
+        "llama2": _build_llama2_generator,
+        "llama3": _build_llama3_generator,
+        "qwen2": _build_qwen2_generator,
+        "qwen3": _build_qwen3_generator,
+        "gemma3": _build_gemma3_generator,
+    }
+    builder = builders.get(ir.architecture)
+    if builder is not None:
+        return builder(
+            ir,
+            cache_length=cache_length,
+            device=device,
+            dtype=torch_dtype,
+        )
     raise ValueError(
         f"unsupported inference server architecture {ir.architecture!r}; "
-        "supported architectures: qwen3, gemma3"
+        f"supported architectures: {', '.join(builders)}"
     )
 
 
@@ -337,9 +472,9 @@ def create_app(
 ) -> FastAPI:
     """Create an inference app around one already-loaded model."""
     app = FastAPI(title="LLLM inference server")
-    generation_lock = Lock()
+    generation_lock = asyncio.Lock()
 
-    def _create_chat_completion(
+    async def _create_chat_completion(
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
         if request.model != served_model_name:
@@ -369,23 +504,36 @@ def create_app(
                 detail="strict function schemas are not implemented",
             )
 
-        # Generator metrics and model state are mutable, so one model serves one
-        # generation at a time.
-        with generation_lock:
-            completion = generator.generate_completion(
-                _local_messages(request.messages),
-                tools=_tool_schemas(request),
+        logger.debug("Receiving new request")
+
+        local_messages = _local_messages(request.messages)
+        tool_schemas = _tool_schemas(request)
+        response_format = _response_format_spec(request.response_format)
+        request_enable_thinking = (
+            enable_thinking
+            if request.enable_thinking is None
+            else request.enable_thinking
+        )
+
+        def generate() -> LocalChatCompletion:
+            return generator.generate_completion(
+                local_messages,
+                tools=tool_schemas,
                 max_generated_token=request.max_tokens,
                 temperature=request.temperature,
                 top_k=request.top_k,
                 top_p=request.top_p,
-                enable_thinking=(
-                    enable_thinking
-                    if request.enable_thinking is None
-                    else request.enable_thinking
-                ),
-                response_format=_response_format_spec(request.response_format),
+                enable_thinking=request_enable_thinking,
+                response_format=response_format,
             )
+
+        # Waiting requests stay suspended on the event loop instead of occupying
+        # worker threads or allocating inference state. Only the lock holder is
+        # dispatched to a worker because generation is synchronous and CPU/GPU
+        # intensive.
+        async with generation_lock:
+            logger.debug("Running request")
+            completion = await run_in_threadpool(generate)
 
         tool_calls = _response_tool_calls(completion)
         usage = CompletionUsage(
@@ -455,6 +603,13 @@ def create_app(
     help="Only use models already present in the local Hugging Face cache.",
 )
 @click.option(
+    "--dtype",
+    default="auto",
+    show_default=True,
+    type=click.Choice(SERVER_DTYPES, case_sensitive=False),
+    help="Inference dtype. Auto uses float16 on CUDA and float32 otherwise.",
+)
+@click.option(
     "--no-think",
     is_flag=True,
     help="Disable model thinking mode when supported.",
@@ -472,6 +627,7 @@ def server_cli(
     port: int,
     cache_length: int,
     local_files_only: bool,
+    dtype: str,
     no_think: bool,
     verbosity: str,
 ) -> None:
@@ -481,6 +637,7 @@ def server_cli(
         model,
         cache_length=cache_length,
         local_files_only=local_files_only,
+        dtype=dtype,
     )
     app = create_app(
         generator,
