@@ -24,15 +24,20 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """
+        The norm computation need to be done 32bits wide to avoid precision loss.
+        This is because small errors are amplified in next matrice multiplication, because
+        norm "affects the scale of the hidden state before attention and MLP blocks".
         Args:
             x: Input tensor with shape ``[..., emb_dim]``.
 
         Returns:
             Normalized tensor with shape ``[..., emb_dim]``.
         """
-        means = x.pow(2).mean(dim=-1, keepdim=True)
-        x_normed = x * torch.rsqrt(means + self.eps)
-        return (x_normed * self.weight).to(dtype=x.dtype)
+        input_dtype = x.dtype
+        x_float = x.float()
+        means = x_float.pow(2).mean(dim=-1, keepdim=True)
+        x_normed = x_float * torch.rsqrt(means + self.eps)
+        return (x_normed * self.weight.float()).to(dtype=input_dtype)
 
 
 class LayerNorm(nn.Module):
@@ -46,13 +51,18 @@ class LayerNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
+        The norm computation need to be done 32bits wide to avoid precision loss.
+        This is because small errors are amplified in next matrice multiplication, because
+        norm "affects the scale of the hidden state before attention and MLP blocks".
         Args:
             x: Input tensor with shape ``[..., emb_dim]``.
 
         Returns:
             Normalized tensor with shape ``[..., emb_dim]``.
         """
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        norm_x = (x - mean) / torch.sqrt(var + self.eps)
-        return self.scale * norm_x + self.shift
+        input_dtype = x.dtype
+        x_float = x.float()
+        mean = x_float.mean(dim=-1, keepdim=True)
+        var = x_float.var(dim=-1, keepdim=True, unbiased=False)
+        norm_x = (x_float - mean) / torch.sqrt(var + self.eps)
+        return (self.scale.float() * norm_x + self.shift.float()).to(dtype=input_dtype)
