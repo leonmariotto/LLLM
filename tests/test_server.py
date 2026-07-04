@@ -103,3 +103,57 @@ def test_concurrent_completions_wait_without_overlapping_generation() -> None:
         assert generator.max_active == 1
 
     asyncio.run(run_requests())
+
+
+def test_api_key_is_optional() -> None:
+    async def send_request() -> None:
+        generator = BlockingGenerator()
+        generator.release.set()
+        app = create_app(generator)
+        transport = httpx.ASGITransport(app=app)
+
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "lllm",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+
+    asyncio.run(send_request())
+
+
+def test_api_key_is_required_when_configured() -> None:
+    async def send_requests() -> None:
+        generator = BlockingGenerator()
+        generator.release.set()
+        app = create_app(generator, api_key="secret")
+        transport = httpx.ASGITransport(app=app)
+        request = {
+            "model": "lllm",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            without_key = await client.post("/v1/chat/completions", json=request)
+            with_key = await client.post(
+                "/v1/chat/completions",
+                json=request,
+                headers={"Authorization": "Bearer secret"},
+            )
+
+        assert without_key.status_code == 401
+        assert without_key.headers["www-authenticate"] == "Bearer"
+        assert with_key.status_code == 200
+        assert generator.calls == 1
+
+    asyncio.run(send_requests())

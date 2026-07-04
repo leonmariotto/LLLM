@@ -9,16 +9,20 @@ import asyncio
 from collections.abc import Sequence
 import json
 from pathlib import Path
+import secrets
 import sys
 import time
 from typing import Annotated, Literal, Protocol, Self, cast
 from uuid import uuid4
 
 import click
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp
 import torch
 import uvicorn
 
@@ -54,6 +58,37 @@ class CompletionGenerator(Protocol):
         enable_thinking: bool = True,
         response_format: JsonObjectSpec | None = None,
     ) -> LocalChatCompletion: ...
+
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    """Require one bearer token for every HTTP request."""
+
+    def __init__(self, app: ASGIApp, *, api_key: str) -> None:
+        super().__init__(app)
+        self.api_key = api_key
+
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: RequestResponseEndpoint,
+    ) -> Response:
+        if request.url.path in {"/health", "/docs", "/openapi.json"}:
+            return await call_next(request)
+
+        authorization = request.headers.get("authorization", "")
+        scheme, separator, token = authorization.partition(" ")
+        authenticated = (
+            bool(separator)
+            and scheme.lower() == "bearer"
+            and secrets.compare_digest(token.strip(), self.api_key)
+        )
+        if not authenticated:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or missing bearer token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await call_next(request)
 
 
 def _tokenizer_artifact_path(ir: ModelIR) -> Path:
@@ -469,10 +504,14 @@ def create_app(
     *,
     served_model_name: str = DEFAULT_SERVED_MODEL_NAME,
     enable_thinking: bool = True,
+    api_key: str | None = None,
 ) -> FastAPI:
     """Create an inference app around one already-loaded model."""
     app = FastAPI(title="LLLM inference server")
     generation_lock = asyncio.Lock()
+
+    if api_key is not None:
+        app.add_middleware(ApiKeyMiddleware, api_key=api_key)
 
     async def _create_chat_completion(
         request: ChatCompletionRequest,
@@ -615,6 +654,13 @@ def create_app(
     help="Disable model thinking mode when supported.",
 )
 @click.option(
+    "--api-key",
+    default=None,
+    envvar="LLLM_API_KEY",
+    show_envvar=True,
+    help="Require this bearer token for HTTP requests. Disabled when omitted.",
+)
+@click.option(
     "--verbosity",
     default="warning",
     show_default=True,
@@ -629,6 +675,7 @@ def server_cli(
     local_files_only: bool,
     dtype: str,
     no_think: bool,
+    api_key: str | None,
     verbosity: str,
 ) -> None:
     """Load one model and serve it until Uvicorn exits."""
@@ -643,5 +690,6 @@ def server_cli(
         generator,
         served_model_name=served_model_name,
         enable_thinking=not no_think,
+        api_key=api_key,
     )
     uvicorn.run(app, host=host, port=port, log_level=verbosity)
