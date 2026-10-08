@@ -384,6 +384,11 @@ class GeneratorGPT2(Generator):
         top_p: float | None,
         response_format: object | None,
     ) -> tuple[list[int], int, float]:
+        if top_p is not None:
+            raise NotImplementedError(
+                "top_p sampling is not supported by GeneratorGPT2"
+            )
+
         if response_format is not None:
             raise NotImplementedError(
                 "response_format sampling is not supported by GeneratorGPT2"
