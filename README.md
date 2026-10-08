@@ -23,9 +23,9 @@ Provide a `server` application that act as an inference server provising OpenAI-
 
 Full coverage test suite including **unit-tests** and **functional tests**.
 
-Based on :
-- *Build a Large Language Model from scratch* book by Sebastian Raschka.
-- *Build a reasoning model* book by Sebastian Raschka.
+Initialy based on :
+- *Build a Large Language Model from scratch* - Sebastian Raschka
+- *Build a reasoning model* - Sebastian Raschka
 
 ## Chat
 
